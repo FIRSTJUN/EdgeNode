@@ -1,0 +1,15 @@
+# ROS2 build files
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# Host-side ROS 2 runtime exported from the Docker image for MORAI
+.morai_runtime/
+
+# Python
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+.idea/
