@@ -1,0 +1,25 @@
+services:
+  autonomous:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: morai_autonomous
+
+    network_mode: host
+    ipc: host
+
+    environment:
+      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
+      ROS_LOCALHOST_ONLY: "0"
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+
+    stdin_open: true
+    tty: true
+
+    volumes:
+      - .:/workspace
+
+    working_dir: /workspace
+
+    command: sleep infinity
