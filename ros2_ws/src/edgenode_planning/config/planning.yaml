@@ -1,0 +1,29 @@
+planning_node:
+  ros__parameters:
+    lane_error_topic: /perception/lane_error
+    lane_confidence_topic: /perception/lane_confidence
+    obstacle_topic: /perception/obstacle
+
+    target_error_topic: /planning/target_error
+    target_speed_topic: /planning/target_speed
+    state_topic: /planning/state
+
+    # Conservative first-run speeds for ERP42 in MORAI.
+    cruise_speed_kmh: 2.0
+    avoid_speed_kmh: 1.5
+    lane_lost_speed_kmh: 0.0
+
+    min_lane_confidence: 0.12
+    lane_timeout_sec: 0.6
+    obstacle_timeout_sec: 0.6
+
+    emergency_stop_x_m: 2.5
+    emergency_corridor_half_width_m: 1.0
+
+    avoid_trigger_x_m: 8.0
+    obstacle_consider_abs_y_m: 2.2
+    collision_half_width_m: 0.9
+
+    # Candidate path offsets: left / center / right in LiDAR y-axis convention.
+    candidate_offset_m: 1.0
+    avoid_error_offset_normalized: 0.32

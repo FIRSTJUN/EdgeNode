@@ -1,0 +1,29 @@
+control_node:
+  ros__parameters:
+    target_error_topic: /planning/target_error
+    target_speed_topic: /planning/target_speed
+    ego_status_topic: /ego_vehicle_status
+    ctrl_cmd_topic: /ctrl_cmd
+
+    control_rate_hz: 30.0
+    command_timeout_sec: 0.6
+    status_timeout_sec: 0.6
+
+    # Camera lane_error convention:
+    # +error = desired lane center is to the RIGHT in the image.
+    # If the ERP42 initially steers the wrong way, flip this between +1 and -1.
+    steering_sign: -1.0
+    max_front_steer_normalized: 0.70
+
+    steering_kp: 0.80
+    steering_ki: 0.00
+    steering_kd: 0.12
+    steering_integral_limit: 0.50
+
+    speed_kp: 0.14
+    speed_ki: 0.015
+    speed_kd: 0.02
+    speed_integral_limit: 12.0
+
+    max_accel_cmd: 0.60
+    max_brake_cmd: 0.80

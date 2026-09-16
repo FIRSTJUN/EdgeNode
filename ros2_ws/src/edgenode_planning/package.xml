@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>edgenode_planning</name>
+  <version>0.1.0</version>
+  <description>FSM and lane-offset candidate planner for EdgeNode.</description>
+  <maintainer email="poj285895@gmail.com">EdgeNode Team</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

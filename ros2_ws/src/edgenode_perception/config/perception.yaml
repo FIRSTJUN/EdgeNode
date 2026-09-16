@@ -1,0 +1,36 @@
+perception_node:
+  ros__parameters:
+    camera_topic: /camera/image/compressed
+    lidar_topic: /lidar/points
+
+    lane_error_topic: /perception/lane_error
+    lane_confidence_topic: /perception/lane_confidence
+    obstacle_topic: /perception/obstacle
+    debug_image_topic: /perception/debug/lane_image/compressed
+
+    # Camera lane detector
+    roi_top_y_ratio: 0.55
+    roi_bottom_y_ratio: 0.98
+    roi_top_left_x_ratio: 0.34
+    roi_top_right_x_ratio: 0.66
+    roi_bottom_left_x_ratio: 0.04
+    roi_bottom_right_x_ratio: 0.96
+
+    sliding_windows: 9
+    sliding_margin_px: 55
+    sliding_minpix: 30
+    min_lane_pixels: 180
+    default_lane_width_px_640: 280.0
+    lookahead_y_ratio: 0.80
+
+    # LiDAR obstacle detector (assumes conventional x-forward, y-left, z-up frame)
+    lidar_x_min_m: 0.5
+    lidar_x_max_m: 20.0
+    lidar_abs_y_max_m: 4.0
+    lidar_z_min_m: -0.35
+    lidar_z_max_m: 1.5
+    lidar_max_points: 4500
+
+    dbscan_eps_m: 0.65
+    dbscan_min_samples: 6
+    min_cluster_points: 8
