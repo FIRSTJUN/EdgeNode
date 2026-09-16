@@ -11,5 +11,7 @@ __pycache__/
 *.pyc
 
 # IDE
-.vscode/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
 .idea/
