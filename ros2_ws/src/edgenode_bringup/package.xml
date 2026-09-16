@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>edgenode_bringup</name>
+  <version>0.1.0</version>
+  <description>Launch files for the EdgeNode autonomy baseline.</description>
+  <maintainer email="poj285895@gmail.com">EdgeNode Team</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>edgenode_perception</exec_depend>
+  <exec_depend>edgenode_planning</exec_depend>
+  <exec_depend>edgenode_control</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
