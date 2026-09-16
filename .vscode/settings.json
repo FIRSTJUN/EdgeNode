@@ -1,0 +1,16 @@
+{
+    "python.defaultInterpreterPath": "/usr/bin/python3",
+
+    "terminal.integrated.defaultProfile.linux": "bash",
+
+    "files.exclude": {
+        "**/build": true,
+        "**/install": true,
+        "**/log": true,
+        "**/__pycache__": true
+    },
+
+    "python.analysis.extraPaths": [
+        "/opt/ros/humble/lib/python3.10/site-packages"
+    ]
+}
