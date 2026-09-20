@@ -1,4 +1,5 @@
 import math
+from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import cv2
@@ -10,11 +11,32 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
 
 from sensor_msgs.msg import CompressedImage, PointCloud2, PointField
-from std_msgs.msg import Float32, Float32MultiArray
+from std_msgs.msg import Float32, Float32MultiArray, Int32, String
 
 
 def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
+
+
+@dataclass
+class LaneDiagnostics:
+    # 최소 픽셀 수 검사 전, 슬라이딩 윈도우에서 수집한 좌우 픽셀 수.
+    left_pixel_count: int = 0
+    right_pixel_count: int = 0
+    mode: str = 'NONE'
+    failure_reason: str = 'OK'
+    # 영상 픽셀 좌표. 피팅이 없는 쪽과 계산할 수 없는 폭은 NaN으로 표시한다.
+    left_x_eval: float = float('nan')
+    right_x_eval: float = float('nan')
+    lane_width_eval: float = float('nan')
+    # 실제 피팅 입력의 y 범위와 평가 위치. 피팅이 없으면 NaN / NO_FIT.
+    eval_y: float = float('nan')
+    left_y_min: float = float('nan')
+    left_y_max: float = float('nan')
+    right_y_min: float = float('nan')
+    right_y_max: float = float('nan')
+    left_eval_in_range: str = 'NO_FIT'
+    right_eval_in_range: str = 'NO_FIT'
 
 
 class PerceptionNode(Node):
@@ -99,6 +121,34 @@ class PerceptionNode(Node):
             Float32MultiArray, self.get_parameter('obstacle_topic').value, 10)
         self.debug_pub = self.create_publisher(
             CompressedImage, self.get_parameter('debug_image_topic').value, 3)
+        self.left_pixel_count_pub = self.create_publisher(
+            Int32, '/perception/left_pixel_count', 10)
+        self.right_pixel_count_pub = self.create_publisher(
+            Int32, '/perception/right_pixel_count', 10)
+        self.lane_detection_mode_pub = self.create_publisher(
+            String, '/perception/lane_detection_mode', 10)
+        self.lane_failure_reason_pub = self.create_publisher(
+            String, '/perception/lane_failure_reason', 10)
+        self.left_x_eval_pub = self.create_publisher(
+            Float32, '/perception/left_x_eval', 10)
+        self.right_x_eval_pub = self.create_publisher(
+            Float32, '/perception/right_x_eval', 10)
+        self.lane_width_eval_pub = self.create_publisher(
+            Float32, '/perception/lane_width_eval', 10)
+        self.eval_y_pub = self.create_publisher(
+            Float32, '/perception/eval_y', 10)
+        self.left_y_min_pub = self.create_publisher(
+            Float32, '/perception/left_y_min', 10)
+        self.left_y_max_pub = self.create_publisher(
+            Float32, '/perception/left_y_max', 10)
+        self.right_y_min_pub = self.create_publisher(
+            Float32, '/perception/right_y_min', 10)
+        self.right_y_max_pub = self.create_publisher(
+            Float32, '/perception/right_y_max', 10)
+        self.left_eval_in_range_pub = self.create_publisher(
+            String, '/perception/left_eval_in_range', 10)
+        self.right_eval_in_range_pub = self.create_publisher(
+            String, '/perception/right_eval_in_range', 10)
 
         self.get_logger().info(
             f'Perception ready: camera={self.camera_topic}, lidar={self.lidar_topic}')
@@ -106,14 +156,17 @@ class PerceptionNode(Node):
     # ---------------- Camera / lane ----------------
 
     def camera_callback(self, msg: CompressedImage):
+        diagnostics = LaneDiagnostics()
         image = cv2.imdecode(np.frombuffer(msg.data, dtype=np.uint8), cv2.IMREAD_COLOR)
         if image is None:
             self.publish_lane(0.0, 0.0)
+            diagnostics.failure_reason = 'IMAGE_DECODE_FAILED'
+            self.publish_lane_diagnostics(diagnostics)
             self.get_logger().warning('Failed to decode compressed camera image')
             return
 
         mask = self.make_lane_mask(image)
-        result = self.sliding_window_lane(mask)
+        result = self.sliding_window_lane(mask, diagnostics)
 
         debug = image.copy()
         h, w = image.shape[:2]
@@ -153,6 +206,24 @@ class PerceptionNode(Node):
             out.format = 'jpeg'
             out.data = encoded.tobytes()
             self.debug_pub.publish(out)
+
+        self.publish_lane_diagnostics(diagnostics)
+
+    def publish_lane_diagnostics(self, diagnostics: LaneDiagnostics):
+        self.left_pixel_count_pub.publish(Int32(data=diagnostics.left_pixel_count))
+        self.right_pixel_count_pub.publish(Int32(data=diagnostics.right_pixel_count))
+        self.lane_detection_mode_pub.publish(String(data=diagnostics.mode))
+        self.lane_failure_reason_pub.publish(String(data=diagnostics.failure_reason))
+        self.left_x_eval_pub.publish(Float32(data=diagnostics.left_x_eval))
+        self.right_x_eval_pub.publish(Float32(data=diagnostics.right_x_eval))
+        self.lane_width_eval_pub.publish(Float32(data=diagnostics.lane_width_eval))
+        self.eval_y_pub.publish(Float32(data=diagnostics.eval_y))
+        self.left_y_min_pub.publish(Float32(data=diagnostics.left_y_min))
+        self.left_y_max_pub.publish(Float32(data=diagnostics.left_y_max))
+        self.right_y_min_pub.publish(Float32(data=diagnostics.right_y_min))
+        self.right_y_max_pub.publish(Float32(data=diagnostics.right_y_max))
+        self.left_eval_in_range_pub.publish(String(data=diagnostics.left_eval_in_range))
+        self.right_eval_in_range_pub.publish(String(data=diagnostics.right_eval_in_range))
 
     def publish_lane(self, error: float, confidence: float):
         e = Float32()
@@ -199,8 +270,10 @@ class PerceptionNode(Node):
         return cv2.bitwise_and(combined, roi)
 
     def sliding_window_lane(
-        self, binary: np.ndarray
+        self, binary: np.ndarray, diagnostics: Optional[LaneDiagnostics] = None
     ) -> Optional[Tuple[float, float, float, float]]:
+        if diagnostics is None:
+            diagnostics = LaneDiagnostics()
         h, w = binary.shape
         histogram = np.sum(binary[h // 2:, :] > 0, axis=0).astype(np.float32)
 
@@ -215,6 +288,7 @@ class PerceptionNode(Node):
 
         nonzero_y, nonzero_x = binary.nonzero()
         if len(nonzero_x) == 0:
+            diagnostics.failure_reason = 'EMPTY_MASK'
             return None
 
         nwindows = int(self.get_parameter('sliding_windows').value)
@@ -232,22 +306,35 @@ class PerceptionNode(Node):
             y_low = h - (window + 1) * window_height
             y_high = h - window * window_height
 
+            in_window_y = (nonzero_y >= y_low) & (nonzero_y < y_high)
+            left_mask = (
+                left_available & in_window_y &
+                (nonzero_x >= left_current - margin) &
+                (nonzero_x < left_current + margin)
+            )
+            right_mask = (
+                right_available & in_window_y &
+                (nonzero_x >= right_current - margin) &
+                (nonzero_x < right_current + margin)
+            )
+
+            # 중심을 갱신하기 전에 겹친 픽셀을 더 가까운 쪽에만 배정한다.
+            # 거리가 같으면 양쪽 후보에서 제외한다.
+            overlap = left_mask & right_mask
+            if np.any(overlap):
+                left_distance = np.abs(nonzero_x[overlap] - left_current)
+                right_distance = np.abs(nonzero_x[overlap] - right_current)
+                left_mask[overlap] = left_distance < right_distance
+                right_mask[overlap] = right_distance < left_distance
+
             if left_available:
-                good_left = (
-                    (nonzero_y >= y_low) & (nonzero_y < y_high) &
-                    (nonzero_x >= left_current - margin) &
-                    (nonzero_x < left_current + margin)
-                ).nonzero()[0]
+                good_left = left_mask.nonzero()[0]
                 left_inds.append(good_left)
                 if len(good_left) > minpix:
                     left_current = int(np.mean(nonzero_x[good_left]))
 
             if right_available:
-                good_right = (
-                    (nonzero_y >= y_low) & (nonzero_y < y_high) &
-                    (nonzero_x >= right_current - margin) &
-                    (nonzero_x < right_current + margin)
-                ).nonzero()[0]
+                good_right = right_mask.nonzero()[0]
                 right_inds.append(good_right)
                 if len(good_right) > minpix:
                     right_current = int(np.mean(nonzero_x[good_right]))
@@ -255,17 +342,40 @@ class PerceptionNode(Node):
         left_inds = np.concatenate(left_inds) if left_inds else np.array([], dtype=np.int64)
         right_inds = np.concatenate(right_inds) if right_inds else np.array([], dtype=np.int64)
 
+        diagnostics.left_pixel_count = len(left_inds)
+        diagnostics.right_pixel_count = len(right_inds)
+
         left_fit = None
         right_fit = None
         if left_available and len(left_inds) >= min_lane_pixels:
             left_fit = np.polyfit(nonzero_y[left_inds], nonzero_x[left_inds], 2)
+            diagnostics.left_y_min = float(np.min(nonzero_y[left_inds]))
+            diagnostics.left_y_max = float(np.max(nonzero_y[left_inds]))
         if right_available and len(right_inds) >= min_lane_pixels:
             right_fit = np.polyfit(nonzero_y[right_inds], nonzero_x[right_inds], 2)
+            diagnostics.right_y_min = float(np.min(nonzero_y[right_inds]))
+            diagnostics.right_y_max = float(np.max(nonzero_y[right_inds]))
 
         if left_fit is None and right_fit is None:
+            # 탐색을 시작했지만 픽셀 수가 부족한 경우와 피크가 없는 경우를 구분한다.
+            diagnostics.failure_reason = (
+                'INSUFFICIENT_PIXELS' if left_available or right_available
+                else 'BOTH_FIT_FAILED'
+            )
             return None
 
         lookahead_y = int(h * float(self.get_parameter('lookahead_y_ratio').value))
+        diagnostics.eval_y = float(lookahead_y)
+        if left_fit is not None:
+            diagnostics.left_eval_in_range = (
+                'INSIDE' if diagnostics.left_y_min <= lookahead_y <= diagnostics.left_y_max
+                else 'OUTSIDE'
+            )
+        if right_fit is not None:
+            diagnostics.right_eval_in_range = (
+                'INSIDE' if diagnostics.right_y_min <= lookahead_y <= diagnostics.right_y_max
+                else 'OUTSIDE'
+            )
         lane_width = (
             float(self.get_parameter('default_lane_width_px_640').value) *
             (w / 640.0)
@@ -274,18 +384,51 @@ class PerceptionNode(Node):
         left_x = np.polyval(left_fit, lookahead_y) if left_fit is not None else None
         right_x = np.polyval(right_fit, lookahead_y) if right_fit is not None else None
 
+        # 기하 검사로 반환하더라도 콜백에서 실제 평가 좌표를 발행할 수 있게 보존한다.
+        diagnostics.left_x_eval = float(left_x) if left_x is not None else float('nan')
+        diagnostics.right_x_eval = float(right_x) if right_x is not None else float('nan')
+        diagnostics.lane_width_eval = diagnostics.right_x_eval - diagnostics.left_x_eval
+
+        # 원래 평가 좌표는 진단에 남기되, 관측 y 범위 밖의 fit은 중앙 계산에서 제외한다.
+        if left_fit is not None and not (
+            diagnostics.left_y_min <= lookahead_y <= diagnostics.left_y_max
+        ):
+            left_x = None
+        if right_fit is not None and not (
+            diagnostics.right_y_min <= lookahead_y <= diagnostics.right_y_max
+        ):
+            right_x = None
+        if left_x is None and right_x is None:
+            diagnostics.failure_reason = 'EVAL_OUTSIDE_FIT_RANGE'
+            return None
+
         if left_x is not None and right_x is not None:
             if right_x <= left_x:
+                diagnostics.failure_reason = 'INVALID_LANE_GEOMETRY'
                 return None
+            # 기준 차선 폭의 절반 미만이면 한 표시의 양쪽 경계로 간주한다.
+            # lane_width는 영상 폭에 맞춰 환산된 기존 기본 차선 폭이다.
+            if right_x - left_x < lane_width * 0.5:
+                marker_x = 0.5 * (left_x + right_x)
+                # 정확히 영상 중앙이면 왼쪽 표시로 처리한다.
+                if marker_x <= w * 0.5:
+                    left_x, right_x = marker_x, None
+                else:
+                    left_x, right_x = None, marker_x
+
+        if left_x is not None and right_x is not None:
+            diagnostics.mode = 'BOTH'
             lane_center = 0.5 * (left_x + right_x)
             count_score = min(1.0, (len(left_inds) + len(right_inds)) / 3000.0)
             width_score = math.exp(-abs((right_x - left_x) - lane_width) /
                                    max(1.0, lane_width))
             confidence = clamp(0.55 * count_score + 0.45 * width_score, 0.0, 1.0)
         elif left_x is not None:
+            diagnostics.mode = 'LEFT_ONLY'
             lane_center = left_x + lane_width * 0.5
             confidence = clamp(len(left_inds) / 1800.0, 0.0, 0.55)
         else:
+            diagnostics.mode = 'RIGHT_ONLY'
             lane_center = right_x - lane_width * 0.5
             confidence = clamp(len(right_inds) / 1800.0, 0.0, 0.55)
 
