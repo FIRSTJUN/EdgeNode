@@ -72,9 +72,9 @@ class PerceptionNode(Node):
             ('roi_top_y_ratio', 0.55),
             ('roi_bottom_y_ratio', 0.98),
             ('roi_top_left_x_ratio', 0.0),
-            ('roi_top_right_x_ratio', 0.66),
+            ('roi_top_right_x_ratio', 1.0),
             ('roi_bottom_left_x_ratio', 0.0),
-            ('roi_bottom_right_x_ratio', 0.96),
+            ('roi_bottom_right_x_ratio', 1.0),
             ('default_lane_width_px_640', 280.0),
             ('lookahead_y_ratio', 0.80),
         ]:

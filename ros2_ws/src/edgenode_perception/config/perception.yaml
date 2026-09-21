@@ -12,9 +12,9 @@ perception_node:
     roi_top_y_ratio: 0.55
     roi_bottom_y_ratio: 0.98
     roi_top_left_x_ratio: 0.0
-    roi_top_right_x_ratio: 0.66
+    roi_top_right_x_ratio: 1.0
     roi_bottom_left_x_ratio: 0.0
-    roi_bottom_right_x_ratio: 0.96
+    roi_bottom_right_x_ratio: 1.0
 
     sliding_windows: 9
     sliding_margin_px: 55
