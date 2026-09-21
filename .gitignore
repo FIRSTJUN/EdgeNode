@@ -16,3 +16,5 @@ __pycache__/
 !.vscode/extensions.json
 .idea/
 logs/
+bags/
+debug_frames/

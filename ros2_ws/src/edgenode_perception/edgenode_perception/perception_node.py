@@ -71,9 +71,9 @@ class PerceptionNode(Node):
         for name, default in [
             ('roi_top_y_ratio', 0.55),
             ('roi_bottom_y_ratio', 0.98),
-            ('roi_top_left_x_ratio', 0.34),
+            ('roi_top_left_x_ratio', 0.0),
             ('roi_top_right_x_ratio', 0.66),
-            ('roi_bottom_left_x_ratio', 0.04),
+            ('roi_bottom_left_x_ratio', 0.0),
             ('roi_bottom_right_x_ratio', 0.96),
             ('default_lane_width_px_640', 280.0),
             ('lookahead_y_ratio', 0.80),
@@ -297,50 +297,116 @@ class PerceptionNode(Node):
         min_lane_pixels = int(self.get_parameter('min_lane_pixels').value)
         window_height = max(1, h // nwindows)
 
-        left_current = left_base
-        right_current = right_base
-        left_inds = []
-        right_inds = []
+        def collect_pixels(left_base, right_base, left_available, right_available):
+            left_current = left_base
+            right_current = right_base
+            left_inds = []
+            right_inds = []
 
-        for window in range(nwindows):
-            y_low = h - (window + 1) * window_height
-            y_high = h - window * window_height
+            for window in range(nwindows):
+                y_low = h - (window + 1) * window_height
+                y_high = h - window * window_height
 
-            in_window_y = (nonzero_y >= y_low) & (nonzero_y < y_high)
-            left_mask = (
-                left_available & in_window_y &
-                (nonzero_x >= left_current - margin) &
-                (nonzero_x < left_current + margin)
-            )
-            right_mask = (
-                right_available & in_window_y &
-                (nonzero_x >= right_current - margin) &
-                (nonzero_x < right_current + margin)
-            )
+                in_window_y = (nonzero_y >= y_low) & (nonzero_y < y_high)
+                left_mask = (
+                    left_available & in_window_y &
+                    (nonzero_x >= left_current - margin) &
+                    (nonzero_x < left_current + margin)
+                )
+                right_mask = (
+                    right_available & in_window_y &
+                    (nonzero_x >= right_current - margin) &
+                    (nonzero_x < right_current + margin)
+                )
 
-            # 중심을 갱신하기 전에 겹친 픽셀을 더 가까운 쪽에만 배정한다.
-            # 거리가 같으면 양쪽 후보에서 제외한다.
-            overlap = left_mask & right_mask
-            if np.any(overlap):
-                left_distance = np.abs(nonzero_x[overlap] - left_current)
-                right_distance = np.abs(nonzero_x[overlap] - right_current)
-                left_mask[overlap] = left_distance < right_distance
-                right_mask[overlap] = right_distance < left_distance
+                # 중심을 갱신하기 전에 겹친 픽셀을 더 가까운 쪽에만 배정한다.
+                # 거리가 같으면 양쪽 후보에서 제외한다.
+                overlap = left_mask & right_mask
+                if np.any(overlap):
+                    left_distance = np.abs(nonzero_x[overlap] - left_current)
+                    right_distance = np.abs(nonzero_x[overlap] - right_current)
+                    left_mask[overlap] = left_distance < right_distance
+                    right_mask[overlap] = right_distance < left_distance
 
-            if left_available:
-                good_left = left_mask.nonzero()[0]
-                left_inds.append(good_left)
-                if len(good_left) > minpix:
-                    left_current = int(np.mean(nonzero_x[good_left]))
+                if left_available:
+                    good_left = left_mask.nonzero()[0]
+                    left_inds.append(good_left)
+                    if len(good_left) > minpix:
+                        left_current = int(np.mean(nonzero_x[good_left]))
 
-            if right_available:
-                good_right = right_mask.nonzero()[0]
-                right_inds.append(good_right)
-                if len(good_right) > minpix:
-                    right_current = int(np.mean(nonzero_x[good_right]))
+                if right_available:
+                    good_right = right_mask.nonzero()[0]
+                    right_inds.append(good_right)
+                    if len(good_right) > minpix:
+                        right_current = int(np.mean(nonzero_x[good_right]))
 
-        left_inds = np.concatenate(left_inds) if left_inds else np.array([], dtype=np.int64)
-        right_inds = np.concatenate(right_inds) if right_inds else np.array([], dtype=np.int64)
+            left_inds = np.concatenate(left_inds) if left_inds else np.array([], dtype=np.int64)
+            right_inds = np.concatenate(right_inds) if right_inds else np.array([], dtype=np.int64)
+
+            return left_inds, right_inds
+
+        # 원래 half-max 탐색은 유효 pair가 없을 때의 fallback으로 유지한다.
+        left_inds, right_inds = collect_pixels(
+            left_base, right_base, left_available, right_available)
+
+        # 평평한 꼭대기는 하나의 peak로 취급하며 영상 양 끝도 포함한다.
+        starts = np.r_[0, np.flatnonzero(np.diff(histogram) != 0) + 1]
+        ends = np.r_[starts[1:] - 1, w - 1]
+        peaks = []
+        for start, end in zip(starts, ends):
+            height = histogram[start]
+            if (height > peak_threshold and
+                    (start == 0 or height > histogram[start - 1]) and
+                    (end == w - 1 or height > histogram[end + 1])):
+                peaks.append((int((start + end) // 2), float(height)))
+        # 인접 seed 중복만 줄인다. 이 거리를 차로 폭 판정에 사용하지 않는다.
+        seeds = []
+        for peak, _ in sorted(peaks, key=lambda item: (-item[1], item[0])):
+            if all(abs(peak - seed) >= max(1, margin // 2) for seed in seeds):
+                seeds.append(peak)
+
+        eval_y = int(h * float(self.get_parameter('lookahead_y_ratio').value))
+        expected_width = (
+            float(self.get_parameter('default_lane_width_px_640').value) * w / 640.0)
+
+        def valid_candidate(indices):
+            if len(indices) < min_lane_pixels:
+                return None
+            ys = nonzero_y[indices]
+            if not np.min(ys) <= eval_y <= np.max(ys):
+                return None
+            fit = np.polyfit(ys, nonzero_x[indices], 2)
+            x = float(np.polyval(fit, eval_y))
+            return x if np.isfinite(x) else None
+
+        candidates = []
+        for seed in seeds:
+            indices, _ = collect_pixels(seed, 0, True, False)
+            x = valid_candidate(indices)
+            if x is not None:
+                candidates.append((x, seed))
+        candidates.sort()
+        best_score = None
+        for i, (left_eval, left_seed) in enumerate(candidates):
+            for right_eval, right_seed in candidates[i + 1:]:
+                if not 0.6 * expected_width <= right_eval - left_eval <= 1.4 * expected_width:
+                    continue
+                # 최종 pair에도 기존 중복 픽셀 제거를 적용한 뒤 다시 평가한다.
+                pair_left, pair_right = collect_pixels(left_seed, right_seed, True, True)
+                lx = valid_candidate(pair_left)
+                rx = valid_candidate(pair_right)
+                if lx is None or rx is None:
+                    continue
+                if not 0.6 * expected_width <= rx - lx <= 1.4 * expected_width:
+                    continue
+                # 폭의 일치를 우선하고, 같으면 양쪽 픽셀 수가 충분한 pair를 선택한다.
+                score = (abs(rx - lx - expected_width),
+                         -min(len(pair_left), len(pair_right)),
+                         -(len(pair_left) + len(pair_right)))
+                if best_score is None or score < best_score:
+                    best_score = score
+                    left_inds, right_inds = pair_left, pair_right
+                    left_available = right_available = True
 
         diagnostics.left_pixel_count = len(left_inds)
         diagnostics.right_pixel_count = len(right_inds)
@@ -406,15 +472,22 @@ class PerceptionNode(Node):
             if right_x <= left_x:
                 diagnostics.failure_reason = 'INVALID_LANE_GEOMETRY'
                 return None
-            # 기준 차선 폭의 절반 미만이면 한 표시의 양쪽 경계로 간주한다.
-            # lane_width는 영상 폭에 맞춰 환산된 기존 기본 차선 폭이다.
-            if right_x - left_x < lane_width * 0.5:
+            # 영상 폭에 맞춘 기본 차로 폭의 50%를 최소 유효 폭으로 사용한다.
+            # 640px 영상에서는 140px: 약 25px인 한 표시의 양쪽 경계를 병합한다.
+            min_lane_width = lane_width * 0.5
+            if right_x - left_x < min_lane_width:
                 marker_x = 0.5 * (left_x + right_x)
                 # 정확히 영상 중앙이면 왼쪽 표시로 처리한다.
                 if marker_x <= w * 0.5:
                     left_x, right_x = marker_x, None
                 else:
                     left_x, right_x = None, marker_x
+            elif not 0.6 * lane_width <= right_x - left_x <= 1.4 * lane_width:
+                # fallback의 두 fit도 허용 폭을 벗어나면 단일 경계로만 사용한다.
+                if len(left_inds) >= len(right_inds):
+                    right_x = None
+                else:
+                    left_x = None
 
         if left_x is not None and right_x is not None:
             diagnostics.mode = 'BOTH'

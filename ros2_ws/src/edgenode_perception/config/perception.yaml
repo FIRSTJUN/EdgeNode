@@ -11,9 +11,9 @@ perception_node:
     # Camera lane detector
     roi_top_y_ratio: 0.55
     roi_bottom_y_ratio: 0.98
-    roi_top_left_x_ratio: 0.34
+    roi_top_left_x_ratio: 0.0
     roi_top_right_x_ratio: 0.66
-    roi_bottom_left_x_ratio: 0.04
+    roi_bottom_left_x_ratio: 0.0
     roi_bottom_right_x_ratio: 0.96
 
     sliding_windows: 9
