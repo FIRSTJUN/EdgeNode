@@ -369,37 +369,102 @@ class PerceptionNode(Node):
         expected_width = (
             float(self.get_parameter('default_lane_width_px_640').value) * w / 640.0)
 
-        def valid_candidate(indices):
+        def fit_candidate(indices):
             if len(indices) < min_lane_pixels:
                 return None
             ys = nonzero_y[indices]
-            if not np.min(ys) <= eval_y <= np.max(ys):
-                return None
             fit = np.polyfit(ys, nonzero_x[indices], 2)
-            x = float(np.polyval(fit, eval_y))
-            return x if np.isfinite(x) else None
+            return fit, int(np.min(ys)), int(np.max(ys))
+
+        def evaluate_pair(left_candidate, right_candidate):
+            left_fit, left_y_min, left_y_max = left_candidate
+            right_fit, right_y_min, right_y_max = right_candidate
+            common_y_min = max(left_y_min, right_y_min)
+            common_y_max = min(left_y_max, right_y_max)
+
+            # 위쪽 끝은 ROI 절단과 원근 증폭의 영향을 더 크게 받으므로 8px,
+            # 아래쪽 끝은 5px을 비운다. 둘 다 sliding window 높이보다 충분히
+            # 작으며, 절대 y가 아니라 각 pair의 실제 공통 범위에 적용한다.
+            top_margin = 8
+            bottom_margin = 5
+            safe_y_min = common_y_min + top_margin
+            safe_y_max = common_y_max - bottom_margin
+            if safe_y_min > safe_y_max:
+                return None
+
+            sample_y = np.arange(safe_y_min, safe_y_max + 1, dtype=np.float64)
+            left_x = np.polyval(left_fit, sample_y)
+            right_x = np.polyval(right_fit, sample_y)
+            widths = right_x - left_x
+            valid = (
+                np.isfinite(left_x) & np.isfinite(right_x) &
+                (right_x > left_x) &
+                (widths >= 0.6 * expected_width) &
+                (widths <= 1.4 * expected_width)
+            )
+            if not np.any(valid):
+                return None
+
+            valid_indices = np.flatnonzero(valid)
+            # 영상 좌우 끝 5px 이내는 가능한 경우 피하되, 유일한 유효 구간이면
+            # 관측 범위 내 결과를 버리지 않고 폭 일치도를 기준으로 사용한다.
+            edge_margin = 5.0
+            away_from_edge = (
+                (left_x[valid_indices] >= edge_margin) &
+                (right_x[valid_indices] <= (w - 1) - edge_margin)
+            )
+            if np.any(away_from_edge):
+                valid_indices = valid_indices[away_from_edge]
+
+            best_index = min(
+                valid_indices,
+                key=lambda index: (
+                    abs(widths[index] - expected_width),
+                    abs(sample_y[index] - eval_y),
+                ),
+            )
+            return (
+                int(sample_y[best_index]),
+                float(left_x[best_index]),
+                float(right_x[best_index]),
+            )
 
         candidates = []
+        fixed_candidates = []
         for seed in seeds:
             indices, _ = collect_pixels(seed, 0, True, False)
-            x = valid_candidate(indices)
-            if x is not None:
-                candidates.append((x, seed))
-        candidates.sort()
+            candidate = fit_candidate(indices)
+            if candidate is None:
+                continue
+            candidates.append((seed, candidate))
+            fit, y_min, y_max = candidate
+            if y_min <= eval_y <= y_max:
+                x = float(np.polyval(fit, eval_y))
+                if np.isfinite(x):
+                    fixed_candidates.append((x, seed))
+
+        # 기존 고정-y 선택을 먼저 그대로 수행해 정상 장면의 회귀를 막는다.
+        fixed_candidates.sort()
         best_score = None
-        for i, (left_eval, left_seed) in enumerate(candidates):
-            for right_eval, right_seed in candidates[i + 1:]:
+        adaptive_eval_y = None
+        for i, (left_eval, left_seed) in enumerate(fixed_candidates):
+            for right_eval, right_seed in fixed_candidates[i + 1:]:
                 if not 0.6 * expected_width <= right_eval - left_eval <= 1.4 * expected_width:
                     continue
-                # 최종 pair에도 기존 중복 픽셀 제거를 적용한 뒤 다시 평가한다.
                 pair_left, pair_right = collect_pixels(left_seed, right_seed, True, True)
-                lx = valid_candidate(pair_left)
-                rx = valid_candidate(pair_right)
-                if lx is None or rx is None:
+                left_candidate = fit_candidate(pair_left)
+                right_candidate = fit_candidate(pair_right)
+                if left_candidate is None or right_candidate is None:
                     continue
+                left_fit, left_y_min, left_y_max = left_candidate
+                right_fit, right_y_min, right_y_max = right_candidate
+                if not (left_y_min <= eval_y <= left_y_max and
+                        right_y_min <= eval_y <= right_y_max):
+                    continue
+                lx = float(np.polyval(left_fit, eval_y))
+                rx = float(np.polyval(right_fit, eval_y))
                 if not 0.6 * expected_width <= rx - lx <= 1.4 * expected_width:
                     continue
-                # 폭의 일치를 우선하고, 같으면 양쪽 픽셀 수가 충분한 pair를 선택한다.
                 score = (abs(rx - lx - expected_width),
                          -min(len(pair_left), len(pair_right)),
                          -(len(pair_left) + len(pair_right)))
@@ -407,6 +472,32 @@ class PerceptionNode(Node):
                     best_score = score
                     left_inds, right_inds = pair_left, pair_right
                     left_available = right_available = True
+                    adaptive_eval_y = eval_y
+
+        # 고정 위치에서 유효 pair가 없을 때만 공통 관측 범위를 탐색한다.
+        if best_score is None:
+            candidates.sort(key=lambda item: item[0])
+            for i, (left_seed, _) in enumerate(candidates):
+                for right_seed, _ in candidates[i + 1:]:
+                    pair_left, pair_right = collect_pixels(
+                        left_seed, right_seed, True, True)
+                    left_candidate = fit_candidate(pair_left)
+                    right_candidate = fit_candidate(pair_right)
+                    if left_candidate is None or right_candidate is None:
+                        continue
+                    pair_eval = evaluate_pair(left_candidate, right_candidate)
+                    if pair_eval is None:
+                        continue
+                    pair_eval_y, lx, rx = pair_eval
+                    score = (abs(rx - lx - expected_width),
+                             abs(pair_eval_y - eval_y),
+                             -min(len(pair_left), len(pair_right)),
+                             -(len(pair_left) + len(pair_right)))
+                    if best_score is None or score < best_score:
+                        best_score = score
+                        left_inds, right_inds = pair_left, pair_right
+                        left_available = right_available = True
+                        adaptive_eval_y = pair_eval_y
 
         diagnostics.left_pixel_count = len(left_inds)
         diagnostics.right_pixel_count = len(right_inds)
@@ -430,7 +521,9 @@ class PerceptionNode(Node):
             )
             return None
 
-        lookahead_y = int(h * float(self.get_parameter('lookahead_y_ratio').value))
+        # 유효 pair가 있으면 공통 관측 범위에서 고른 위치를 사용한다. pair가
+        # 없을 때의 single-lane/fallback 동작은 기존 고정 위치를 유지한다.
+        lookahead_y = adaptive_eval_y if adaptive_eval_y is not None else eval_y
         diagnostics.eval_y = float(lookahead_y)
         if left_fit is not None:
             diagnostics.left_eval_in_range = (
