@@ -329,6 +329,44 @@ class PerceptionNode(Node):
                     left_mask[overlap] = left_distance < right_distance
                     right_mask[overlap] = right_distance < left_distance
 
+                # 영상 끝에서 시작한 급경사 경계는 한 window 안에서 수평으로
+                # margin보다 멀리 이동할 수 있다. 끝 15px에 실제 픽셀이 있는
+                # 후보만 같은 y 구간에서 안쪽으로 재중심화해 조각을 이어 간다.
+                def refine_edge_candidate(mask, current, other_available, other_current):
+                    if (not np.any(mask) or
+                            not np.any(nonzero_x[mask] >= w - 15)):
+                        return mask, current
+
+                    refined = mask.copy()
+                    for _ in range(8):
+                        good = refined.nonzero()[0]
+                        if len(good) <= minpix:
+                            break
+                        new_current = int(np.mean(nonzero_x[good]))
+                        expanded = (
+                            in_window_y &
+                            (nonzero_x >= new_current - margin) &
+                            (nonzero_x < new_current + margin)
+                        )
+                        if other_available:
+                            expanded &= (
+                                np.abs(nonzero_x - new_current) <
+                                np.abs(nonzero_x - other_current)
+                            )
+                        updated = refined | expanded
+                        current = new_current
+                        if np.array_equal(updated, refined):
+                            break
+                        refined = updated
+                    return refined, current
+
+                if left_available:
+                    left_mask, left_current = refine_edge_candidate(
+                        left_mask, left_current, right_available, right_current)
+                if right_available:
+                    right_mask, right_current = refine_edge_candidate(
+                        right_mask, right_current, left_available, left_current)
+
                 if left_available:
                     good_left = left_mask.nonzero()[0]
                     left_inds.append(good_left)
@@ -493,7 +531,11 @@ class PerceptionNode(Node):
                     if pair_eval is None:
                         continue
                     pair_eval_y, lx, rx = pair_eval
-                    score = (abs(rx - lx - expected_width),
+                    width_error = abs(rx - lx - expected_width) / max(
+                        1.0, expected_width)
+                    center_error = abs(
+                        0.5 * (lx + rx) - midpoint) / max(1.0, midpoint)
+                    score = (width_error + 0.5 * center_error,
                              abs(pair_eval_y - eval_y),
                              -min(len(pair_left), len(pair_right)),
                              -(len(pair_left) + len(pair_right)))
