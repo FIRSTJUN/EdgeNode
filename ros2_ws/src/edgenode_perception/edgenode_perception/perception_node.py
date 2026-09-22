@@ -77,6 +77,7 @@ class PerceptionNode(Node):
             ('roi_bottom_right_x_ratio', 1.0),
             ('default_lane_width_px_640', 280.0),
             ('lookahead_y_ratio', 0.80),
+            ('adaptive_max_lane_width_ratio', 1.55),
         ]:
             self.declare_parameter(name, default)
         self.declare_parameter('sliding_windows', 9)
@@ -368,6 +369,9 @@ class PerceptionNode(Node):
         eval_y = int(h * float(self.get_parameter('lookahead_y_ratio').value))
         expected_width = (
             float(self.get_parameter('default_lane_width_px_640').value) * w / 640.0)
+        adaptive_max_width = (
+            float(self.get_parameter('adaptive_max_lane_width_ratio').value) *
+            expected_width)
 
         def fit_candidate(indices):
             if len(indices) < min_lane_pixels:
@@ -400,7 +404,7 @@ class PerceptionNode(Node):
                 np.isfinite(left_x) & np.isfinite(right_x) &
                 (right_x > left_x) &
                 (widths >= 0.6 * expected_width) &
-                (widths <= 1.4 * expected_width)
+                (widths <= adaptive_max_width)
             )
             if not np.any(valid):
                 return None
@@ -568,6 +572,12 @@ class PerceptionNode(Node):
             # 영상 폭에 맞춘 기본 차로 폭의 50%를 최소 유효 폭으로 사용한다.
             # 640px 영상에서는 140px: 약 25px인 한 표시의 양쪽 경계를 병합한다.
             min_lane_width = lane_width * 0.5
+            # Pair selection을 통과한 adaptive 결과에는 공통 관측 범위에서
+            # 검증한 상한을 유지한다. pair가 없던 기존 fallback은 1.4배를
+            # 그대로 사용한다.
+            pair_max_width = (
+                adaptive_max_width if best_score is not None
+                else 1.4 * lane_width)
             if right_x - left_x < min_lane_width:
                 marker_x = 0.5 * (left_x + right_x)
                 # 정확히 영상 중앙이면 왼쪽 표시로 처리한다.
@@ -575,7 +585,7 @@ class PerceptionNode(Node):
                     left_x, right_x = marker_x, None
                 else:
                     left_x, right_x = None, marker_x
-            elif not 0.6 * lane_width <= right_x - left_x <= 1.4 * lane_width:
+            elif not 0.6 * lane_width <= right_x - left_x <= pair_max_width:
                 # fallback의 두 fit도 허용 폭을 벗어나면 단일 경계로만 사용한다.
                 if len(left_inds) >= len(right_inds):
                     right_x = None
