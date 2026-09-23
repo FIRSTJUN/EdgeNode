@@ -404,6 +404,20 @@ class PerceptionNode(Node):
             if all(abs(peak - seed) >= max(1, margin // 2) for seed in seeds):
                 seeds.append(peak)
 
+        # 화면 오른쪽 끝으로 나가는 경계는 관측 y 길이가 짧아 histogram
+        # peak가 일반 threshold 바로 아래로 내려갈 수 있다. 마지막 15px에
+        # 실제 지지가 있는 peak만 더 약한 seed threshold로 시작한다.
+        # 이후에는 기존 min_lane_pixels, pair geometry, observed y-range
+        # 검사를 모두 통과해야 하므로 이 단계만으로 차선이 채택되지는 않는다.
+        edge_start = max(midpoint, w - 15)
+        if edge_start < w:
+            edge_peak = int(np.argmax(histogram[edge_start:]) + edge_start)
+            edge_peak_threshold = max(3.0, 0.4 * peak_threshold)
+            if (histogram[edge_peak] >= edge_peak_threshold and
+                    all(abs(edge_peak - seed) >= max(1, margin // 2)
+                        for seed in seeds)):
+                seeds.append(edge_peak)
+
         eval_y = int(h * float(self.get_parameter('lookahead_y_ratio').value))
         expected_width = (
             float(self.get_parameter('default_lane_width_px_640').value) * w / 640.0)
