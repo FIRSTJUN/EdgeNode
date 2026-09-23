@@ -1,6 +1,6 @@
 import math
-from dataclasses import dataclass
-from typing import Optional, Tuple
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -39,6 +39,46 @@ class LaneDiagnostics:
     right_eval_in_range: str = 'NO_FIT'
 
 
+@dataclass
+class ProductionFitSnapshot:
+    """Read-only exposure of the fits already selected by the production path."""
+
+    left_fit: Optional[np.ndarray] = None
+    right_fit: Optional[np.ndarray] = None
+    eval_y: float = float('nan')
+
+
+@dataclass
+class SemanticComponent:
+    """One diagnostic-only connected component and its center-line fit."""
+
+    fit: np.ndarray
+    pixel_count: int
+    y_min: int
+    y_max: int
+    x_eval: float = float('nan')
+
+
+@dataclass
+class SemanticDiagnostics:
+    """Semantic observations that are never consumed by lane selection."""
+
+    eval_y: float = float('nan')
+    yellow_candidate_x: float = float('nan')
+    beige_candidate_x: float = float('nan')
+    neutral_white_candidate_x: float = float('nan')
+    yellow_pixel_count: int = 0
+    beige_pixel_count: int = 0
+    neutral_white_pixel_count: int = 0
+    yellow_components: List[SemanticComponent] = field(default_factory=list)
+    beige_components: List[SemanticComponent] = field(default_factory=list)
+    neutral_white_components: List[SemanticComponent] = field(default_factory=list)
+    right_identity: str = 'NO_RIGHT_FIT'
+    beige_neutral_distance: float = float('nan')
+    right_to_beige_distance: float = float('nan')
+    right_to_neutral_white_distance: float = float('nan')
+
+
 class PerceptionNode(Node):
     """
     Baseline perception:
@@ -66,6 +106,8 @@ class PerceptionNode(Node):
         self.declare_parameter('lane_confidence_topic', '/perception/lane_confidence')
         self.declare_parameter('obstacle_topic', '/perception/obstacle')
         self.declare_parameter('debug_image_topic', '/perception/debug/lane_image/compressed')
+        self.declare_parameter(
+            'identity_debug_image_topic', '/perception/debug/identity_image/compressed')
 
         # Lane parameters
         for name, default in [
@@ -84,6 +126,17 @@ class PerceptionNode(Node):
         self.declare_parameter('sliding_margin_px', 55)
         self.declare_parameter('sliding_minpix', 30)
         self.declare_parameter('min_lane_pixels', 180)
+
+        # Passive semantic diagnostics. These parameters never feed production fits.
+        self.declare_parameter('semantic_diagnostics_enabled', True)
+        self.declare_parameter('diag_neutral_white_max_saturation', 25)
+        self.declare_parameter('diag_beige_hue_min', 5)
+        self.declare_parameter('diag_beige_hue_max', 45)
+        self.declare_parameter('diag_min_component_pixels', 40)
+        self.declare_parameter('diag_min_component_y_span', 20)
+        self.declare_parameter('diag_component_close_kernel', 3)
+        self.declare_parameter('diag_identity_ambiguity_px', 5.0)
+        self.declare_parameter('diag_identity_max_distance_px', 55.0)
 
         # LiDAR parameters
         for name, default in [
@@ -122,6 +175,9 @@ class PerceptionNode(Node):
             Float32MultiArray, self.get_parameter('obstacle_topic').value, 10)
         self.debug_pub = self.create_publisher(
             CompressedImage, self.get_parameter('debug_image_topic').value, 3)
+        self.identity_debug_pub = self.create_publisher(
+            CompressedImage,
+            self.get_parameter('identity_debug_image_topic').value, 3)
         self.left_pixel_count_pub = self.create_publisher(
             Int32, '/perception/left_pixel_count', 10)
         self.right_pixel_count_pub = self.create_publisher(
@@ -151,6 +207,38 @@ class PerceptionNode(Node):
         self.right_eval_in_range_pub = self.create_publisher(
             String, '/perception/right_eval_in_range', 10)
 
+        semantic_names = ('yellow', 'beige', 'neutral_white')
+        self.semantic_candidate_x_pubs = {
+            name: self.create_publisher(
+                Float32, f'/perception/diag/{name}_candidate_x', 10)
+            for name in semantic_names
+        }
+        self.semantic_pixel_count_pubs = {
+            name: self.create_publisher(
+                Int32, f'/perception/diag/{name}_pixel_count', 10)
+            for name in semantic_names
+        }
+        self.semantic_component_count_pubs = {
+            name: self.create_publisher(
+                Int32, f'/perception/diag/{name}_component_count', 10)
+            for name in semantic_names
+        }
+        self.semantic_component_x_pubs = {
+            name: self.create_publisher(
+                Float32MultiArray, f'/perception/diag/{name}_component_x', 10)
+            for name in semantic_names
+        }
+        self.semantic_eval_y_pub = self.create_publisher(
+            Float32, '/perception/diag/eval_y', 10)
+        self.right_identity_pub = self.create_publisher(
+            String, '/perception/diag/right_identity', 10)
+        self.beige_neutral_distance_pub = self.create_publisher(
+            Float32, '/perception/diag/beige_neutral_distance', 10)
+        self.right_to_beige_distance_pub = self.create_publisher(
+            Float32, '/perception/diag/right_to_beige_distance', 10)
+        self.right_to_neutral_white_distance_pub = self.create_publisher(
+            Float32, '/perception/diag/right_to_neutral_white_distance', 10)
+
         self.get_logger().info(
             f'Perception ready: camera={self.camera_topic}, lidar={self.lidar_topic}')
 
@@ -158,16 +246,20 @@ class PerceptionNode(Node):
 
     def camera_callback(self, msg: CompressedImage):
         diagnostics = LaneDiagnostics()
+        fit_snapshot = ProductionFitSnapshot()
         image = cv2.imdecode(np.frombuffer(msg.data, dtype=np.uint8), cv2.IMREAD_COLOR)
         if image is None:
             self.publish_lane(0.0, 0.0)
             diagnostics.failure_reason = 'IMAGE_DECODE_FAILED'
             self.publish_lane_diagnostics(diagnostics)
+            if self.get_parameter('semantic_diagnostics_enabled').value:
+                self.publish_semantic_diagnostics(SemanticDiagnostics())
             self.get_logger().warning('Failed to decode compressed camera image')
             return
 
         mask = self.make_lane_mask(image)
-        result = self.sliding_window_lane(mask, diagnostics)
+        result = self.sliding_window_lane(
+            mask, diagnostics, fit_snapshot=fit_snapshot)
 
         debug = image.copy()
         h, w = image.shape[:2]
@@ -209,6 +301,20 @@ class PerceptionNode(Node):
             self.debug_pub.publish(out)
 
         self.publish_lane_diagnostics(diagnostics)
+        if self.get_parameter('semantic_diagnostics_enabled').value:
+            try:
+                production_right_x = (
+                    diagnostics.right_x_eval
+                    if diagnostics.mode in ('BOTH', 'RIGHT_ONLY')
+                    else float('nan'))
+                semantic = self.analyze_semantic_candidates(
+                    image, diagnostics.eval_y, production_right_x)
+                self.publish_semantic_diagnostics(semantic)
+                self.publish_identity_debug_image(
+                    msg, image, semantic, fit_snapshot, diagnostics)
+            except Exception as exc:  # Diagnostics must not suppress production output.
+                self.get_logger().error(
+                    f'Passive semantic diagnostics failed: {exc}')
 
     def publish_lane_diagnostics(self, diagnostics: LaneDiagnostics):
         self.left_pixel_count_pub.publish(Int32(data=diagnostics.left_pixel_count))
@@ -225,6 +331,394 @@ class PerceptionNode(Node):
         self.right_y_max_pub.publish(Float32(data=diagnostics.right_y_max))
         self.left_eval_in_range_pub.publish(String(data=diagnostics.left_eval_in_range))
         self.right_eval_in_range_pub.publish(String(data=diagnostics.right_eval_in_range))
+
+    def publish_semantic_diagnostics(
+        self, diagnostics: SemanticDiagnostics
+    ):
+        groups = {
+            'yellow': (
+                diagnostics.yellow_candidate_x,
+                diagnostics.yellow_pixel_count,
+                diagnostics.yellow_components,
+            ),
+            'beige': (
+                diagnostics.beige_candidate_x,
+                diagnostics.beige_pixel_count,
+                diagnostics.beige_components,
+            ),
+            'neutral_white': (
+                diagnostics.neutral_white_candidate_x,
+                diagnostics.neutral_white_pixel_count,
+                diagnostics.neutral_white_components,
+            ),
+        }
+        for name, (candidate_x, pixel_count, components) in groups.items():
+            self.semantic_candidate_x_pubs[name].publish(
+                Float32(data=float(candidate_x)))
+            self.semantic_pixel_count_pubs[name].publish(
+                Int32(data=int(pixel_count)))
+            self.semantic_component_count_pubs[name].publish(
+                Int32(data=len(components)))
+            component_x = sorted(
+                float(component.x_eval)
+                for component in components
+                if np.isfinite(component.x_eval)
+            )
+            self.semantic_component_x_pubs[name].publish(
+                Float32MultiArray(data=component_x))
+
+        self.semantic_eval_y_pub.publish(
+            Float32(data=float(diagnostics.eval_y)))
+        self.right_identity_pub.publish(
+            String(data=diagnostics.right_identity))
+        self.beige_neutral_distance_pub.publish(
+            Float32(data=float(diagnostics.beige_neutral_distance)))
+        self.right_to_beige_distance_pub.publish(
+            Float32(data=float(diagnostics.right_to_beige_distance)))
+        self.right_to_neutral_white_distance_pub.publish(
+            Float32(data=float(diagnostics.right_to_neutral_white_distance)))
+
+    def analyze_semantic_candidates(
+        self, image: np.ndarray, production_eval_y: float,
+        production_right_x: float
+    ) -> SemanticDiagnostics:
+        """Observe color/component identities without feeding production selection."""
+        h, w = image.shape[:2]
+        if np.isfinite(production_eval_y):
+            eval_y = float(production_eval_y)
+        else:
+            eval_y = float(
+                int(h * float(self.get_parameter('lookahead_y_ratio').value)))
+
+        hls = cv2.cvtColor(image, cv2.COLOR_BGR2HLS)
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        white = cv2.inRange(
+            hls,
+            np.array([0, 175, 0], dtype=np.uint8),
+            np.array([255, 255, 130], dtype=np.uint8),
+        )
+        yellow = cv2.inRange(
+            hsv,
+            np.array([12, 70, 70], dtype=np.uint8),
+            np.array([42, 255, 255], dtype=np.uint8),
+        )
+
+        roi = self.make_diagnostic_roi(h, w)
+        white = cv2.bitwise_and(white, roi)
+        yellow = cv2.bitwise_and(yellow, roi)
+
+        close_kernel = int(
+            self.get_parameter('diag_component_close_kernel').value)
+        if close_kernel > 1:
+            if close_kernel % 2 == 0:
+                close_kernel += 1
+            kernel = np.ones((close_kernel, close_kernel), dtype=np.uint8)
+            white = cv2.morphologyEx(white, cv2.MORPH_CLOSE, kernel)
+            yellow = cv2.morphologyEx(yellow, cv2.MORPH_CLOSE, kernel)
+            white = cv2.bitwise_and(white, roi)
+            yellow = cv2.bitwise_and(yellow, roi)
+
+        yellow_components = self.fit_semantic_components(yellow, eval_y)
+        white_components = self.classify_white_components(
+            white, hsv, eval_y)
+
+        diagnostics = SemanticDiagnostics(
+            eval_y=eval_y,
+            yellow_components=yellow_components,
+            beige_components=white_components['beige'],
+            neutral_white_components=white_components['neutral_white'],
+        )
+        diagnostics.yellow_pixel_count = sum(
+            component.pixel_count for component in yellow_components)
+        diagnostics.beige_pixel_count = sum(
+            component.pixel_count
+            for component in diagnostics.beige_components)
+        diagnostics.neutral_white_pixel_count = sum(
+            component.pixel_count
+            for component in diagnostics.neutral_white_components)
+
+        diagnostics.yellow_candidate_x = self.primary_component_x(
+            diagnostics.yellow_components)
+        diagnostics.beige_candidate_x = self.primary_component_x(
+            diagnostics.beige_components)
+        diagnostics.neutral_white_candidate_x = self.primary_component_x(
+            diagnostics.neutral_white_components)
+
+        beige_x = diagnostics.beige_candidate_x
+        neutral_x = diagnostics.neutral_white_candidate_x
+        if np.isfinite(beige_x) and np.isfinite(neutral_x):
+            diagnostics.beige_neutral_distance = float(neutral_x - beige_x)
+
+        self.assign_right_identity(
+            diagnostics, float(production_right_x))
+        return diagnostics
+
+    def make_diagnostic_roi(self, h: int, w: int) -> np.ndarray:
+        """Build an ROI equivalent to production without reusing its binary mask."""
+        top_y = int(h * float(self.get_parameter('roi_top_y_ratio').value))
+        bot_y = int(h * float(self.get_parameter('roi_bottom_y_ratio').value))
+        tl = int(w * float(self.get_parameter('roi_top_left_x_ratio').value))
+        tr = int(w * float(self.get_parameter('roi_top_right_x_ratio').value))
+        bl = int(w * float(self.get_parameter('roi_bottom_left_x_ratio').value))
+        br = int(w * float(self.get_parameter('roi_bottom_right_x_ratio').value))
+        roi = np.zeros((h, w), dtype=np.uint8)
+        polygon = np.array(
+            [[(bl, bot_y), (tl, top_y), (tr, top_y), (br, bot_y)]],
+            dtype=np.int32,
+        )
+        cv2.fillPoly(roi, polygon, 255)
+        return roi
+
+    def component_geometry(
+        self, labels: np.ndarray, stats: np.ndarray, label: int,
+        eval_y: float
+    ) -> Optional[Tuple[SemanticComponent, np.ndarray]]:
+        x, y, width, height, area = stats[label]
+        min_pixels = int(
+            self.get_parameter('diag_min_component_pixels').value)
+        min_y_span = int(
+            self.get_parameter('diag_min_component_y_span').value)
+        if area < min_pixels or height - 1 < min_y_span:
+            return None
+
+        local_labels = labels[y:y + height, x:x + width]
+        local_y, local_x = np.nonzero(local_labels == label)
+        pixel_y = local_y + y
+        pixel_x = local_x + x
+        if len(pixel_x) < min_pixels:
+            return None
+
+        fit = np.polyfit(pixel_y, pixel_x, 2)
+        y_min = int(np.min(pixel_y))
+        y_max = int(np.max(pixel_y))
+        x_eval = float('nan')
+        if y_min <= eval_y <= y_max:
+            evaluated = float(np.polyval(fit, eval_y))
+            if np.isfinite(evaluated):
+                x_eval = evaluated
+        return (
+            SemanticComponent(
+                fit=fit,
+                pixel_count=int(len(pixel_x)),
+                y_min=y_min,
+                y_max=y_max,
+                x_eval=x_eval,
+            ),
+            (local_labels == label),
+        )
+
+    def fit_semantic_components(
+        self, mask: np.ndarray, eval_y: float
+    ) -> List[SemanticComponent]:
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(
+            mask, connectivity=8)
+        components = []
+        for label in range(1, count):
+            geometry = self.component_geometry(
+                labels, stats, label, eval_y)
+            if geometry is not None:
+                component, _ = geometry
+                components.append(component)
+        return components
+
+    def classify_white_components(
+        self, mask: np.ndarray, hsv: np.ndarray, eval_y: float
+    ):
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(
+            mask, connectivity=8)
+        classified = {'beige': [], 'neutral_white': []}
+        neutral_max_s = int(
+            self.get_parameter('diag_neutral_white_max_saturation').value)
+        beige_hue_min = int(
+            self.get_parameter('diag_beige_hue_min').value)
+        beige_hue_max = int(
+            self.get_parameter('diag_beige_hue_max').value)
+
+        for label in range(1, count):
+            geometry = self.component_geometry(
+                labels, stats, label, eval_y)
+            if geometry is None:
+                continue
+            component, local_component = geometry
+            x, y, width, height, _ = stats[label]
+            local_hsv = hsv[y:y + height, x:x + width]
+            median_s = float(np.median(local_hsv[:, :, 1][local_component]))
+            median_h = float(np.median(local_hsv[:, :, 0][local_component]))
+            if median_s <= neutral_max_s:
+                classified['neutral_white'].append(component)
+            elif beige_hue_min <= median_h <= beige_hue_max:
+                classified['beige'].append(component)
+        return classified
+
+    @staticmethod
+    def primary_component_x(
+        components: List[SemanticComponent]
+    ) -> float:
+        valid = [
+            component for component in components
+            if np.isfinite(component.x_eval)
+        ]
+        if not valid:
+            return float('nan')
+        primary = max(
+            valid,
+            key=lambda component: (
+                component.y_max - component.y_min,
+                component.pixel_count,
+            ),
+        )
+        return float(primary.x_eval)
+
+    def assign_right_identity(
+        self, diagnostics: SemanticDiagnostics, production_right_x: float
+    ):
+        if not np.isfinite(production_right_x):
+            diagnostics.right_identity = 'NO_RIGHT_FIT'
+            return
+
+        def nearest_distance(components):
+            values = [
+                abs(float(component.x_eval) - production_right_x)
+                for component in components
+                if np.isfinite(component.x_eval)
+            ]
+            return min(values) if values else float('nan')
+
+        beige_distance = nearest_distance(diagnostics.beige_components)
+        neutral_distance = nearest_distance(
+            diagnostics.neutral_white_components)
+        diagnostics.right_to_beige_distance = float(beige_distance)
+        diagnostics.right_to_neutral_white_distance = float(neutral_distance)
+
+        candidates = []
+        if np.isfinite(beige_distance):
+            candidates.append(('BEIGE', beige_distance))
+        if np.isfinite(neutral_distance):
+            candidates.append(('NEUTRAL_WHITE', neutral_distance))
+        if not candidates:
+            diagnostics.right_identity = 'UNRESOLVED'
+            return
+
+        candidates.sort(key=lambda item: item[1])
+        max_distance = float(
+            self.get_parameter('diag_identity_max_distance_px').value)
+        if candidates[0][1] > max_distance:
+            diagnostics.right_identity = 'UNRESOLVED'
+            return
+
+        ambiguity = float(
+            self.get_parameter('diag_identity_ambiguity_px').value)
+        if (len(candidates) > 1 and
+                abs(candidates[0][1] - candidates[1][1]) <= ambiguity):
+            diagnostics.right_identity = 'AMBIGUOUS'
+        else:
+            diagnostics.right_identity = candidates[0][0]
+
+    @staticmethod
+    def draw_fit(
+        image: np.ndarray, component: SemanticComponent,
+        color: Tuple[int, int, int], thickness: int
+    ):
+        sample_y = np.arange(
+            component.y_min, component.y_max + 1, dtype=np.float64)
+        sample_x = np.polyval(component.fit, sample_y)
+        valid = (
+            np.isfinite(sample_x) &
+            (sample_x >= 0) &
+            (sample_x < image.shape[1])
+        )
+        if not np.any(valid):
+            return
+        points = np.column_stack(
+            (sample_x[valid].astype(np.int32),
+             sample_y[valid].astype(np.int32)))
+        cv2.polylines(image, [points], False, color, thickness)
+
+    def publish_identity_debug_image(
+        self, source_msg: CompressedImage, image: np.ndarray,
+        semantic: SemanticDiagnostics, fit_snapshot: ProductionFitSnapshot,
+        production: LaneDiagnostics
+    ):
+        debug = image.copy()
+        colors = {
+            'yellow': (0, 255, 255),
+            'beige': (0, 150, 255),
+            'neutral_white': (255, 255, 0),
+        }
+        for component in semantic.yellow_components:
+            self.draw_fit(debug, component, colors['yellow'], 3)
+        for component in semantic.beige_components:
+            self.draw_fit(debug, component, colors['beige'], 3)
+        for component in semantic.neutral_white_components:
+            self.draw_fit(debug, component, colors['neutral_white'], 3)
+
+        def draw_production_fit(fit, y_min, y_max, color):
+            if fit is None or not np.isfinite(y_min) or not np.isfinite(y_max):
+                return
+            component = SemanticComponent(
+                fit=fit,
+                pixel_count=0,
+                y_min=int(y_min),
+                y_max=int(y_max),
+            )
+            self.draw_fit(debug, component, color, 4)
+
+        draw_production_fit(
+            fit_snapshot.left_fit,
+            production.left_y_min,
+            production.left_y_max,
+            (0, 255, 0),
+        )
+        draw_production_fit(
+            fit_snapshot.right_fit,
+            production.right_y_min,
+            production.right_y_max,
+            (0, 0, 255),
+        )
+
+        eval_y = int(round(semantic.eval_y))
+        if 0 <= eval_y < debug.shape[0]:
+            cv2.line(
+                debug, (0, eval_y), (debug.shape[1] - 1, eval_y),
+                (255, 0, 255), 1)
+            candidates = (
+                (semantic.yellow_candidate_x, colors['yellow']),
+                (semantic.beige_candidate_x, colors['beige']),
+                (semantic.neutral_white_candidate_x,
+                 colors['neutral_white']),
+            )
+            for candidate_x, color in candidates:
+                if np.isfinite(candidate_x):
+                    cv2.circle(
+                        debug, (int(round(candidate_x)), eval_y),
+                        7, color, -1)
+
+        legend = [
+            ('YELLOW candidate', colors['yellow']),
+            ('BEIGE candidate', colors['beige']),
+            ('NEUTRAL WHITE candidate', colors['neutral_white']),
+            ('production LEFT fit', (0, 255, 0)),
+            ('production RIGHT fit', (0, 0, 255)),
+            (f'eval_y={semantic.eval_y:.0f} '
+             f'right={semantic.right_identity}', (255, 0, 255)),
+        ]
+        for index, (label, color) in enumerate(legend):
+            y = 24 + index * 23
+            cv2.putText(
+                debug, label, (12, y), cv2.FONT_HERSHEY_SIMPLEX,
+                0.55, (0, 0, 0), 4)
+            cv2.putText(
+                debug, label, (12, y), cv2.FONT_HERSHEY_SIMPLEX,
+                0.55, color, 2)
+
+        ok, encoded = cv2.imencode(
+            '.jpg', debug, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        if ok:
+            out = CompressedImage()
+            out.header = source_msg.header
+            out.format = 'jpeg'
+            out.data = encoded.tobytes()
+            self.identity_debug_pub.publish(out)
 
     def publish_lane(self, error: float, confidence: float):
         e = Float32()
@@ -271,7 +765,8 @@ class PerceptionNode(Node):
         return cv2.bitwise_and(combined, roi)
 
     def sliding_window_lane(
-        self, binary: np.ndarray, diagnostics: Optional[LaneDiagnostics] = None
+        self, binary: np.ndarray, diagnostics: Optional[LaneDiagnostics] = None,
+        fit_snapshot: Optional[ProductionFitSnapshot] = None,
     ) -> Optional[Tuple[float, float, float, float]]:
         if diagnostics is None:
             diagnostics = LaneDiagnostics()
@@ -572,6 +1067,9 @@ class PerceptionNode(Node):
             right_fit = np.polyfit(nonzero_y[right_inds], nonzero_x[right_inds], 2)
             diagnostics.right_y_min = float(np.min(nonzero_y[right_inds]))
             diagnostics.right_y_max = float(np.max(nonzero_y[right_inds]))
+        if fit_snapshot is not None:
+            fit_snapshot.left_fit = left_fit
+            fit_snapshot.right_fit = right_fit
 
         if left_fit is None and right_fit is None:
             # 탐색을 시작했지만 픽셀 수가 부족한 경우와 피크가 없는 경우를 구분한다.
@@ -585,6 +1083,8 @@ class PerceptionNode(Node):
         # 없을 때의 single-lane/fallback 동작은 기존 고정 위치를 유지한다.
         lookahead_y = adaptive_eval_y if adaptive_eval_y is not None else eval_y
         diagnostics.eval_y = float(lookahead_y)
+        if fit_snapshot is not None:
+            fit_snapshot.eval_y = float(lookahead_y)
         if left_fit is not None:
             diagnostics.left_eval_in_range = (
                 'INSIDE' if diagnostics.left_y_min <= lookahead_y <= diagnostics.left_y_max

@@ -7,6 +7,7 @@ perception_node:
     lane_confidence_topic: /perception/lane_confidence
     obstacle_topic: /perception/obstacle
     debug_image_topic: /perception/debug/lane_image/compressed
+    identity_debug_image_topic: /perception/debug/identity_image/compressed
 
     # Camera lane detector
     roi_top_y_ratio: 0.55
@@ -23,6 +24,19 @@ perception_node:
     default_lane_width_px_640: 280.0
     lookahead_y_ratio: 0.80
     adaptive_max_lane_width_ratio: 1.55
+
+    # Passive semantic diagnostics only; never consumed by lane selection.
+    semantic_diagnostics_enabled: true
+    # Component-median HSV classification, selected from Bag B-F distributions.
+    diag_neutral_white_max_saturation: 25
+    diag_beige_hue_min: 5
+    diag_beige_hue_max: 45
+    diag_min_component_pixels: 40
+    diag_min_component_y_span: 20
+    diag_component_close_kernel: 3
+    diag_identity_ambiguity_px: 5.0
+    # Observation radius only; equal to the existing 55 px sliding margin.
+    diag_identity_max_distance_px: 55.0
 
     # LiDAR obstacle detector (assumes conventional x-forward, y-left, z-up frame)
     lidar_x_min_m: 0.5
