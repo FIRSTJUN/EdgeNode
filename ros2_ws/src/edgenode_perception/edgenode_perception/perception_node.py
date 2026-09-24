@@ -11,7 +11,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
 
 from sensor_msgs.msg import CompressedImage, PointCloud2, PointField
-from std_msgs.msg import Float32, Float32MultiArray, Int32, String
+from std_msgs.msg import Bool, Float32, Float32MultiArray, Int32, String
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -101,11 +101,18 @@ class ShadowCandidateEvaluation:
     sample_y: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.float64))
     score_parts: Dict[str, float] = field(default_factory=dict)
+    yellow_component: Optional[SemanticComponent] = None
+    neutral_component: Optional[SemanticComponent] = None
+    yellow_order_fraction: float = 0.0
+    neutral_order_fraction: float = 0.0
+    bounds_fraction: float = 0.0
+    common_y_span: float = 0.0
+    neutral_common_y_span: float = 0.0
 
 
 @dataclass
 class ShadowRightDiagnostics:
-    """Diagnostic-only right-boundary selection; never consumed by production."""
+    """Shadow selection consumed only by the explicit experimental gate."""
 
     right_x: float = float('nan')
     eval_y: float = float('nan')
@@ -119,6 +126,28 @@ class ShadowRightDiagnostics:
     lane_width: float = float('nan')
     temporal_delta: float = float('nan')
     evaluations: List[ShadowCandidateEvaluation] = field(default_factory=list)
+
+
+@dataclass
+class ExperimentalShadowOverrideDiagnostics:
+    """A/B-only result; the original LaneDiagnostics remain untouched."""
+
+    active: bool = False
+    reason: str = 'FEATURE_DISABLED'
+    original_right_x: float = float('nan')
+    selected_right_x: float = float('nan')
+    right_shift_px: float = float('nan')
+    original_lane_error: float = float('nan')
+    selected_lane_error: float = float('nan')
+    lane_error_delta: float = float('nan')
+    original_lane_center: float = float('nan')
+    selected_lane_center: float = float('nan')
+    lane_center_shift_px: float = float('nan')
+    original_lane_width: float = float('nan')
+    selected_lane_width: float = float('nan')
+    selected_right_fit: Optional[np.ndarray] = None
+    selected_right_y_min: float = float('nan')
+    selected_right_y_max: float = float('nan')
 
 
 class PerceptionNode(Node):
@@ -182,7 +211,7 @@ class PerceptionNode(Node):
         self.declare_parameter('diag_identity_ambiguity_px', 5.0)
         self.declare_parameter('diag_identity_max_distance_px', 55.0)
 
-        # Shadow right selector. These values and state never feed production.
+        # Shadow selector; production can consume it only through the default-off gate.
         self.declare_parameter('shadow_right_selector_enabled', True)
         self.declare_parameter('shadow_debug_image_enabled', False)
         self.declare_parameter('shadow_min_common_y_span_px', 8)
@@ -201,6 +230,25 @@ class PerceptionNode(Node):
         self.declare_parameter('shadow_y_span_weight', 0.10)
         self.declare_parameter('shadow_bounds_weight', 0.10)
         self.declare_parameter('shadow_temporal_weight', 0.05)
+
+        # Strict production A/B gate. It is intentionally disabled by default.
+        self.declare_parameter(
+            'experimental_shadow_right_override_enabled', False)
+        self.declare_parameter('experimental_shadow_min_score', 0.85)
+        self.declare_parameter(
+            'experimental_shadow_require_neutral_order', True)
+        self.declare_parameter(
+            'experimental_shadow_max_temporal_delta_px', 35.0)
+        self.declare_parameter(
+            'experimental_shadow_min_common_y_span_px', 17)
+        self.declare_parameter(
+            'experimental_shadow_min_lane_width_ratio', 0.90)
+        self.declare_parameter(
+            'experimental_shadow_max_lane_width_ratio', 1.25)
+        self.declare_parameter(
+            'experimental_shadow_confirm_frames', 4)
+        self.declare_parameter(
+            'experimental_shadow_slew_rate_px_per_frame', 10.0)
 
         # LiDAR parameters
         for name, default in [
@@ -328,10 +376,49 @@ class PerceptionNode(Node):
         self.shadow_component_id_pub = self.create_publisher(
             Int32, '/perception/diag/shadow_right_component_id', 10)
 
+        experimental_float_topics = {
+            'original_right_x':
+                '/perception/diag/experimental_original_right_x',
+            'selected_right_x':
+                '/perception/diag/experimental_selected_right_x',
+            'right_shift_px':
+                '/perception/diag/experimental_right_shift_px',
+            'original_lane_error':
+                '/perception/diag/experimental_original_lane_error',
+            'selected_lane_error':
+                '/perception/diag/experimental_selected_lane_error',
+            'lane_error_delta':
+                '/perception/diag/experimental_lane_error_delta',
+            'original_lane_center':
+                '/perception/diag/experimental_original_lane_center',
+            'selected_lane_center':
+                '/perception/diag/experimental_selected_lane_center',
+            'lane_center_shift_px':
+                '/perception/diag/experimental_lane_center_shift_px',
+            'original_lane_width':
+                '/perception/diag/experimental_original_lane_width',
+            'selected_lane_width':
+                '/perception/diag/experimental_selected_lane_width',
+        }
+        self.experimental_float_pubs = {
+            name: self.create_publisher(Float32, topic, 10)
+            for name, topic in experimental_float_topics.items()
+        }
+        self.experimental_override_active_pub = self.create_publisher(
+            Bool, '/perception/diag/experimental_shadow_override_active', 10)
+        self.experimental_override_reason_pub = self.create_publisher(
+            String, '/perception/diag/experimental_shadow_override_reason', 10)
+
         # Deliberately separate from every production temporal/fit value.
         self.shadow_previous_right_x = float('nan')
         self.shadow_previous_eval_y = float('nan')
         self.shadow_last_stamp_ns: Optional[int] = None
+
+        # Experimental override state is deliberately separate from
+        # production and diagnostic shadow continuity.
+        self.experimental_shadow_confirm_count = 0
+        self.experimental_shadow_override_active_state = False
+        self.experimental_shadow_previous_output_right_x = float('nan')
 
         self.get_logger().info(
             f'Perception ready: camera={self.camera_topic}, lidar={self.lidar_topic}')
@@ -346,6 +433,9 @@ class PerceptionNode(Node):
             self.publish_lane(0.0, 0.0)
             diagnostics.failure_reason = 'IMAGE_DECODE_FAILED'
             self.publish_lane_diagnostics(diagnostics)
+            _, experimental = self.evaluate_experimental_shadow_override(
+                None, diagnostics, ShadowRightDiagnostics(), 0)
+            self.publish_experimental_shadow_override_diagnostics(experimental)
             if self.get_parameter('semantic_diagnostics_enabled').value:
                 self.publish_semantic_diagnostics(SemanticDiagnostics())
                 if self.get_parameter('shadow_right_selector_enabled').value:
@@ -356,20 +446,50 @@ class PerceptionNode(Node):
             return
 
         mask = self.make_lane_mask(image)
-        result = self.sliding_window_lane(
+        original_result = self.sliding_window_lane(
             mask, diagnostics, fit_snapshot=fit_snapshot)
 
-        debug = image.copy()
         h, w = image.shape[:2]
+        semantic = SemanticDiagnostics()
+        shadow = ShadowRightDiagnostics()
+        if self.get_parameter('semantic_diagnostics_enabled').value:
+            try:
+                production_right_x = (
+                    diagnostics.right_x_eval
+                    if diagnostics.mode in ('BOTH', 'RIGHT_ONLY')
+                    else float('nan'))
+                semantic = self.analyze_semantic_candidates(
+                    image, diagnostics.eval_y, production_right_x)
+                self.publish_semantic_diagnostics(semantic)
+                self.publish_identity_debug_image(
+                    msg, image, semantic, fit_snapshot, diagnostics)
+                if self.get_parameter('shadow_right_selector_enabled').value:
+                    self.update_shadow_sequence_stamp(msg)
+                    shadow = self.select_shadow_right(semantic, w)
+                    self.publish_shadow_right_diagnostics(shadow)
+                    if self.get_parameter('shadow_debug_image_enabled').value:
+                        self.publish_shadow_debug_image(
+                            msg, image, semantic, shadow, fit_snapshot,
+                            diagnostics)
+            except Exception as exc:  # Diagnostics must not suppress production output.
+                self.get_logger().error(
+                    f'Passive semantic diagnostics failed: {exc}')
+
+        selected_result, experimental = (
+            self.evaluate_experimental_shadow_override(
+                original_result, diagnostics, shadow, w))
+        self.publish_experimental_shadow_override_diagnostics(experimental)
+
+        debug = image.copy()
         cv2.line(debug, (w // 2, 0), (w // 2, h - 1), (0, 0, 255), 2)
 
-        if result is None:
+        if selected_result is None:
             self.publish_lane(0.0, 0.0)
             cv2.putText(
                 debug, 'LANE LOST', (20, 40),
                 cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
         else:
-            lane_error, confidence, lane_center_x, lookahead_y = result
+            lane_error, confidence, lane_center_x, lookahead_y = selected_result
             self.publish_lane(lane_error, confidence)
             cv2.circle(
                 debug, (int(lane_center_x), int(lookahead_y)),
@@ -398,29 +518,8 @@ class PerceptionNode(Node):
             out.data = encoded.tobytes()
             self.debug_pub.publish(out)
 
+        # These retain their original production-only meaning even when overridden.
         self.publish_lane_diagnostics(diagnostics)
-        if self.get_parameter('semantic_diagnostics_enabled').value:
-            try:
-                production_right_x = (
-                    diagnostics.right_x_eval
-                    if diagnostics.mode in ('BOTH', 'RIGHT_ONLY')
-                    else float('nan'))
-                semantic = self.analyze_semantic_candidates(
-                    image, diagnostics.eval_y, production_right_x)
-                self.publish_semantic_diagnostics(semantic)
-                self.publish_identity_debug_image(
-                    msg, image, semantic, fit_snapshot, diagnostics)
-                if self.get_parameter('shadow_right_selector_enabled').value:
-                    self.update_shadow_sequence_stamp(msg)
-                    shadow = self.select_shadow_right(semantic, w)
-                    self.publish_shadow_right_diagnostics(shadow)
-                    if self.get_parameter('shadow_debug_image_enabled').value:
-                        self.publish_shadow_debug_image(
-                            msg, image, semantic, shadow, fit_snapshot,
-                            diagnostics)
-            except Exception as exc:  # Diagnostics must not suppress production output.
-                self.get_logger().error(
-                    f'Passive semantic diagnostics failed: {exc}')
 
     def publish_lane_diagnostics(self, diagnostics: LaneDiagnostics):
         self.left_pixel_count_pub.publish(Int32(data=diagnostics.left_pixel_count))
@@ -735,9 +834,16 @@ class PerceptionNode(Node):
         self.shadow_previous_right_x = float('nan')
         self.shadow_previous_eval_y = float('nan')
 
+    def reset_experimental_shadow_override_state(self):
+        """Reset only the default-off experimental production override state."""
+        self.experimental_shadow_confirm_count = 0
+        self.experimental_shadow_override_active_state = False
+        self.experimental_shadow_previous_output_right_x = float('nan')
+
     def reset_shadow_state(self):
-        """Reset only diagnostic shadow continuity between sequences."""
+        """Reset shadow diagnostic and experimental state between sequences."""
         self.clear_shadow_continuity()
+        self.reset_experimental_shadow_override_state()
         self.shadow_last_stamp_ns = None
 
     def update_shadow_sequence_stamp(self, msg: CompressedImage):
@@ -773,10 +879,294 @@ class PerceptionNode(Node):
         self.shadow_component_id_pub.publish(
             Int32(data=diagnostics.component_id))
 
+    def publish_experimental_shadow_override_diagnostics(
+        self, diagnostics: ExperimentalShadowOverrideDiagnostics
+    ):
+        values = {
+            'original_right_x': diagnostics.original_right_x,
+            'selected_right_x': diagnostics.selected_right_x,
+            'right_shift_px': diagnostics.right_shift_px,
+            'original_lane_error': diagnostics.original_lane_error,
+            'selected_lane_error': diagnostics.selected_lane_error,
+            'lane_error_delta': diagnostics.lane_error_delta,
+            'original_lane_center': diagnostics.original_lane_center,
+            'selected_lane_center': diagnostics.selected_lane_center,
+            'lane_center_shift_px': diagnostics.lane_center_shift_px,
+            'original_lane_width': diagnostics.original_lane_width,
+            'selected_lane_width': diagnostics.selected_lane_width,
+        }
+        for name, value in values.items():
+            self.experimental_float_pubs[name].publish(
+                Float32(data=float(value)))
+        self.experimental_override_active_pub.publish(
+            Bool(data=diagnostics.active))
+        self.experimental_override_reason_pub.publish(
+            String(data=diagnostics.reason))
+
+    def evaluate_experimental_shadow_override(
+        self, original_result: Optional[Tuple[float, float, float, float]],
+        production: LaneDiagnostics, shadow: ShadowRightDiagnostics,
+        image_width: int,
+    ) -> Tuple[
+        Optional[Tuple[float, float, float, float]],
+        ExperimentalShadowOverrideDiagnostics,
+    ]:
+        """Apply a strict, fail-closed A/B gate without mutating production data."""
+        diagnostics = ExperimentalShadowOverrideDiagnostics(
+            original_right_x=float(production.right_x_eval),
+            selected_right_x=float(production.right_x_eval),
+            right_shift_px=0.0 if np.isfinite(production.right_x_eval)
+            else float('nan'),
+            original_lane_width=float(production.lane_width_eval),
+            selected_lane_width=float(production.lane_width_eval),
+        )
+        if original_result is not None:
+            original_error, _, original_center, _ = original_result
+            diagnostics.original_lane_error = float(original_error)
+            diagnostics.selected_lane_error = float(original_error)
+            diagnostics.lane_error_delta = 0.0
+            diagnostics.original_lane_center = float(original_center)
+            diagnostics.selected_lane_center = float(original_center)
+            diagnostics.lane_center_shift_px = 0.0
+
+        def fallback(reason: str, reset_state: bool = True):
+            diagnostics.reason = reason
+
+            if reset_state:
+                self.experimental_shadow_confirm_count = 0
+                self.experimental_shadow_override_active_state = False
+
+            if np.isfinite(production.right_x_eval):
+                self.experimental_shadow_previous_output_right_x = float(
+                    production.right_x_eval)
+            else:
+                self.experimental_shadow_previous_output_right_x = float('nan')
+
+            return original_result, diagnostics
+
+        if not self.get_parameter(
+                'experimental_shadow_right_override_enabled').value:
+            return fallback('FEATURE_DISABLED')
+
+        if not self.get_parameter('semantic_diagnostics_enabled').value:
+            return fallback('SEMANTIC_DIAGNOSTICS_DISABLED')
+
+        if not self.get_parameter('shadow_right_selector_enabled').value:
+            return fallback('SHADOW_SELECTOR_DISABLED')
+
+        if original_result is None:
+            return fallback('NO_PRODUCTION_RESULT')
+
+        if production.mode != 'BOTH':
+            return fallback('PRODUCTION_NOT_BOTH')
+
+        if shadow.status != 'VALID' or shadow.rejection_reason != 'OK':
+            return fallback('SHADOW_NOT_VALID')
+
+        if not np.isfinite(shadow.score) or shadow.score < float(
+                self.get_parameter('experimental_shadow_min_score').value):
+            return fallback('SHADOW_SCORE_TOO_LOW')
+
+        selected = next((
+            evaluation for evaluation in shadow.evaluations
+            if evaluation.status == 'SELECTED' and
+            evaluation.component.component_id == shadow.component_id
+        ), None)
+
+        if selected is None:
+            return fallback('SELECTED_COMPONENT_MISSING')
+
+        eval_y = float(production.eval_y)
+        beige = selected.component
+
+        if (not np.isfinite(eval_y) or
+                not beige.y_min <= eval_y <= beige.y_max):
+            return fallback('PRODUCTION_EVAL_OUTSIDE_BEIGE_RANGE')
+
+        shadow_target_right_x = float(np.polyval(beige.fit, eval_y))
+
+        if (not np.isfinite(shadow_target_right_x) or
+                not 0.0 <= shadow_target_right_x < image_width):
+            return fallback('BEIGE_OUT_OF_IMAGE_BOUNDS')
+
+        min_span = float(self.get_parameter(
+            'experimental_shadow_min_common_y_span_px').value)
+
+        if selected.common_y_span < min_span:
+            return fallback('YELLOW_COMMON_SPAN_TOO_SHORT')
+
+        yellow = selected.yellow_component
+
+        if yellow is None:
+            return fallback('NO_YELLOW_REFERENCE')
+
+        if not yellow.y_min <= eval_y <= yellow.y_max:
+            return fallback('PRODUCTION_EVAL_OUTSIDE_YELLOW_RANGE')
+
+        yellow_x = float(np.polyval(yellow.fit, eval_y))
+
+        if (not np.isfinite(yellow_x) or
+                not 0.0 <= yellow_x < image_width or
+                not yellow_x < shadow_target_right_x):
+            return fallback('YELLOW_BEIGE_ORDER_INVALID')
+
+        require_neutral = bool(self.get_parameter(
+            'experimental_shadow_require_neutral_order').value)
+
+        neutral = selected.neutral_component
+
+        if require_neutral:
+            if neutral is None:
+                return fallback('NO_ORDERED_NEUTRAL_REFERENCE')
+
+            if selected.neutral_common_y_span < min_span:
+                return fallback('NEUTRAL_COMMON_SPAN_TOO_SHORT')
+
+            if not neutral.y_min <= eval_y <= neutral.y_max:
+                return fallback('PRODUCTION_EVAL_OUTSIDE_NEUTRAL_RANGE')
+
+            neutral_x = float(np.polyval(neutral.fit, eval_y))
+
+            if (not np.isfinite(neutral_x) or
+                    not 0.0 <= neutral_x < image_width or
+                    not shadow_target_right_x < neutral_x):
+                return fallback('BEIGE_NEUTRAL_ORDER_INVALID')
+
+        max_temporal_delta = float(self.get_parameter(
+            'experimental_shadow_max_temporal_delta_px').value)
+
+        if not np.isfinite(selected.temporal_delta):
+            return fallback('NO_TEMPORAL_REFERENCE')
+
+        if selected.temporal_delta > max_temporal_delta:
+            return fallback('TEMPORAL_DISCONTINUITY')
+
+        left_x = float(production.left_x_eval)
+        target_width = shadow_target_right_x - left_x
+
+        expected_width = (
+            float(self.get_parameter('default_lane_width_px_640').value) *
+            image_width / 640.0
+        )
+
+        min_width = expected_width * float(self.get_parameter(
+            'experimental_shadow_min_lane_width_ratio').value)
+
+        max_width = expected_width * float(self.get_parameter(
+            'experimental_shadow_max_lane_width_ratio').value)
+
+        if (not np.isfinite(left_x) or
+                not 0.0 <= left_x < image_width or
+                shadow_target_right_x <= left_x or
+                target_width <= 0.0 or
+                not min_width <= target_width <= max_width):
+            return fallback('LANE_GEOMETRY_INVALID')
+
+        # --------------------------------------------------------
+        # Stability stage 1:
+        # Require N consecutive strict-valid frames before entry.
+        # Any strict failure above immediately returns to production.
+        # --------------------------------------------------------
+
+        confirm_frames = max(
+            1,
+            int(self.get_parameter(
+                'experimental_shadow_confirm_frames').value),
+        )
+
+        if not self.experimental_shadow_override_active_state:
+            self.experimental_shadow_confirm_count += 1
+
+            if self.experimental_shadow_confirm_count < confirm_frames:
+                reason = (
+                    'CONFIRMING_SHADOW_OVERRIDE_'
+                    f'{self.experimental_shadow_confirm_count}_OF_'
+                    f'{confirm_frames}'
+                )
+                return fallback(reason, reset_state=False)
+
+            self.experimental_shadow_override_active_state = True
+        else:
+            self.experimental_shadow_confirm_count = confirm_frames
+
+        # --------------------------------------------------------
+        # Stability stage 2:
+        # Move toward the strict-valid beige target by at most
+        # experimental_shadow_slew_rate_px_per_frame each frame.
+        # This applies only while strict conditions remain valid.
+        # --------------------------------------------------------
+
+        previous_output = self.experimental_shadow_previous_output_right_x
+
+        if not np.isfinite(previous_output):
+            previous_output = float(production.right_x_eval)
+
+        slew_rate = max(
+            0.0,
+            float(self.get_parameter(
+                'experimental_shadow_slew_rate_px_per_frame').value),
+        )
+
+        if slew_rate > 0.0 and np.isfinite(previous_output):
+            delta = shadow_target_right_x - previous_output
+            delta = clamp(delta, -slew_rate, slew_rate)
+            selected_right_x = previous_output + delta
+        else:
+            selected_right_x = shadow_target_right_x
+
+        selected_width = selected_right_x - left_x
+
+        # Re-check the actually emitted right boundary after slew limiting.
+        if (not np.isfinite(selected_right_x) or
+                not 0.0 <= selected_right_x < image_width or
+                selected_right_x <= left_x or
+                selected_width <= 0.0):
+            return fallback('SLEW_OUTPUT_GEOMETRY_INVALID')
+
+        _, confidence, _, lookahead_y = original_result
+
+        selected_center = 0.5 * (left_x + selected_right_x)
+
+        selected_error = clamp(
+            (selected_center - image_width / 2.0) /
+            (image_width / 2.0),
+            -1.0, 1.0)
+
+        diagnostics.active = True
+        diagnostics.reason = 'OK'
+        diagnostics.selected_right_x = selected_right_x
+        diagnostics.right_shift_px = (
+            selected_right_x - diagnostics.original_right_x)
+        diagnostics.selected_lane_error = selected_error
+        diagnostics.lane_error_delta = (
+            selected_error - diagnostics.original_lane_error)
+        diagnostics.selected_lane_center = selected_center
+        diagnostics.lane_center_shift_px = (
+            selected_center - diagnostics.original_lane_center)
+        diagnostics.selected_lane_width = selected_width
+
+        # Keep the stored experimental fit consistent with the
+        # slew-limited x at production eval_y by lateral translation only.
+        selected_fit = beige.fit.copy()
+        selected_fit[-1] += (
+            selected_right_x - shadow_target_right_x)
+
+        diagnostics.selected_right_fit = selected_fit
+        diagnostics.selected_right_y_min = float(beige.y_min)
+        diagnostics.selected_right_y_max = float(beige.y_max)
+
+        self.experimental_shadow_previous_output_right_x = (
+            selected_right_x)
+
+        return (
+            (selected_error, confidence, selected_center, lookahead_y),
+            diagnostics,
+        )
+
     def select_shadow_right(
         self, semantic: SemanticDiagnostics, image_width: int
     ) -> ShadowRightDiagnostics:
-        """Select a beige boundary without reading or changing production state."""
+        """Select beige without reading or mutating production state."""
         result = ShadowRightDiagnostics(
             candidate_count=len(semantic.beige_components))
         if not semantic.beige_components:
@@ -933,6 +1323,9 @@ class PerceptionNode(Node):
             'shadow_neutral_missing_score').value)
         neutral_order_found = False
         neutral_comparison_found = False
+        best_neutral = None
+        best_neutral_fraction = 0.0
+        best_neutral_span = 0.0
         for neutral in neutral_components:
             triple_y_min = max(common_y_min, neutral.y_min)
             triple_y_max = min(common_y_max, neutral.y_max)
@@ -961,6 +1354,10 @@ class PerceptionNode(Node):
             if ordered_fraction >= min_valid_ratio:
                 neutral_order_found = True
                 neutral_score = max(neutral_score, ordered_fraction)
+                if ordered_fraction > best_neutral_fraction:
+                    best_neutral = neutral
+                    best_neutral_fraction = ordered_fraction
+                    best_neutral_span = float(triple_y_max - triple_y_min)
 
         if neutral_comparison_found and not neutral_order_found:
             neutral_score = float(self.get_parameter(
@@ -1019,6 +1416,13 @@ class PerceptionNode(Node):
         evaluation.temporal_delta = temporal_delta
         evaluation.sample_y = sample_y
         evaluation.score_parts = weighted_parts
+        evaluation.yellow_component = yellow
+        evaluation.neutral_component = best_neutral
+        evaluation.yellow_order_fraction = order_fraction
+        evaluation.neutral_order_fraction = best_neutral_fraction
+        evaluation.bounds_fraction = bounds_fraction
+        evaluation.common_y_span = float(common_y_max - common_y_min)
+        evaluation.neutral_common_y_span = best_neutral_span
         return evaluation
 
     @staticmethod

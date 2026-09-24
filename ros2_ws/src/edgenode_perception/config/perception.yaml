@@ -59,6 +59,17 @@ perception_node:
     shadow_bounds_weight: 0.10
     shadow_temporal_weight: 0.05
 
+    # Strict production A/B override. Keep disabled until offline and live review.
+    experimental_shadow_right_override_enabled: false
+    experimental_shadow_min_score: 0.85
+    experimental_shadow_require_neutral_order: true
+    experimental_shadow_max_temporal_delta_px: 35.0
+    experimental_shadow_min_common_y_span_px: 17
+    experimental_shadow_min_lane_width_ratio: 0.90
+    experimental_shadow_max_lane_width_ratio: 1.25
+    experimental_shadow_confirm_frames: 4
+    experimental_shadow_slew_rate_px_per_frame: 10.0
+
     # LiDAR obstacle detector (assumes conventional x-forward, y-left, z-up frame)
     lidar_x_min_m: 0.5
     lidar_x_max_m: 20.0
