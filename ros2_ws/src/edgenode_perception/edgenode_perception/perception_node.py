@@ -1,6 +1,6 @@
 import math
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -57,6 +57,11 @@ class SemanticComponent:
     y_min: int
     y_max: int
     x_eval: float = float('nan')
+    component_id: int = -1
+    area: int = 0
+    median_h: float = float('nan')
+    median_s: float = float('nan')
+    median_v: float = float('nan')
 
 
 @dataclass
@@ -77,6 +82,43 @@ class SemanticDiagnostics:
     beige_neutral_distance: float = float('nan')
     right_to_beige_distance: float = float('nan')
     right_to_neutral_white_distance: float = float('nan')
+
+
+@dataclass
+class ShadowCandidateEvaluation:
+    """Explainable score for one beige component in the shadow path."""
+
+    component: SemanticComponent
+    score: float = float('-inf')
+    status: str = 'REJECTED'
+    rejection_reason: str = 'LOW_SCORE'
+    eval_y: float = float('nan')
+    x: float = float('nan')
+    y_min: float = float('nan')
+    y_max: float = float('nan')
+    lane_width: float = float('nan')
+    temporal_delta: float = float('nan')
+    sample_y: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.float64))
+    score_parts: Dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
+class ShadowRightDiagnostics:
+    """Diagnostic-only right-boundary selection; never consumed by production."""
+
+    right_x: float = float('nan')
+    eval_y: float = float('nan')
+    score: float = float('nan')
+    status: str = 'UNRESOLVED'
+    rejection_reason: str = 'NO_BEIGE_COMPONENT'
+    candidate_count: int = 0
+    component_id: int = -1
+    y_min: float = float('nan')
+    y_max: float = float('nan')
+    lane_width: float = float('nan')
+    temporal_delta: float = float('nan')
+    evaluations: List[ShadowCandidateEvaluation] = field(default_factory=list)
 
 
 class PerceptionNode(Node):
@@ -108,6 +150,8 @@ class PerceptionNode(Node):
         self.declare_parameter('debug_image_topic', '/perception/debug/lane_image/compressed')
         self.declare_parameter(
             'identity_debug_image_topic', '/perception/debug/identity_image/compressed')
+        self.declare_parameter(
+            'shadow_debug_image_topic', '/perception/debug/shadow_identity_image/compressed')
 
         # Lane parameters
         for name, default in [
@@ -137,6 +181,26 @@ class PerceptionNode(Node):
         self.declare_parameter('diag_component_close_kernel', 3)
         self.declare_parameter('diag_identity_ambiguity_px', 5.0)
         self.declare_parameter('diag_identity_max_distance_px', 55.0)
+
+        # Shadow right selector. These values and state never feed production.
+        self.declare_parameter('shadow_right_selector_enabled', True)
+        self.declare_parameter('shadow_debug_image_enabled', False)
+        self.declare_parameter('shadow_min_common_y_span_px', 8)
+        self.declare_parameter('shadow_sample_count', 5)
+        self.declare_parameter('shadow_min_valid_sample_ratio', 0.8)
+        self.declare_parameter('shadow_neutral_missing_score', 0.4)
+        self.declare_parameter('shadow_neutral_contradiction_score', -0.5)
+        self.declare_parameter('shadow_yellow_position_tiebreak_weight', 0.05)
+        self.declare_parameter('shadow_min_score', 0.55)
+        self.declare_parameter('shadow_expected_width_tolerance_ratio', 0.75)
+        self.declare_parameter('shadow_max_temporal_jump_px', 120.0)
+        self.declare_parameter('shadow_semantic_weight', 0.10)
+        self.declare_parameter('shadow_yellow_order_weight', 0.25)
+        self.declare_parameter('shadow_neutral_order_weight', 0.25)
+        self.declare_parameter('shadow_geometry_weight', 0.15)
+        self.declare_parameter('shadow_y_span_weight', 0.10)
+        self.declare_parameter('shadow_bounds_weight', 0.10)
+        self.declare_parameter('shadow_temporal_weight', 0.05)
 
         # LiDAR parameters
         for name, default in [
@@ -178,6 +242,9 @@ class PerceptionNode(Node):
         self.identity_debug_pub = self.create_publisher(
             CompressedImage,
             self.get_parameter('identity_debug_image_topic').value, 3)
+        self.shadow_debug_pub = self.create_publisher(
+            CompressedImage,
+            self.get_parameter('shadow_debug_image_topic').value, 3)
         self.left_pixel_count_pub = self.create_publisher(
             Int32, '/perception/left_pixel_count', 10)
         self.right_pixel_count_pub = self.create_publisher(
@@ -239,6 +306,33 @@ class PerceptionNode(Node):
         self.right_to_neutral_white_distance_pub = self.create_publisher(
             Float32, '/perception/diag/right_to_neutral_white_distance', 10)
 
+        shadow_float_topics = {
+            'right_x': '/perception/diag/shadow_right_x',
+            'eval_y': '/perception/diag/shadow_right_eval_y',
+            'score': '/perception/diag/shadow_right_score',
+            'y_min': '/perception/diag/shadow_right_y_min',
+            'y_max': '/perception/diag/shadow_right_y_max',
+            'lane_width': '/perception/diag/shadow_right_lane_width',
+            'temporal_delta': '/perception/diag/shadow_right_temporal_delta',
+        }
+        self.shadow_float_pubs = {
+            name: self.create_publisher(Float32, topic, 10)
+            for name, topic in shadow_float_topics.items()
+        }
+        self.shadow_status_pub = self.create_publisher(
+            String, '/perception/diag/shadow_right_status', 10)
+        self.shadow_rejection_reason_pub = self.create_publisher(
+            String, '/perception/diag/shadow_right_rejection_reason', 10)
+        self.shadow_candidate_count_pub = self.create_publisher(
+            Int32, '/perception/diag/shadow_right_candidate_count', 10)
+        self.shadow_component_id_pub = self.create_publisher(
+            Int32, '/perception/diag/shadow_right_component_id', 10)
+
+        # Deliberately separate from every production temporal/fit value.
+        self.shadow_previous_right_x = float('nan')
+        self.shadow_previous_eval_y = float('nan')
+        self.shadow_last_stamp_ns: Optional[int] = None
+
         self.get_logger().info(
             f'Perception ready: camera={self.camera_topic}, lidar={self.lidar_topic}')
 
@@ -254,6 +348,10 @@ class PerceptionNode(Node):
             self.publish_lane_diagnostics(diagnostics)
             if self.get_parameter('semantic_diagnostics_enabled').value:
                 self.publish_semantic_diagnostics(SemanticDiagnostics())
+                if self.get_parameter('shadow_right_selector_enabled').value:
+                    self.publish_shadow_right_diagnostics(
+                        ShadowRightDiagnostics())
+                    self.clear_shadow_continuity()
             self.get_logger().warning('Failed to decode compressed camera image')
             return
 
@@ -312,6 +410,14 @@ class PerceptionNode(Node):
                 self.publish_semantic_diagnostics(semantic)
                 self.publish_identity_debug_image(
                     msg, image, semantic, fit_snapshot, diagnostics)
+                if self.get_parameter('shadow_right_selector_enabled').value:
+                    self.update_shadow_sequence_stamp(msg)
+                    shadow = self.select_shadow_right(semantic, w)
+                    self.publish_shadow_right_diagnostics(shadow)
+                    if self.get_parameter('shadow_debug_image_enabled').value:
+                        self.publish_shadow_debug_image(
+                            msg, image, semantic, shadow, fit_snapshot,
+                            diagnostics)
             except Exception as exc:  # Diagnostics must not suppress production output.
                 self.get_logger().error(
                     f'Passive semantic diagnostics failed: {exc}')
@@ -418,7 +524,7 @@ class PerceptionNode(Node):
             white = cv2.bitwise_and(white, roi)
             yellow = cv2.bitwise_and(yellow, roi)
 
-        yellow_components = self.fit_semantic_components(yellow, eval_y)
+        yellow_components = self.fit_semantic_components(yellow, hsv, eval_y)
         white_components = self.classify_white_components(
             white, hsv, eval_y)
 
@@ -503,12 +609,14 @@ class PerceptionNode(Node):
                 y_min=y_min,
                 y_max=y_max,
                 x_eval=x_eval,
+                component_id=int(label),
+                area=int(area),
             ),
             (local_labels == label),
         )
 
     def fit_semantic_components(
-        self, mask: np.ndarray, eval_y: float
+        self, mask: np.ndarray, hsv: np.ndarray, eval_y: float
     ) -> List[SemanticComponent]:
         count, labels, stats, _ = cv2.connectedComponentsWithStats(
             mask, connectivity=8)
@@ -517,7 +625,13 @@ class PerceptionNode(Node):
             geometry = self.component_geometry(
                 labels, stats, label, eval_y)
             if geometry is not None:
-                component, _ = geometry
+                component, local_component = geometry
+                x, y, width, height, _ = stats[label]
+                local_hsv = hsv[y:y + height, x:x + width]
+                values = local_hsv[local_component]
+                component.median_h = float(np.median(values[:, 0]))
+                component.median_s = float(np.median(values[:, 1]))
+                component.median_v = float(np.median(values[:, 2]))
                 components.append(component)
         return components
 
@@ -544,6 +658,9 @@ class PerceptionNode(Node):
             local_hsv = hsv[y:y + height, x:x + width]
             median_s = float(np.median(local_hsv[:, :, 1][local_component]))
             median_h = float(np.median(local_hsv[:, :, 0][local_component]))
+            component.median_h = median_h
+            component.median_s = median_s
+            component.median_v = float(np.median(local_hsv[:, :, 2][local_component]))
             if median_s <= neutral_max_s:
                 classified['neutral_white'].append(component)
             elif beige_hue_min <= median_h <= beige_hue_max:
@@ -613,6 +730,296 @@ class PerceptionNode(Node):
             diagnostics.right_identity = 'AMBIGUOUS'
         else:
             diagnostics.right_identity = candidates[0][0]
+
+    def clear_shadow_continuity(self):
+        self.shadow_previous_right_x = float('nan')
+        self.shadow_previous_eval_y = float('nan')
+
+    def reset_shadow_state(self):
+        """Reset only diagnostic shadow continuity between sequences."""
+        self.clear_shadow_continuity()
+        self.shadow_last_stamp_ns = None
+
+    def update_shadow_sequence_stamp(self, msg: CompressedImage):
+        stamp_ns = (
+            int(msg.header.stamp.sec) * 1_000_000_000 +
+            int(msg.header.stamp.nanosec)
+        )
+        if (self.shadow_last_stamp_ns is not None and
+                (stamp_ns <= self.shadow_last_stamp_ns or
+                 stamp_ns - self.shadow_last_stamp_ns > 2_000_000_000)):
+            self.reset_shadow_state()
+        self.shadow_last_stamp_ns = stamp_ns
+
+    def publish_shadow_right_diagnostics(
+        self, diagnostics: ShadowRightDiagnostics
+    ):
+        values = {
+            'right_x': diagnostics.right_x,
+            'eval_y': diagnostics.eval_y,
+            'score': diagnostics.score,
+            'y_min': diagnostics.y_min,
+            'y_max': diagnostics.y_max,
+            'lane_width': diagnostics.lane_width,
+            'temporal_delta': diagnostics.temporal_delta,
+        }
+        for name, value in values.items():
+            self.shadow_float_pubs[name].publish(Float32(data=float(value)))
+        self.shadow_status_pub.publish(String(data=diagnostics.status))
+        self.shadow_rejection_reason_pub.publish(
+            String(data=diagnostics.rejection_reason))
+        self.shadow_candidate_count_pub.publish(
+            Int32(data=diagnostics.candidate_count))
+        self.shadow_component_id_pub.publish(
+            Int32(data=diagnostics.component_id))
+
+    def select_shadow_right(
+        self, semantic: SemanticDiagnostics, image_width: int
+    ) -> ShadowRightDiagnostics:
+        """Select a beige boundary without reading or changing production state."""
+        result = ShadowRightDiagnostics(
+            candidate_count=len(semantic.beige_components))
+        if not semantic.beige_components:
+            self.clear_shadow_continuity()
+            return result
+        if not semantic.yellow_components:
+            result.rejection_reason = 'NO_YELLOW_REFERENCE'
+            result.evaluations = [
+                ShadowCandidateEvaluation(
+                    component=component,
+                    rejection_reason='NO_YELLOW_REFERENCE')
+                for component in semantic.beige_components
+            ]
+            self.clear_shadow_continuity()
+            return result
+
+        evaluations = [
+            self.evaluate_shadow_beige(
+                beige, semantic.yellow_components,
+                semantic.neutral_white_components, image_width)
+            for beige in semantic.beige_components
+        ]
+        result.evaluations = evaluations
+        eligible = [
+            evaluation for evaluation in evaluations
+            if evaluation.status == 'CANDIDATE' and np.isfinite(evaluation.score)
+        ]
+        if not eligible:
+            reasons = []
+            for evaluation in evaluations:
+                if evaluation.rejection_reason not in reasons:
+                    reasons.append(evaluation.rejection_reason)
+            result.rejection_reason = '+'.join(reasons) if reasons else 'LOW_SCORE'
+            self.clear_shadow_continuity()
+            return result
+
+        selected = max(
+            eligible,
+            key=lambda evaluation: (
+                evaluation.score,
+                evaluation.y_max - evaluation.y_min,
+                evaluation.component.pixel_count,
+            ),
+        )
+        result.score = float(selected.score)
+        min_score = float(self.get_parameter('shadow_min_score').value)
+        if selected.score < min_score:
+            selected.status = 'REJECTED'
+            selected.rejection_reason = 'LOW_SCORE'
+            result.rejection_reason = 'LOW_SCORE'
+            self.clear_shadow_continuity()
+            return result
+
+        selected.status = 'SELECTED'
+        selected.rejection_reason = 'OK'
+        result.right_x = float(selected.x)
+        result.eval_y = float(selected.eval_y)
+        result.status = 'VALID'
+        result.rejection_reason = 'OK'
+        result.component_id = int(selected.component.component_id)
+        result.y_min = float(selected.y_min)
+        result.y_max = float(selected.y_max)
+        result.lane_width = float(selected.lane_width)
+        result.temporal_delta = float(selected.temporal_delta)
+        self.shadow_previous_right_x = result.right_x
+        self.shadow_previous_eval_y = result.eval_y
+        return result
+
+    def evaluate_shadow_beige(
+        self, beige: SemanticComponent,
+        yellow_components: List[SemanticComponent],
+        neutral_components: List[SemanticComponent], image_width: int
+    ) -> ShadowCandidateEvaluation:
+        evaluation = ShadowCandidateEvaluation(component=beige)
+        min_span = int(
+            self.get_parameter('shadow_min_common_y_span_px').value)
+        sample_count = max(
+            3, int(self.get_parameter('shadow_sample_count').value))
+        min_valid_ratio = float(
+            self.get_parameter('shadow_min_valid_sample_ratio').value)
+        pair_options = []
+        saw_common_range = False
+        saw_in_bounds = False
+        saw_right_order = False
+
+        for yellow in yellow_components:
+            common_y_min = max(beige.y_min, yellow.y_min)
+            common_y_max = min(beige.y_max, yellow.y_max)
+            common_span = common_y_max - common_y_min
+            if common_span < min_span:
+                continue
+            saw_common_range = True
+            sample_y = np.linspace(
+                common_y_min, common_y_max, sample_count, dtype=np.float64)
+            beige_x = np.polyval(beige.fit, sample_y)
+            yellow_x = np.polyval(yellow.fit, sample_y)
+            finite = np.isfinite(beige_x) & np.isfinite(yellow_x)
+            in_bounds = (
+                finite & (beige_x >= 0.0) & (beige_x < image_width) &
+                (yellow_x >= 0.0) & (yellow_x < image_width)
+            )
+            bounds_fraction = float(np.mean(in_bounds))
+            if bounds_fraction < min_valid_ratio:
+                continue
+            saw_in_bounds = True
+            ordered = in_bounds & (beige_x > yellow_x)
+            order_fraction = float(np.mean(ordered))
+            if order_fraction < min_valid_ratio:
+                continue
+            saw_right_order = True
+            widths = beige_x[ordered] - yellow_x[ordered]
+            lane_width = float(np.median(widths))
+            expected_width = (
+                float(self.get_parameter('default_lane_width_px_640').value) *
+                image_width / 640.0
+            )
+            tolerance = max(
+                1.0, expected_width * float(self.get_parameter(
+                    'shadow_expected_width_tolerance_ratio').value))
+            geometry_score = math.exp(
+                -abs(lane_width - expected_width) / tolerance)
+            yellow_position = float(np.median(yellow_x[ordered]))
+            pair_options.append((
+                order_fraction + 0.5 * geometry_score +
+                float(self.get_parameter(
+                    'shadow_yellow_position_tiebreak_weight').value) *
+                yellow_position / max(1.0, image_width),
+                yellow, sample_y, beige_x, yellow_x, bounds_fraction,
+                order_fraction, lane_width, geometry_score,
+                common_y_min, common_y_max,
+            ))
+
+        if not pair_options:
+            if not saw_common_range:
+                evaluation.rejection_reason = 'NO_COMMON_Y_RANGE'
+            elif not saw_in_bounds:
+                evaluation.rejection_reason = 'OUT_OF_IMAGE_BOUNDS'
+            elif not saw_right_order:
+                evaluation.rejection_reason = 'LEFT_OF_YELLOW'
+            else:
+                evaluation.rejection_reason = 'LANE_GEOMETRY_INVALID'
+            return evaluation
+
+        (_, yellow, sample_y, beige_x, yellow_x, bounds_fraction,
+         order_fraction, lane_width, geometry_score, common_y_min,
+         common_y_max) = max(pair_options, key=lambda item: item[0])
+        eval_y = float(np.median(sample_y))
+        selected_x = float(np.polyval(beige.fit, eval_y))
+        if not np.isfinite(selected_x) or not 0.0 <= selected_x < image_width:
+            evaluation.rejection_reason = 'OUT_OF_IMAGE_BOUNDS'
+            return evaluation
+
+        neutral_score = float(self.get_parameter(
+            'shadow_neutral_missing_score').value)
+        neutral_order_found = False
+        neutral_comparison_found = False
+        for neutral in neutral_components:
+            triple_y_min = max(common_y_min, neutral.y_min)
+            triple_y_max = min(common_y_max, neutral.y_max)
+            if triple_y_max - triple_y_min < min_span:
+                continue
+            triple_y = np.linspace(
+                triple_y_min, triple_y_max, sample_count, dtype=np.float64)
+            triple_yellow_x = np.polyval(yellow.fit, triple_y)
+            triple_beige_x = np.polyval(beige.fit, triple_y)
+            neutral_x = np.polyval(neutral.fit, triple_y)
+            valid = (
+                np.isfinite(triple_yellow_x) & np.isfinite(triple_beige_x) &
+                np.isfinite(neutral_x) &
+                (triple_yellow_x >= 0.0) & (triple_yellow_x < image_width) &
+                (triple_beige_x >= 0.0) & (triple_beige_x < image_width) &
+                (neutral_x >= 0.0) & (neutral_x < image_width)
+            )
+            if float(np.mean(valid)) < min_valid_ratio:
+                continue
+            neutral_comparison_found = True
+            ordered = (
+                valid & (triple_yellow_x < triple_beige_x) &
+                (triple_beige_x < neutral_x)
+            )
+            ordered_fraction = float(np.mean(ordered))
+            if ordered_fraction >= min_valid_ratio:
+                neutral_order_found = True
+                neutral_score = max(neutral_score, ordered_fraction)
+
+        if neutral_comparison_found and not neutral_order_found:
+            neutral_score = float(self.get_parameter(
+                'shadow_neutral_contradiction_score').value)
+
+        span_score = min(
+            1.0, (common_y_max - common_y_min) / max(1.0, 3.0 * min_span))
+        semantic_score = min(
+            1.0, beige.pixel_count / max(
+                1.0, 4.0 * float(self.get_parameter(
+                    'diag_min_component_pixels').value)))
+        temporal_delta = float('nan')
+        temporal_score = 1.0
+        if np.isfinite(self.shadow_previous_right_x):
+            temporal_delta = abs(selected_x - self.shadow_previous_right_x)
+            temporal_scale = max(
+                1.0, float(self.get_parameter(
+                    'shadow_max_temporal_jump_px').value))
+            temporal_score = math.exp(-temporal_delta / temporal_scale)
+
+        normalized_parts = {
+            'semantic': semantic_score,
+            'yellow_order': order_fraction,
+            'neutral_order': neutral_score,
+            'geometry': geometry_score,
+            'y_span': span_score,
+            'bounds': bounds_fraction,
+            'temporal': temporal_score,
+        }
+        weight_names = {
+            'semantic': 'shadow_semantic_weight',
+            'yellow_order': 'shadow_yellow_order_weight',
+            'neutral_order': 'shadow_neutral_order_weight',
+            'geometry': 'shadow_geometry_weight',
+            'y_span': 'shadow_y_span_weight',
+            'bounds': 'shadow_bounds_weight',
+            'temporal': 'shadow_temporal_weight',
+        }
+        weighted_parts = {
+            name: float(self.get_parameter(weight_names[name]).value) * value
+            for name, value in normalized_parts.items()
+        }
+        total_weight = sum(
+            float(self.get_parameter(parameter).value)
+            for parameter in weight_names.values())
+        evaluation.score = sum(weighted_parts.values()) / max(1e-6, total_weight)
+        evaluation.status = 'CANDIDATE'
+        evaluation.rejection_reason = (
+            'RIGHT_OF_NEUTRAL_WHITE'
+            if neutral_comparison_found and not neutral_order_found else 'OK')
+        evaluation.eval_y = eval_y
+        evaluation.x = selected_x
+        evaluation.y_min = float(common_y_min)
+        evaluation.y_max = float(common_y_max)
+        evaluation.lane_width = lane_width
+        evaluation.temporal_delta = temporal_delta
+        evaluation.sample_y = sample_y
+        evaluation.score_parts = weighted_parts
+        return evaluation
 
     @staticmethod
     def draw_fit(
@@ -719,6 +1126,85 @@ class PerceptionNode(Node):
             out.format = 'jpeg'
             out.data = encoded.tobytes()
             self.identity_debug_pub.publish(out)
+
+    def publish_shadow_debug_image(
+        self, source_msg: CompressedImage, image: np.ndarray,
+        semantic: SemanticDiagnostics, shadow: ShadowRightDiagnostics,
+        fit_snapshot: ProductionFitSnapshot, production: LaneDiagnostics
+    ):
+        debug = image.copy()
+
+        for component in semantic.yellow_components:
+            self.draw_fit(debug, component, (0, 255, 255), 2)
+        for component in semantic.neutral_white_components:
+            self.draw_fit(debug, component, (255, 255, 0), 2)
+
+        evaluated_ids = {
+            evaluation.component.component_id: evaluation
+            for evaluation in shadow.evaluations
+        }
+        for component in semantic.beige_components:
+            evaluation = evaluated_ids.get(component.component_id)
+            selected = evaluation is not None and evaluation.status == 'SELECTED'
+            color = (0, 165, 255) if selected else (180, 0, 180)
+            self.draw_fit(debug, component, color, 5 if selected else 2)
+            if evaluation is not None and np.isfinite(evaluation.x):
+                point = (int(round(evaluation.x)), int(round(evaluation.eval_y)))
+                if 0 <= point[0] < debug.shape[1] and 0 <= point[1] < debug.shape[0]:
+                    cv2.circle(debug, point, 7 if selected else 5, color, -1)
+                    cv2.putText(
+                        debug,
+                        f'id={component.component_id} s={evaluation.score:.2f}',
+                        (max(0, point[0] - 55), max(18, point[1] - 8)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 2)
+            if evaluation is not None:
+                for sampled_y in evaluation.sample_y:
+                    y = int(round(float(sampled_y)))
+                    if 0 <= y < debug.shape[0]:
+                        cv2.line(debug, (0, y), (debug.shape[1] - 1, y),
+                                 (80, 80, 80), 1)
+
+        def draw_production_fit(fit, y_min, y_max, color):
+            if fit is None or not np.isfinite(y_min) or not np.isfinite(y_max):
+                return
+            component = SemanticComponent(
+                fit=fit, pixel_count=0, y_min=int(y_min), y_max=int(y_max))
+            self.draw_fit(debug, component, color, 4)
+
+        draw_production_fit(
+            fit_snapshot.left_fit, production.left_y_min,
+            production.left_y_max, (0, 255, 0))
+        draw_production_fit(
+            fit_snapshot.right_fit, production.right_y_min,
+            production.right_y_max, (0, 0, 255))
+
+        score_text = (
+            f'{shadow.score:.3f}' if np.isfinite(shadow.score) else 'NaN')
+        legend = [
+            ('production LEFT', (0, 255, 0)),
+            ('production RIGHT', (0, 0, 255)),
+            ('yellow candidates', (0, 255, 255)),
+            ('neutral-white candidates', (255, 255, 0)),
+            ('rejected beige', (180, 0, 180)),
+            ('selected shadow right', (0, 165, 255)),
+            (f'{shadow.status} score={score_text} '
+             f'reason={shadow.rejection_reason}', (255, 255, 255)),
+        ]
+        for index, (label, color) in enumerate(legend):
+            y = 24 + index * 23
+            cv2.putText(debug, label, (12, y), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.52, (0, 0, 0), 4)
+            cv2.putText(debug, label, (12, y), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.52, color, 2)
+
+        ok, encoded = cv2.imencode(
+            '.jpg', debug, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        if ok:
+            out = CompressedImage()
+            out.header = source_msg.header
+            out.format = 'jpeg'
+            out.data = encoded.tobytes()
+            self.shadow_debug_pub.publish(out)
 
     def publish_lane(self, error: float, confidence: float):
         e = Float32()

@@ -8,6 +8,7 @@ perception_node:
     obstacle_topic: /perception/obstacle
     debug_image_topic: /perception/debug/lane_image/compressed
     identity_debug_image_topic: /perception/debug/identity_image/compressed
+    shadow_debug_image_topic: /perception/debug/shadow_identity_image/compressed
 
     # Camera lane detector
     roi_top_y_ratio: 0.55
@@ -37,6 +38,26 @@ perception_node:
     diag_identity_ambiguity_px: 5.0
     # Observation radius only; equal to the existing 55 px sliding margin.
     diag_identity_max_distance_px: 55.0
+
+    # Diagnostic-only shadow selector; no value below feeds production.
+    shadow_right_selector_enabled: true
+    shadow_debug_image_enabled: false
+    shadow_min_common_y_span_px: 8
+    shadow_sample_count: 5
+    shadow_min_valid_sample_ratio: 0.8
+    shadow_neutral_missing_score: 0.4
+    shadow_neutral_contradiction_score: -0.5
+    shadow_yellow_position_tiebreak_weight: 0.05
+    shadow_min_score: 0.55
+    shadow_expected_width_tolerance_ratio: 0.75
+    shadow_max_temporal_jump_px: 120.0
+    shadow_semantic_weight: 0.10
+    shadow_yellow_order_weight: 0.25
+    shadow_neutral_order_weight: 0.25
+    shadow_geometry_weight: 0.15
+    shadow_y_span_weight: 0.10
+    shadow_bounds_weight: 0.10
+    shadow_temporal_weight: 0.05
 
     # LiDAR obstacle detector (assumes conventional x-forward, y-left, z-up frame)
     lidar_x_min_m: 0.5
