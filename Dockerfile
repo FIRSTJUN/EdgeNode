@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
     python3-rosdep \
     python3-opencv \
     python3-numpy \
+    python3-pyproj \
     python3-sklearn \
     git \
     nano \

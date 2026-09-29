@@ -1,0 +1,50 @@
+localization_node:
+  ros__parameters:
+    use_sim_time: false
+
+    gps_topic: /gps
+    imu_topic: /Imu
+    gps_odometry_topic: /localization/gps_odometry
+    odometry_topic: /localization/odometry
+    status_topic: /localization/status
+
+    # WGS84 / UTM Zone 52N -> C-track local 좌표 (단위: m).
+    utm_epsg: 32652
+    gps_frame_id: map
+    odom_frame_id: map
+    base_frame_id: base_link
+    # 메시지 offset 두 값이 모두 유한한 양수이면 메시지 값을 우선 사용.
+    # 하나라도 유효하지 않으면 아래 설정값 쌍을 사용.
+    fallback_east_offset: 360825.8208815998
+    fallback_north_offset: 4065896.298577933
+
+    status_publish_period_sec: 1.0
+    qos_depth: 10
+    # GPS/IMU 구독 QoS: best_effort 또는 reliable.
+    sensor_qos_reliability: best_effort
+
+    # rosbag 검증을 시작하기 위한 baseline이며 최종 Q/R 튜닝값이 아님.
+    # Q(dt) = diag(process_noise_x, y, yaw, v) * dt.
+    # process_noise는 표준편차가 아닌 초당 분산 증가량:
+    # x/y: m^2/s, yaw: rad^2/s, v: (m/s)^2/s.
+    process_noise_x: 0.05
+    process_noise_y: 0.05
+    process_noise_yaw: 0.02
+    process_noise_v: 0.50
+
+    # 측정 표준편차: R_gps = std_m^2 * I, R_yaw = radians(std_deg)^2.
+    gps_position_std_m: 0.50
+    imu_yaw_std_deg: 2.0
+    # P0의 대각 원소는 초기 표준편차의 제곱. yaw는 내부에서 rad로 변환.
+    initial_position_std_m: 1.0
+    initial_yaw_std_deg: 5.0
+    initial_velocity_std_mps: 2.0
+
+    # 0 < dt <= 이 값일 때만 predict. 긴 공백 후에는 시간 기준을 재설정.
+    max_predict_dt_sec: 0.2
+
+    # WAIT_FOR_SENSORS: 유효한 GPS local 위치 또는 IMU yaw/gyro 수신 대기.
+    # EKF_READY: GPS 위치와 IMU yaw로 EKF 초기화 완료 (초기 v=0).
+    # GPS-only Odometry는 GPS마다, EKF Odometry는 초기화 후 IMU마다 발행.
+    # linear_acceleration과 /ego_vehicle_status는 EKF 입력으로 사용하지 않음.
+    # 설정은 실행 시 --ros-args --params-file로 적용함.
