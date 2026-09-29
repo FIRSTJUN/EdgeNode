@@ -5,24 +5,19 @@ import os
 
 
 def generate_launch_description():
-    perception_cfg = os.path.join(
-        get_package_share_directory('edgenode_perception'),
-        'config', 'perception.yaml')
     planning_cfg = os.path.join(
         get_package_share_directory('edgenode_planning'),
-        'config', 'planning.yaml')
+        'config',
+        'planning.yaml',
+    )
+
     control_cfg = os.path.join(
         get_package_share_directory('edgenode_control'),
-        'config', 'control.yaml')
+        'config',
+        'control.yaml',
+    )
 
     return LaunchDescription([
-        Node(
-            package='edgenode_perception',
-            executable='perception_node',
-            name='perception_node',
-            output='screen',
-            parameters=[perception_cfg],
-        ),
         Node(
             package='edgenode_planning',
             executable='planning_node',
@@ -30,6 +25,7 @@ def generate_launch_description():
             output='screen',
             parameters=[planning_cfg],
         ),
+
         Node(
             package='edgenode_control',
             executable='control_node',

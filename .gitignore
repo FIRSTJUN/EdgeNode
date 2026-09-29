@@ -27,3 +27,4 @@ debug_frames/
 
 # Local rosbag archives
 /edgenode_rosbags.tar.gz
+/rosbags/
