@@ -19,3 +19,11 @@ logs/
 bags/
 debug_frames/
 /Ultra-Fast-Lane-Detection-v2/
+
+# Root-level build artifacts
+/build/
+/install/
+/log/
+
+# Local rosbag archives
+/edgenode_rosbags.tar.gz
