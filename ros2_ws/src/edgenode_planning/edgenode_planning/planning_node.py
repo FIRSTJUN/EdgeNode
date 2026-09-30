@@ -1,16 +1,21 @@
+import math
+
 import rclpy
 from rclpy.node import Node
 
+from nav_msgs.msg import Odometry
 from std_msgs.msg import Float32, String
+
+from edgenode_planning.map_matcher import MapMatcher
 
 
 class PlanningNode(Node):
     """
-    Planning skeleton for the new map-based architecture.
+    Match the latest localization pose to MGeo at 20 Hz.
 
     Current stage:
       - Perception is intentionally disconnected.
-      - MGeo/localization integration is not implemented yet.
+      - Localization odometry is the only pose input.
       - Vehicle target speed remains 0 km/h for safety.
 
     Future flow:
@@ -51,11 +56,42 @@ class PlanningNode(Node):
             '/planning/state',
         )
 
-        # Keep the vehicle stopped until map/localization is ready.
+        # Retained for compatibility; this stage always publishes zero speed.
         self.declare_parameter(
             'cruise_speed_kmh',
             0.0,
         )
+
+        self.declare_parameters(
+            namespace='',
+            parameters=[
+                ('localization_topic', '/localization/odometry'),
+                ('current_link_topic', '/planning/current_link'),
+                ('map_match_status_topic', '/planning/map_match_status'),
+                ('map_match_distance_topic', '/planning/map_match_distance'),
+                ('map_match_heading_diff_topic', '/planning/map_match_heading_diff'),
+                ('mgeo_dir', '/workspace/local_data/c_track_mgeo'),
+                ('map_match_search_radius_m', 6.0),
+                ('map_match_max_distance_m', 4.0),
+                ('map_match_max_heading_diff_deg', 80.0),
+                ('map_match_heading_weight', 0.025),
+                ('map_match_same_link_bonus', 0.4),
+                ('map_match_connected_link_bonus', 0.7),
+                ('map_match_unrelated_link_penalty', 1.0),
+            ],
+        )
+
+        self.map_matcher = MapMatcher(
+            mgeo_dir=self.get_parameter('mgeo_dir').value,
+            search_radius_m=self.get_parameter('map_match_search_radius_m').value,
+            max_match_distance_m=self.get_parameter('map_match_max_distance_m').value,
+            max_heading_diff_deg=self.get_parameter('map_match_max_heading_diff_deg').value,
+            heading_weight=self.get_parameter('map_match_heading_weight').value,
+            same_link_bonus=self.get_parameter('map_match_same_link_bonus').value,
+            connected_link_bonus=self.get_parameter('map_match_connected_link_bonus').value,
+            unrelated_link_penalty=self.get_parameter('map_match_unrelated_link_penalty').value,
+        )
+        self.latest_pose = None
 
         self.target_error_pub = self.create_publisher(
             Float32,
@@ -75,6 +111,33 @@ class PlanningNode(Node):
             10,
         )
 
+        self.current_link_pub = self.create_publisher(
+            String,
+            self.get_parameter('current_link_topic').value,
+            10,
+        )
+        self.map_match_status_pub = self.create_publisher(
+            String,
+            self.get_parameter('map_match_status_topic').value,
+            10,
+        )
+        self.map_match_distance_pub = self.create_publisher(
+            Float32,
+            self.get_parameter('map_match_distance_topic').value,
+            10,
+        )
+        self.map_match_heading_diff_pub = self.create_publisher(
+            Float32,
+            self.get_parameter('map_match_heading_diff_topic').value,
+            10,
+        )
+        self.localization_sub = self.create_subscription(
+            Odometry,
+            self.get_parameter('localization_topic').value,
+            self.localization_callback,
+            10,
+        )
+
         # Planning loop: 20 Hz
         self.create_timer(
             0.05,
@@ -82,20 +145,40 @@ class PlanningNode(Node):
         )
 
         self.get_logger().info(
-            'Planning node ready - waiting for MGeo/localization integration'
+            f'Planning node ready - loaded {len(self.map_matcher.links)} MGeo links; '
+            'waiting for localization (target speed: 0.0 km/h)'
         )
 
-    def plan(self):
-        """
-        Temporary safe planning output.
+    def localization_callback(self, msg):
+        """Store the latest pose; map matching runs only in the planning timer."""
+        position = msg.pose.pose.position
+        q = msg.pose.pose.orientation
+        yaw = math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+        )
+        self.latest_pose = (position.x, position.y, yaw)
 
-        This will later be replaced by:
-          EKF pose
-              +
-          MGeo path
-              ↓
-          path tracking error
-        """
+    def plan(self):
+        """Publish planning state and matching diagnostics with zero commands."""
+        state_value = 'WAIT_FOR_LOCALIZATION'
+        status_value = 'WAIT_FOR_LOCALIZATION'
+        current_link = ''
+        distance = float('nan')
+        heading_diff = float('nan')
+
+        if self.latest_pose is not None:
+            x, y, yaw = self.latest_pose
+            result = self.map_matcher.match(x, y, math.degrees(yaw))
+            if result is None:
+                state_value = 'MAP_MATCH_LOST'
+                status_value = 'NO_MATCH'
+            else:
+                state_value = 'MAP_MATCHED'
+                status_value = 'MATCHED'
+                current_link = result['link_id']
+                distance = result['distance']
+                heading_diff = result['heading_diff']
 
         target_error = Float32()
         target_error.data = 0.0
@@ -104,11 +187,15 @@ class PlanningNode(Node):
         target_speed.data = 0.0
 
         state = String()
-        state.data = 'WAIT_FOR_MAP'
+        state.data = state_value
 
         self.target_error_pub.publish(target_error)
         self.target_speed_pub.publish(target_speed)
         self.state_pub.publish(state)
+        self.current_link_pub.publish(String(data=current_link))
+        self.map_match_status_pub.publish(String(data=status_value))
+        self.map_match_distance_pub.publish(Float32(data=distance))
+        self.map_match_heading_diff_pub.publish(Float32(data=heading_diff))
 
 
 def main(args=None):

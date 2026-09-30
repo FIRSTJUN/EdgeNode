@@ -5,5 +5,20 @@ planning_node:
     target_speed_topic: /planning/target_speed
     state_topic: /planning/state
 
-    # MGeo / Localization 연결 전까지 차량을 움직이지 않는다.
+    localization_topic: /localization/odometry
+    current_link_topic: /planning/current_link
+    map_match_status_topic: /planning/map_match_status
+    map_match_distance_topic: /planning/map_match_distance
+    map_match_heading_diff_topic: /planning/map_match_heading_diff
+
+    mgeo_dir: /workspace/local_data/c_track_mgeo
+    map_match_search_radius_m: 6.0
+    map_match_max_distance_m: 4.0
+    map_match_max_heading_diff_deg: 80.0
+    map_match_heading_weight: 0.025
+    map_match_same_link_bonus: 0.4
+    map_match_connected_link_bonus: 0.7
+    map_match_unrelated_link_penalty: 1.0
+
+    # Map Matching 1단계에서는 매칭 여부와 관계없이 항상 정지한다.
     cruise_speed_kmh: 0.0
