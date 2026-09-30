@@ -24,6 +24,7 @@ class EKF:
         *,
         process_noise=(0.05, 0.05, 0.02, 0.50),
         gps_position_std_m=0.50,
+        gps_velocity_std_mps=0.50,
         imu_yaw_std_rad=math.radians(2.0),
         initial_position_std_m=1.0,
         initial_yaw_std_rad=math.radians(5.0),
@@ -33,7 +34,7 @@ class EKF:
         if noise.shape != (4,) or not np.all(np.isfinite(noise)) or np.any(noise < 0.0):
             raise ValueError('process_noise는 유한한 비음수 4개여야 합니다.')
         stds = np.array([
-            gps_position_std_m, imu_yaw_std_rad, initial_position_std_m,
+            gps_position_std_m, gps_velocity_std_mps, imu_yaw_std_rad, initial_position_std_m,
             initial_yaw_std_rad, initial_velocity_std_mps,
         ], dtype=float)
         if not np.all(np.isfinite(stds)) or np.any(stds <= 0.0):
@@ -41,6 +42,9 @@ class EKF:
 
         self._process_noise = np.diag(noise)
         self._position_noise = np.eye(2) * gps_position_std_m ** 2
+        # GPS 위치에서 파생된 pseudo-measurement이므로 독립 센서처럼 R을 작게 잡지 않는다.
+        # 0.50 m/s는 conservative baseline이며 최종 튜닝값이 아니다.
+        self._velocity_noise = np.array([[gps_velocity_std_mps ** 2]])
         self._yaw_noise = np.array([[imu_yaw_std_rad ** 2]])
         self._initial_covariance = np.diag([
             initial_position_std_m ** 2, initial_position_std_m ** 2,
@@ -100,6 +104,15 @@ class EKF:
         innovation = np.array([normalize_angle(yaw - self._state[2])])
         observation = np.array([[0.0, 0.0, 1.0, 0.0]])
         self._update(innovation, observation, self._yaw_noise)
+
+    def update_velocity(self, v_mps):
+        """GNSS 거리 기반 scalar ground speed pseudo-measurement를 반영한다."""
+        self._require_initialized()
+        if not math.isfinite(v_mps) or v_mps < 0.0:
+            raise ValueError('GPS 속도는 유한한 비음수여야 합니다.')
+        innovation = np.array([v_mps - self._state[3]])
+        observation = np.array([[0.0, 0.0, 0.0, 1.0]])
+        self._update(innovation, observation, self._velocity_noise)
 
     def _update(self, innovation, observation, noise):
         covariance_measurement = self._covariance @ observation.T

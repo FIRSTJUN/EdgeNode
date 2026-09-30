@@ -10,7 +10,7 @@ from pyproj.exceptions import ProjError
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Imu
-from std_msgs.msg import String
+from std_msgs.msg import Float32, String
 
 from edgenode_localization.ekf import EKF
 
@@ -23,6 +23,7 @@ class LocalizationNode(Node):
             ('gps_topic', '/gps'),
             ('imu_topic', '/Imu'),
             ('gps_odometry_topic', '/localization/gps_odometry'),
+            ('gps_speed_topic', '/localization/gps_speed'),
             ('odometry_topic', '/localization/odometry'),
             ('status_topic', '/localization/status'),
             ('utm_epsg', 32652),
@@ -34,6 +35,11 @@ class LocalizationNode(Node):
             ('process_noise_yaw', 0.02),
             ('process_noise_v', 0.50),
             ('gps_position_std_m', 0.50),
+            ('gps_velocity_update_enabled', True),
+            ('gps_velocity_std_mps', 0.50),
+            ('gps_velocity_min_dt_sec', 0.10),
+            ('gps_velocity_max_dt_sec', 0.50),
+            ('gps_velocity_max_mps', 15.0),
             ('imu_yaw_std_deg', 2.0),
             ('initial_position_std_m', 1.0),
             ('initial_yaw_std_deg', 5.0),
@@ -75,6 +81,15 @@ class LocalizationNode(Node):
         self.max_predict_dt_sec = self.get_parameter('max_predict_dt_sec').value
         if not math.isfinite(self.max_predict_dt_sec) or self.max_predict_dt_sec <= 0.0:
             raise ValueError('max_predict_dt_sec는 유한한 양수여야 합니다.')
+        self.gps_velocity_update_enabled = self.get_parameter('gps_velocity_update_enabled').value
+        self.gps_velocity_min_dt_sec = self.get_parameter('gps_velocity_min_dt_sec').value
+        self.gps_velocity_max_dt_sec = self.get_parameter('gps_velocity_max_dt_sec').value
+        self.gps_velocity_max_mps = self.get_parameter('gps_velocity_max_mps').value
+        if not all(math.isfinite(value) and value > 0.0 for value in (
+            self.gps_velocity_min_dt_sec, self.gps_velocity_max_dt_sec,
+            self.gps_velocity_max_mps,
+        )) or self.gps_velocity_min_dt_sec > self.gps_velocity_max_dt_sec:
+            raise ValueError('GPS 속도 gate는 유한한 양수이고 min_dt <= max_dt여야 합니다.')
         self.odom_frame_id = self.get_parameter('odom_frame_id').value
         self.base_frame_id = self.get_parameter('base_frame_id').value
         self.ekf = EKF(
@@ -82,12 +97,14 @@ class LocalizationNode(Node):
                 'process_noise_x', 'process_noise_y', 'process_noise_yaw', 'process_noise_v',
             )),
             gps_position_std_m=self.get_parameter('gps_position_std_m').value,
+            gps_velocity_std_mps=self.get_parameter('gps_velocity_std_mps').value,
             imu_yaw_std_rad=math.radians(self.get_parameter('imu_yaw_std_deg').value),
             initial_position_std_m=self.get_parameter('initial_position_std_m').value,
             initial_yaw_std_rad=math.radians(self.get_parameter('initial_yaw_std_deg').value),
             initial_velocity_std_mps=self.get_parameter('initial_velocity_std_mps').value,
         )
         self.latest_gps_local = None
+        self._previous_gps = None
         self.latest_imu_yaw = None
         self.latest_gyro_z = None
         self._last_imu_stamp_ns = None
@@ -111,6 +128,9 @@ class LocalizationNode(Node):
 
         self.gps_odometry_publisher = self.create_publisher(
             Odometry, self.get_parameter('gps_odometry_topic').value, depth,
+        )
+        self.gps_speed_publisher = self.create_publisher(
+            Float32, self.get_parameter('gps_speed_topic').value, depth,
         )
         self.odometry_publisher = self.create_publisher(
             Odometry, self.get_parameter('odometry_topic').value, depth,
@@ -156,6 +176,16 @@ class LocalizationNode(Node):
 
         local_x = utm_easting - east_offset
         local_y = utm_northing - north_offset
+        if not (math.isfinite(local_x) and math.isfinite(local_y)):
+            self.get_logger().warning('유효하지 않은 GPS local 좌표: GPS 갱신 생략')
+            return
+
+        stamp = msg.header.stamp
+        stamp_ns = stamp.sec * 1_000_000_000 + stamp.nanosec
+        uses_header_stamp = stamp_ns > 0
+        if not uses_header_stamp:
+            # header stamp가 없을 때만 노드 시각을 사용한다 (use_sim_time 반영).
+            stamp_ns = self.get_clock().now().nanoseconds
         odometry = Odometry()
         odometry.header.stamp = msg.header.stamp
         odometry.header.frame_id = self.gps_frame_id
@@ -169,7 +199,27 @@ class LocalizationNode(Node):
         self.latest_gps_local = (local_x, local_y)
         if self.ekf.initialized:
             self.ekf.update_position(local_x, local_y)
-        else:
+
+        if self._previous_gps is not None:
+            prev_x, prev_y, prev_stamp_ns, prev_uses_header_stamp = self._previous_gps
+            dt = (stamp_ns - prev_stamp_ns) / 1e9
+            # 서로 다른 시간 기준은 섞지 않으며 중복/역행/공백도 dt gate로 제외한다.
+            if (
+                uses_header_stamp == prev_uses_header_stamp
+                and math.isfinite(dt)
+                and self.gps_velocity_min_dt_sec <= dt <= self.gps_velocity_max_dt_sec
+            ):
+                gps_speed = math.hypot(local_x - prev_x, local_y - prev_y) / dt
+                if math.isfinite(gps_speed) and 0.0 <= gps_speed <= self.gps_velocity_max_mps:
+                    # v1 비교 시에도 유효한 속도를 관측할 수 있도록 debug 발행은 유지한다.
+                    self.gps_speed_publisher.publish(Float32(data=gps_speed))
+                    if self.gps_velocity_update_enabled and self.ekf.initialized:
+                        self.ekf.update_velocity(gps_speed)
+
+        # 속도 gate 결과와 무관하게 현재 유효 GPS를 다음 계산의 기준으로 저장한다.
+        self._previous_gps = (local_x, local_y, stamp_ns, uses_header_stamp)
+        if not self.ekf.initialized:
+            # GPS callback에서 초기화되더라도 첫 EKF 상태는 기존처럼 v=0이다.
             self._try_initialize_ekf()
 
     def imu_callback(self, msg: Imu):

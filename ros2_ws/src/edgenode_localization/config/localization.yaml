@@ -5,6 +5,7 @@ localization_node:
     gps_topic: /gps
     imu_topic: /Imu
     gps_odometry_topic: /localization/gps_odometry
+    gps_speed_topic: /localization/gps_speed
     odometry_topic: /localization/odometry
     status_topic: /localization/status
 
@@ -35,6 +36,19 @@ localization_node:
     # 측정 표준편차: R_gps = std_m^2 * I, R_yaw = radians(std_deg)^2.
     gps_position_std_m: 0.50
     imu_yaw_std_deg: 2.0
+
+    # EKF v2: 연속된 유효 GPS local 위치의 거리 / header timestamp 차이로 ground speed 계산.
+    # yaw projection은 사용하지 않음. false이면 기존 v1 position/yaw update만 사용.
+    gps_velocity_update_enabled: true
+    # R_velocity = std_mps^2. 0.50 m/s는 conservative baseline이며 최종 튜닝값이 아님.
+    # GPS position에서 파생된 pseudo-measurement로, 독립 센서가 아니므로 과소한 R을 피한다.
+    gps_velocity_std_mps: 0.50
+    gps_velocity_min_dt_sec: 0.10
+    gps_velocity_max_dt_sec: 0.50
+    gps_velocity_max_mps: 15.0
+    # header stamp가 없으면 node clock 사용. 시간 기준 전환 구간의 속도는 생략.
+    # gps_speed(Float32)는 dt/속도 gate를 통과할 때만 발행 (update 비활성/초기화 전에도 발행).
+
     # P0의 대각 원소는 초기 표준편차의 제곱. yaw는 내부에서 rad로 변환.
     initial_position_std_m: 1.0
     initial_yaw_std_deg: 5.0
