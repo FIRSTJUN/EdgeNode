@@ -3,19 +3,22 @@ import math
 import rclpy
 from rclpy.node import Node
 
-from nav_msgs.msg import Odometry
+from geometry_msgs.msg import PoseStamped
+from nav_msgs.msg import Odometry, Path
 from std_msgs.msg import Float32, String
 
+from edgenode_planning.dijkstra_planner import DijkstraPlanner
 from edgenode_planning.map_matcher import MapMatcher
 
 
 class PlanningNode(Node):
     """
-    Match the latest localization pose to MGeo at 20 Hz.
+    Match localization and publish a cached global route at 20 Hz.
 
     Current stage:
       - Perception is intentionally disconnected.
       - Localization odometry is the only pose input.
+      - Global routes are recalculated only when the matched link or goal changes.
       - Vehicle target speed remains 0 km/h for safety.
 
     Future flow:
@@ -70,6 +73,9 @@ class PlanningNode(Node):
                 ('map_match_status_topic', '/planning/map_match_status'),
                 ('map_match_distance_topic', '/planning/map_match_distance'),
                 ('map_match_heading_diff_topic', '/planning/map_match_heading_diff'),
+                ('global_path_topic', '/planning/global_path'),
+                ('goal_node_id', 'A122CC001096'),
+                ('global_path_frame_id', 'map'),
                 ('mgeo_dir', '/workspace/local_data/c_track_mgeo'),
                 ('map_match_search_radius_m', 6.0),
                 ('map_match_max_distance_m', 4.0),
@@ -81,8 +87,9 @@ class PlanningNode(Node):
             ],
         )
 
+        mgeo_dir = self.get_parameter('mgeo_dir').value
         self.map_matcher = MapMatcher(
-            mgeo_dir=self.get_parameter('mgeo_dir').value,
+            mgeo_dir=mgeo_dir,
             search_radius_m=self.get_parameter('map_match_search_radius_m').value,
             max_match_distance_m=self.get_parameter('map_match_max_distance_m').value,
             max_heading_diff_deg=self.get_parameter('map_match_max_heading_diff_deg').value,
@@ -91,6 +98,9 @@ class PlanningNode(Node):
             connected_link_bonus=self.get_parameter('map_match_connected_link_bonus').value,
             unrelated_link_penalty=self.get_parameter('map_match_unrelated_link_penalty').value,
         )
+        self.dijkstra_planner = DijkstraPlanner(mgeo_dir=mgeo_dir)
+        self._route_key = None
+        self._route_result = None
         self.latest_pose = None
 
         self.target_error_pub = self.create_publisher(
@@ -131,6 +141,11 @@ class PlanningNode(Node):
             self.get_parameter('map_match_heading_diff_topic').value,
             10,
         )
+        self.global_path_pub = self.create_publisher(
+            Path,
+            self.get_parameter('global_path_topic').value,
+            10,
+        )
         self.localization_sub = self.create_subscription(
             Odometry,
             self.get_parameter('localization_topic').value,
@@ -160,7 +175,12 @@ class PlanningNode(Node):
         self.latest_pose = (position.x, position.y, yaw)
 
     def plan(self):
-        """Publish planning state and matching diagnostics with zero commands."""
+        """Publish diagnostics and valid cached routes with zero commands.
+
+        Cache failures too, so an unreachable goal does not trigger a search
+        every tick. During match loss retain the cache but publish no Path;
+        a recovered match must validate the link/goal key before reuse.
+        """
         state_value = 'WAIT_FOR_LOCALIZATION'
         status_value = 'WAIT_FOR_LOCALIZATION'
         current_link = ''
@@ -174,11 +194,36 @@ class PlanningNode(Node):
                 state_value = 'MAP_MATCH_LOST'
                 status_value = 'NO_MATCH'
             else:
-                state_value = 'MAP_MATCHED'
                 status_value = 'MATCHED'
                 current_link = result['link_id']
                 distance = result['distance']
                 heading_diff = result['heading_diff']
+
+                goal_node_id = self.get_parameter('goal_node_id').value
+                route_key = (current_link, goal_node_id)
+                if route_key != self._route_key:
+                    self._route_result = self.dijkstra_planner.plan(
+                        current_link, goal_node_id,
+                    )
+                    self._route_key = route_key
+
+                if self._route_result is None:
+                    state_value = 'GLOBAL_PATH_NOT_FOUND'
+                else:
+                    state_value = 'GLOBAL_PATH_READY'
+                    path = Path()
+                    path.header.frame_id = self.get_parameter('global_path_frame_id').value
+                    path.header.stamp = self.get_clock().now().to_msg()
+                    # Keep the entire start link; trimming belongs to local planning.
+                    for point in self._route_result['points']:
+                        pose = PoseStamped()
+                        pose.header = path.header
+                        pose.pose.position.x = float(point[0])
+                        pose.pose.position.y = float(point[1])
+                        pose.pose.position.z = float(point[2])
+                        pose.pose.orientation.w = 1.0
+                        path.poses.append(pose)
+                    self.global_path_pub.publish(path)
 
         target_error = Float32()
         target_error.data = 0.0

@@ -11,6 +11,10 @@ planning_node:
     map_match_distance_topic: /planning/map_match_distance
     map_match_heading_diff_topic: /planning/map_match_heading_diff
 
+    global_path_topic: /planning/global_path
+    goal_node_id: A122CC001096
+    global_path_frame_id: map
+
     mgeo_dir: /workspace/local_data/c_track_mgeo
     map_match_search_radius_m: 6.0
     map_match_max_distance_m: 4.0
@@ -20,5 +24,5 @@ planning_node:
     map_match_connected_link_bonus: 0.7
     map_match_unrelated_link_penalty: 1.0
 
-    # Map Matching 1단계에서는 매칭 여부와 관계없이 항상 정지한다.
+    # Global Path 발행 단계에서도 경로 생성 여부와 관계없이 항상 정지한다.
     cruise_speed_kmh: 0.0
