@@ -6,17 +6,13 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 
 from sensor_msgs.msg import CompressedImage, Image
-from std_msgs.msg import Float32
+from std_msgs.msg import Float32, Bool
 
 
 class PerceptionNode(Node):
 
     def __init__(self):
         super().__init__('perception_node')
-
-        # ============================================================
-        # Camera topic
-        # ============================================================
 
         self.declare_parameter(
             'camera_topic',
@@ -29,9 +25,15 @@ class PerceptionNode(Node):
 
         self.frame_count = 0
 
-        # ============================================================
-        # Subscriber
-        # ============================================================
+        # Learned lane width at the lookahead position.
+        self.learned_lane_width_px = None
+
+        # Exponential moving average:
+        # new = 0.8 * old + 0.2 * measurement
+        self.lane_width_alpha = 0.20
+
+        # Reject a new width if it differs too much from the learned width.
+        self.lane_width_change_limit = 0.35
 
         self.camera_sub = self.create_subscription(
             CompressedImage,
@@ -39,10 +41,6 @@ class PerceptionNode(Node):
             self.camera_callback,
             qos_profile_sensor_data,
         )
-
-        # ============================================================
-        # Publishers
-        # ============================================================
 
         self.lane_error_pub = self.create_publisher(
             Float32,
@@ -53,6 +51,11 @@ class PerceptionNode(Node):
         self.lane_confidence_pub = self.create_publisher(
             Float32,
             '/perception/lane_confidence',
+            10,
+        )
+        self.lane_valid_pub = self.create_publisher(
+            Bool,
+            '/perception/lane_valid',
             10,
         )
 
@@ -72,15 +75,7 @@ class PerceptionNode(Node):
             f'Perception node ready: {camera_topic}'
         )
 
-    # ================================================================
-    # Camera callback
-    # ================================================================
-
-    def camera_callback(
-        self,
-        msg: CompressedImage,
-    ):
-
+    def camera_callback(self, msg: CompressedImage):
         np_arr = np.frombuffer(
             msg.data,
             dtype=np.uint8,
@@ -100,26 +95,22 @@ class PerceptionNode(Node):
         self.frame_count += 1
 
         if self.frame_count % 100 == 0:
-
             height, width = frame.shape[:2]
+
+            if self.learned_lane_width_px is None:
+                width_text = 'None'
+            else:
+                width_text = f'{self.learned_lane_width_px:.1f}px'
 
             self.get_logger().info(
                 f'Camera OK | '
                 f'frames={self.frame_count} '
-                f'size={width}x{height}'
+                f'size={width}x{height} '
+                f'learned_lane_width={width_text}'
             )
 
-        # ============================================================
-        # Lane perception
-        # ============================================================
-
-        lane_mask = self.make_lane_mask(
-            frame
-        )
-
-        lane_result = self.detect_lane(
-            lane_mask
-        )
+        lane_mask = self.make_lane_mask(frame)
+        lane_result = self.detect_lane(lane_mask)
 
         debug_frame = self.make_debug_image(
             frame,
@@ -127,15 +118,15 @@ class PerceptionNode(Node):
             lane_result,
         )
 
-        # ============================================================
-        # Publish lane result
-        # ============================================================
-
         if lane_result is None:
 
             self.publish_lane_result(
                 0.0,
                 0.0,
+            )
+
+            self.publish_lane_valid(
+                False
             )
 
         else:
@@ -145,9 +136,9 @@ class PerceptionNode(Node):
                 lane_result['confidence'],
             )
 
-        # ============================================================
-        # Publish debug images
-        # ============================================================
+            self.publish_lane_valid(
+                True
+            )
 
         self.publish_debug_image(
             debug_frame,
@@ -159,21 +150,10 @@ class PerceptionNode(Node):
             msg,
         )
 
-    # ================================================================
-    # Lane mask
-    # ================================================================
-
-    def make_lane_mask(
-        self,
-        frame,
-    ):
-
+    def make_lane_mask(self, frame):
         height, width = frame.shape[:2]
 
-        # ------------------------------------------------------------
-        # White lane
-        # ------------------------------------------------------------
-
+        # White lane in HLS.
         hls = cv2.cvtColor(
             frame,
             cv2.COLOR_BGR2HLS,
@@ -195,10 +175,7 @@ class PerceptionNode(Node):
             white_upper,
         )
 
-        # ------------------------------------------------------------
-        # Yellow lane
-        # ------------------------------------------------------------
-
+        # Yellow lane in HSV.
         hsv = cv2.cvtColor(
             frame,
             cv2.COLOR_BGR2HSV,
@@ -220,18 +197,10 @@ class PerceptionNode(Node):
             yellow_upper,
         )
 
-        # ------------------------------------------------------------
-        # White + Yellow
-        # ------------------------------------------------------------
-
         lane_mask = cv2.bitwise_or(
             white_mask,
             yellow_mask,
         )
-
-        # ------------------------------------------------------------
-        # Noise removal
-        # ------------------------------------------------------------
 
         kernel = np.ones(
             (5, 5),
@@ -250,10 +219,7 @@ class PerceptionNode(Node):
             kernel,
         )
 
-        # ============================================================
-        # ROI
-        # ============================================================
-
+        # ROI.
         roi_mask = np.zeros_like(
             lane_mask
         )
@@ -266,11 +232,11 @@ class PerceptionNode(Node):
                 ),
                 (
                     int(width * 0.15),
-                    int(height * 0.30),
+                    int(height * 0.35),
                 ),
                 (
                     int(width * 0.90),
-                    int(height * 0.30),
+                    int(height * 0.35),
                 ),
                 (
                     int(width * 0.98),
@@ -293,23 +259,13 @@ class PerceptionNode(Node):
 
         return lane_mask
 
-    # ================================================================
-    # Sliding Window
-    # ================================================================
-
-    def detect_lane(
-        self,
-        binary,
-    ):
-
+    def detect_lane(self, binary):
         height, width = binary.shape
 
         histogram = np.sum(
             binary[height // 2:, :] > 0,
             axis=0,
-        ).astype(
-            np.float32
-        )
+        ).astype(np.float32)
 
         midpoint = width // 2
 
@@ -344,16 +300,10 @@ class PerceptionNode(Node):
         ):
             return None
 
-        nonzero_y, nonzero_x = (
-            binary.nonzero()
-        )
+        nonzero_y, nonzero_x = binary.nonzero()
 
         if len(nonzero_x) == 0:
             return None
-
-        # ============================================================
-        # Sliding window settings
-        # ============================================================
 
         number_of_windows = 9
 
@@ -375,32 +325,18 @@ class PerceptionNode(Node):
         left_lane_indices = []
         right_lane_indices = []
 
-        # ============================================================
-        # Search from bottom to top
-        # ============================================================
-
-        for window in range(
-            number_of_windows
-        ):
-
+        for window in range(number_of_windows):
             y_low = (
                 height
-                - (window + 1)
-                * window_height
+                - (window + 1) * window_height
             )
 
             y_high = (
                 height
-                - window
-                * window_height
+                - window * window_height
             )
 
-            # --------------------------------------------------------
-            # Left lane
-            # --------------------------------------------------------
-
             if left_available:
-
                 left_indices = np.where(
                     (
                         (nonzero_y >= y_low)
@@ -423,11 +359,7 @@ class PerceptionNode(Node):
                     left_indices
                 )
 
-                if (
-                    len(left_indices)
-                    > minimum_pixels
-                ):
-
+                if len(left_indices) > minimum_pixels:
                     left_current = int(
                         np.mean(
                             nonzero_x[
@@ -436,12 +368,7 @@ class PerceptionNode(Node):
                         )
                     )
 
-            # --------------------------------------------------------
-            # Right lane
-            # --------------------------------------------------------
-
             if right_available:
-
                 right_indices = np.where(
                     (
                         (nonzero_y >= y_low)
@@ -464,11 +391,7 @@ class PerceptionNode(Node):
                     right_indices
                 )
 
-                if (
-                    len(right_indices)
-                    > minimum_pixels
-                ):
-
+                if len(right_indices) > minimum_pixels:
                     right_current = int(
                         np.mean(
                             nonzero_x[
@@ -477,58 +400,40 @@ class PerceptionNode(Node):
                         )
                     )
 
-        # ============================================================
-        # Merge indices
-        # ============================================================
-
         if left_lane_indices:
-
             left_lane_indices = np.concatenate(
                 left_lane_indices
             )
-
         else:
-
             left_lane_indices = np.array(
                 [],
                 dtype=np.int64,
             )
 
         if right_lane_indices:
-
             right_lane_indices = np.concatenate(
                 right_lane_indices
             )
-
         else:
-
             right_lane_indices = np.array(
                 [],
                 dtype=np.int64,
             )
-
-        # ============================================================
-        # Polynomial fitting
-        # ============================================================
 
         minimum_lane_pixels = 150
 
         left_fit = None
         right_fit = None
 
+        # 1st-order fit: x = a*y + b.
         if (
             left_available
             and len(left_lane_indices)
             >= minimum_lane_pixels
         ):
-
             left_fit = np.polyfit(
-                nonzero_y[
-                    left_lane_indices
-                ],
-                nonzero_x[
-                    left_lane_indices
-                ],
+                nonzero_y[left_lane_indices],
+                nonzero_x[left_lane_indices],
                 1,
             )
 
@@ -537,14 +442,9 @@ class PerceptionNode(Node):
             and len(right_lane_indices)
             >= minimum_lane_pixels
         ):
-
             right_fit = np.polyfit(
-                nonzero_y[
-                    right_lane_indices
-                ],
-                nonzero_x[
-                    right_lane_indices
-                ],
+                nonzero_y[right_lane_indices],
+                nonzero_x[right_lane_indices],
                 1,
             )
 
@@ -554,10 +454,7 @@ class PerceptionNode(Node):
         ):
             return None
 
-        # ============================================================
-        # Lane center
-        # ============================================================
-
+        # Measure and use lane width at the same y position.
         lookahead_y = int(
             height * 0.80
         )
@@ -566,7 +463,6 @@ class PerceptionNode(Node):
         right_x = None
 
         if left_fit is not None:
-
             left_x = float(
                 np.polyval(
                     left_fit,
@@ -575,7 +471,6 @@ class PerceptionNode(Node):
             )
 
         if right_fit is not None:
-
             right_x = float(
                 np.polyval(
                     right_fit,
@@ -583,21 +478,136 @@ class PerceptionNode(Node):
                 )
             )
 
-        expected_lane_width = (
+        default_lane_width = (
             width * 0.4375
         )
 
-        # ------------------------------------------------------------
-        # Both lanes detected
-        # ------------------------------------------------------------
+        lane_width_used = (
+            default_lane_width
+        )
 
+        lane_width_source = 'default'
+        detection_mode = 'NONE'
+
+        # Both lanes: directly compute center and learn lane width.
         if (
             left_x is not None
             and right_x is not None
         ):
-
             if right_x <= left_x:
+                self.get_logger().warning(
+                    f'LANE REJECT | '
+                    f'invalid left/right order | '
+                    f'left_x={left_x:.1f} '
+                    f'right_x={right_x:.1f}'
+                )
                 return None
+
+            measured_lane_width = (
+                right_x - left_x
+            )
+
+            minimum_valid_width = (
+                width * 0.20
+            )
+
+            maximum_valid_width = (
+                width * 0.90
+            )
+
+            width_is_valid = (
+                minimum_valid_width
+                <= measured_lane_width
+                <= maximum_valid_width
+            )
+
+            # --------------------------------------------------------
+            # 차선 폭 자체가 말이 안 되는 경우만 검출 실패 처리
+            # --------------------------------------------------------
+
+            if not width_is_valid:
+                self.get_logger().warning(
+                    f'LANE REJECT | '
+                    f'measured_width={measured_lane_width:.1f}px '
+                    f'valid_range='
+                    f'{minimum_valid_width:.1f}~'
+                    f'{maximum_valid_width:.1f}px'
+                )
+                return None
+
+            # --------------------------------------------------------
+            # 새 차선 폭을 학습할지 결정
+            #
+            # 기존 learned width와 너무 차이가 난다고 해서
+            # 차선 검출 자체를 LOST 처리하지는 않는다.
+            # 단지 width 학습만 건너뛴다.
+            # --------------------------------------------------------
+
+            update_lane_width = True
+
+            if (
+                self.learned_lane_width_px
+                is not None
+            ):
+
+                difference_ratio = (
+                    abs(
+                        measured_lane_width
+                        -
+                        self.learned_lane_width_px
+                    )
+                    /
+                    max(
+                        1.0,
+                        self.learned_lane_width_px,
+                    )
+                )
+
+                if (
+                    difference_ratio
+                    >
+                    self.lane_width_change_limit
+                ):
+
+                    update_lane_width = False
+
+            # --------------------------------------------------------
+            # 신뢰할 만한 width일 때만 학습
+            # --------------------------------------------------------
+
+            if update_lane_width:
+
+                if (
+                    self.learned_lane_width_px
+                    is None
+                ):
+
+                    self.learned_lane_width_px = (
+                        measured_lane_width
+                    )
+
+                else:
+
+                    alpha = (
+                        self.lane_width_alpha
+                    )
+
+                    self.learned_lane_width_px = (
+                        (1.0 - alpha)
+                        *
+                        self.learned_lane_width_px
+                        +
+                        alpha
+                        *
+                        measured_lane_width
+                    )
+
+            lane_width_used = (
+                self.learned_lane_width_px
+            )
+
+            lane_width_source = 'learned'
+            detection_mode = 'BOTH'
 
             lane_center = (
                 left_x + right_x
@@ -614,38 +624,60 @@ class PerceptionNode(Node):
                 pixel_count / 2500.0,
             )
 
-        # ------------------------------------------------------------
-        # Only left lane
-        # ------------------------------------------------------------
-
+        # Only left lane.
         elif left_x is not None:
+            detection_mode = 'LEFT'
+
+            if self.learned_lane_width_px is not None:
+                lane_width_used = (
+                    self.learned_lane_width_px
+                )
+                lane_width_source = 'learned'
+                max_confidence = 0.50
+            else:
+                lane_width_used = (
+                    default_lane_width
+                )
+                lane_width_source = 'default'
+                max_confidence = 0.35
 
             lane_center = (
                 left_x
                 +
-                expected_lane_width / 2.0
+                lane_width_used / 2.0
             )
 
             confidence = min(
-                0.5,
+                max_confidence,
                 len(left_lane_indices)
                 / 1800.0,
             )
 
-        # ------------------------------------------------------------
-        # Only right lane
-        # ------------------------------------------------------------
-
+        # Only right lane.
         else:
+            detection_mode = 'RIGHT'
+
+            if self.learned_lane_width_px is not None:
+                lane_width_used = (
+                    self.learned_lane_width_px
+                )
+                lane_width_source = 'learned'
+                max_confidence = 0.50
+            else:
+                lane_width_used = (
+                    default_lane_width
+                )
+                lane_width_source = 'default'
+                max_confidence = 0.35
 
             lane_center = (
                 right_x
                 -
-                expected_lane_width / 2.0
+                lane_width_used / 2.0
             )
 
             confidence = min(
-                0.5,
+                max_confidence,
                 len(right_lane_indices)
                 / 1800.0,
             )
@@ -670,22 +702,19 @@ class PerceptionNode(Node):
 
         return {
             'error': lane_error,
-            'confidence': float(
-                confidence
-            ),
-            'lane_center': float(
-                lane_center
-            ),
-            'lookahead_y': int(
-                lookahead_y
-            ),
+            'confidence': float(confidence),
+            'lane_center': float(lane_center),
+            'lookahead_y': int(lookahead_y),
             'left_fit': left_fit,
             'right_fit': right_fit,
+            'lane_width_used': float(
+                lane_width_used
+            ),
+            'lane_width_source':
+                lane_width_source,
+            'detection_mode':
+                detection_mode,
         }
-
-    # ================================================================
-    # Debug image
-    # ================================================================
 
     def make_debug_image(
         self,
@@ -693,17 +722,11 @@ class PerceptionNode(Node):
         lane_mask,
         lane_result,
     ):
-
         debug = frame.copy()
 
-        height, width = (
-            frame.shape[:2]
-        )
+        height, width = frame.shape[:2]
 
-        # ------------------------------------------------------------
-        # Green overlay
-        # ------------------------------------------------------------
-
+        # Green lane-mask overlay.
         overlay = np.zeros_like(
             frame
         )
@@ -724,10 +747,7 @@ class PerceptionNode(Node):
             0,
         )
 
-        # ------------------------------------------------------------
-        # ROI outline
-        # ------------------------------------------------------------
-
+        # ROI outline.
         roi_polygon = np.array(
             [[
                 (
@@ -736,11 +756,11 @@ class PerceptionNode(Node):
                 ),
                 (
                     int(width * 0.15),
-                    int(height * 0.30),
+                    int(height * 0.35),
                 ),
                 (
                     int(width * 0.90),
-                    int(height * 0.30),
+                    int(height * 0.35),
                 ),
                 (
                     int(width * 0.98),
@@ -758,10 +778,7 @@ class PerceptionNode(Node):
             2,
         )
 
-        # ------------------------------------------------------------
-        # Camera center
-        # ------------------------------------------------------------
-
+        # Camera/image center.
         cv2.line(
             debug,
             (
@@ -776,10 +793,7 @@ class PerceptionNode(Node):
             2,
         )
 
-        # ============================================================
-        # Lane mask preview
-        # ============================================================
-
+        # Lane-mask preview.
         preview_width = max(
             1,
             width // 3,
@@ -808,14 +822,9 @@ class PerceptionNode(Node):
             mask_small.shape[:2]
         )
 
-        y0 = (
-            height - small_h
-        )
-
+        y0 = height - small_h
         y1 = height
-
         x0 = 0
-
         x1 = small_w
 
         debug[
@@ -825,10 +834,7 @@ class PerceptionNode(Node):
 
         cv2.rectangle(
             debug,
-            (
-                x0,
-                y0,
-            ),
+            (x0, y0),
             (
                 x1 - 1,
                 y1 - 1,
@@ -850,12 +856,7 @@ class PerceptionNode(Node):
             2,
         )
 
-        # ============================================================
-        # Lane lost
-        # ============================================================
-
         if lane_result is None:
-
             cv2.putText(
                 debug,
                 'LANE LOST',
@@ -866,12 +867,34 @@ class PerceptionNode(Node):
                 2,
             )
 
+            if self.learned_lane_width_px is None:
+                width_text = 'None'
+            else:
+                width_text = (
+                    f'{self.learned_lane_width_px:.1f}px'
+                )
+
+            cv2.putText(
+                debug,
+                f'learned width={width_text}',
+                (20, 75),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (0, 255, 255),
+                2,
+            )
+            cv2.putText(
+                debug,
+                'lane_valid=False',
+                (20, 110),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 0, 255),
+                2,
+            )
             return debug
 
-        # ============================================================
-        # Draw polynomial lanes
-        # ============================================================
-
+        # Draw fitted lanes.
         plot_y = np.linspace(
             int(height * 0.55),
             height - 1,
@@ -887,7 +910,6 @@ class PerceptionNode(Node):
         ]
 
         if left_fit is not None:
-
             left_x = np.polyval(
                 left_fit,
                 plot_y,
@@ -909,7 +931,6 @@ class PerceptionNode(Node):
             )
 
             if len(left_points) > 1:
-
                 cv2.polylines(
                     debug,
                     [left_points],
@@ -919,7 +940,6 @@ class PerceptionNode(Node):
                 )
 
         if right_fit is not None:
-
             right_x = np.polyval(
                 right_fit,
                 plot_y,
@@ -941,7 +961,6 @@ class PerceptionNode(Node):
             )
 
             if len(right_points) > 1:
-
                 cv2.polylines(
                     debug,
                     [right_points],
@@ -949,10 +968,6 @@ class PerceptionNode(Node):
                     (255, 0, 0),
                     5,
                 )
-
-        # ============================================================
-        # Lane center
-        # ============================================================
 
         lane_center = int(
             lane_result[
@@ -966,6 +981,7 @@ class PerceptionNode(Node):
             ]
         )
 
+        # Green point: lane center.
         cv2.circle(
             debug,
             (
@@ -977,6 +993,7 @@ class PerceptionNode(Node):
             -1,
         )
 
+        # Magenta line: image center -> lane center.
         cv2.line(
             debug,
             (
@@ -991,16 +1008,24 @@ class PerceptionNode(Node):
             4,
         )
 
-        # ============================================================
-        # Text
-        # ============================================================
-
         lane_error = lane_result[
             'error'
         ]
 
         confidence = lane_result[
             'confidence'
+        ]
+
+        detection_mode = lane_result[
+            'detection_mode'
+        ]
+
+        lane_width_used = lane_result[
+            'lane_width_used'
+        ]
+
+        lane_width_source = lane_result[
+            'lane_width_source'
         ]
 
         cv2.putText(
@@ -1023,26 +1048,49 @@ class PerceptionNode(Node):
             2,
         )
 
-        return debug
+        cv2.putText(
+            debug,
+            f'mode={detection_mode}',
+            (20, 110),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 255),
+            2,
+        )
 
-    # ================================================================
-    # Lane result publisher
-    # ================================================================
+        cv2.putText(
+            debug,
+            (
+                f'lane_width='
+                f'{lane_width_used:.1f}px '
+                f'({lane_width_source})'
+            ),
+            (20, 145),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (0, 255, 255),
+            2,
+        )
+        cv2.putText(
+            debug,
+            'lane_valid=True',
+            (20, 180),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 0),
+            2,
+        )
+        return debug
 
     def publish_lane_result(
         self,
         error,
         confidence,
     ):
-
         error_msg = Float32()
-
-        error_msg.data = float(
-            error
-        )
+        error_msg.data = float(error)
 
         confidence_msg = Float32()
-
         confidence_msg.data = float(
             confidence
         )
@@ -1055,93 +1103,62 @@ class PerceptionNode(Node):
             confidence_msg
         )
 
-    # ================================================================
-    # Debug image publisher
-    # ================================================================
+    def publish_lane_valid(
+        self,
+        valid,
+    ):
+
+        valid_msg = Bool()
+
+        valid_msg.data = bool(
+            valid
+        )
+
+        self.lane_valid_pub.publish(
+            valid_msg
+        )
 
     def publish_debug_image(
         self,
         frame,
         source_msg,
     ):
-
         frame = np.ascontiguousarray(
             frame
         )
 
         msg = Image()
 
-        msg.header = (
-            source_msg.header
-        )
-
-        msg.height = (
-            frame.shape[0]
-        )
-
-        msg.width = (
-            frame.shape[1]
-        )
-
-        msg.encoding = (
-            'bgr8'
-        )
-
+        msg.header = source_msg.header
+        msg.height = frame.shape[0]
+        msg.width = frame.shape[1]
+        msg.encoding = 'bgr8'
         msg.is_bigendian = 0
-
-        msg.step = (
-            frame.shape[1] * 3
-        )
-
-        msg.data = (
-            frame.tobytes()
-        )
+        msg.step = frame.shape[1] * 3
+        msg.data = frame.tobytes()
 
         self.debug_image_pub.publish(
             msg
         )
-
-    # ================================================================
-    # Debug mask publisher
-    # ================================================================
 
     def publish_debug_mask(
         self,
         mask,
         source_msg,
     ):
-
         mask = np.ascontiguousarray(
             mask
         )
 
         msg = Image()
 
-        msg.header = (
-            source_msg.header
-        )
-
-        msg.height = (
-            mask.shape[0]
-        )
-
-        msg.width = (
-            mask.shape[1]
-        )
-
-        msg.encoding = (
-            'mono8'
-        )
-
+        msg.header = source_msg.header
+        msg.height = mask.shape[0]
+        msg.width = mask.shape[1]
+        msg.encoding = 'mono8'
         msg.is_bigendian = 0
-
-        msg.step = (
-            mask.shape[1]
-        )
-
-        msg.data = (
-            mask.tobytes()
-        )
+        msg.step = mask.shape[1]
+        msg.data = mask.tobytes()
 
         self.debug_mask_pub.publish(
             msg
@@ -1149,7 +1166,6 @@ class PerceptionNode(Node):
 
 
 def main(args=None):
-
     rclpy.init(
         args=args
     )
@@ -1157,22 +1173,19 @@ def main(args=None):
     node = PerceptionNode()
 
     try:
-
         rclpy.spin(
             node
         )
 
     except KeyboardInterrupt:
-
         pass
 
     finally:
-
         node.destroy_node()
 
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
-
     main()
