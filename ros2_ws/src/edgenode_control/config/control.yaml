@@ -9,11 +9,10 @@ control_node:
     command_timeout_sec: 0.6
     status_timeout_sec: 0.6
 
-    # Camera lane_error convention:
-    # +error = desired lane center is to the RIGHT in the image.
-    # If the ERP42 initially steers the wrong way, flip this between +1 and -1.
+    # Map wheel angle is left-positive; this MORAI ERP42 command is right-positive.
+    # Verified against measured heading change during live low-speed driving.
     steering_sign: -1.0
-    max_front_steer_normalized: 0.70
+    max_front_steer_normalized: 0.85
 
     steering_kp: 0.80
     steering_ki: 0.00
@@ -22,8 +21,11 @@ control_node:
 
     speed_kp: 0.14
     speed_ki: 0.015
-    speed_kd: 0.02
+    speed_kd: 0.0
     speed_integral_limit: 12.0
 
     max_accel_cmd: 0.60
     max_brake_cmd: 0.80
+
+    steering_rate_limit: 1.5
+    steering_filter_sec: 0.10

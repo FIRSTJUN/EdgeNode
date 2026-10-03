@@ -38,7 +38,7 @@ setup(
     maintainer_email='poj285895@gmail.com',
 
     description=(
-        'Minimal ROS2 camera perception development package for EdgeNode.'
+        'Hansung OpenCV lane tracking and LiDAR perception for EdgeNode.'
     ),
 
     license='MIT',

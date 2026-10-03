@@ -23,7 +23,7 @@ services:
 
     volumes:
       - .:/workspace
-
+      - ../ProgrammingProject:/reference/ProgrammingProject:ro
     working_dir: /workspace
 
     command: sleep infinity

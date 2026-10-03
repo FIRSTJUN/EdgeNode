@@ -1,9 +1,29 @@
 planning_node:
   ros__parameters:
-
     target_error_topic: /planning/target_error
     target_speed_topic: /planning/target_speed
     state_topic: /planning/state
-
-    # MGeo / Localization 연결 전까지 차량을 움직이지 않는다.
-    cruise_speed_kmh: 0.0
+    map_file: /workspace/local_data/c_track_mgeo/link_set.json
+    # MORAI local ENU ground-truth pose; GPS/EKF is not yet connected.
+    turn_preference: straight
+    enable_drive: false
+    drive_duration_sec: 60.0
+    wheelbase_m: 1.04
+    max_wheel_angle_rad: 0.49
+    min_lookahead_m: 2.5
+    max_cross_track_m: 1.5
+    lane_timeout_sec: 0.6
+    obstacle_timeout_sec: 0.6
+    status_timeout_sec: 0.6
+    min_lane_confidence: 0.55
+    stop_distance: 2.5
+    avoid_distance: 3.5
+    avoid_error_offset: 0.0
+    cruise_speed: 6.0
+    avoid_speed: 0.0
+    curve_speed_kmh: 3.5
+    lane_confidence_enter: 0.55
+    lane_confidence_exit: 0.40
+    lane_lost_grace_sec: 0.4
+    lane_degraded_speed: 2.0
+    camera_steering_weight: 0.10

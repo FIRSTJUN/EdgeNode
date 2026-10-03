@@ -9,6 +9,7 @@
   <buildtool_depend>ament_python</buildtool_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+  <exec_depend>edgenode_perception</exec_depend>
   <exec_depend>edgenode_planning</exec_depend>
   <exec_depend>edgenode_control</exec_depend>
 

@@ -1,6 +1,60 @@
 perception_node:
   ros__parameters:
-
-    # MORAI camera input.
-    # The same topic is reproduced when the C-track rosbag is played.
     camera_topic: /camera/image/compressed
+    lidar_topic: /lidar/points
+
+    lane_error_topic: /perception/lane_error
+    lane_confidence_topic: /perception/lane_confidence
+    obstacle_topic: /perception/obstacle
+    debug_image_topic: /perception/debug/lane_image/compressed
+
+    # Camera lane detector
+    roi_top_y_ratio: 0.40
+    roi_bottom_y_ratio: 0.98
+    roi_top_left_x_ratio: 0.0
+    roi_top_right_x_ratio: 1.0
+    roi_bottom_left_x_ratio: 0.0
+    roi_bottom_right_x_ratio: 1.0
+
+    # Legacy window-count/minpix parameters retained for launch compatibility.
+    # Candidate tracking now follows separate row runs; margin still limits links.
+    sliding_windows: 9
+    sliding_margin_px: 55
+    sliding_minpix: 30
+    min_lane_pixels: 180
+    default_lane_width_px_640: 280.0
+    # Evaluate inside the visible lane support; lanes exit the sides below this.
+    lookahead_y_ratio: 0.48
+    gray_threshold: 160
+    sobel_threshold: 40
+    clahe_clip_limit: 2.0
+    blur_kernel: 3
+    morph_kernel: 3
+    min_lane_span_ratio: 0.08
+    geometry_tolerance_ratio: 0.35
+    max_center_jump_ratio: 0.15
+
+    # Camera candidate validation; confidence/Planning thresholds are unchanged.
+    lane_min_contrast: 45.0  # original gray-level ridge contrast on BOTH sides
+    lane_min_paint_fraction: 0.6
+    lane_max_run_width_ratio: 0.11
+    lane_max_candidates: 12
+    lane_width_ema_alpha: 0.2
+    lane_width_max_age_frames: 30
+    lane_width_update_confidence: 0.7
+    lane_side_memory_frames: 90
+
+    # LiDAR obstacle detector (assumes conventional x-forward, y-left, z-up frame)
+    lidar_x_min_m: 0.5
+    lidar_x_max_m: 15.0
+    lidar_abs_y_max_m: 4.0
+    lidar_z_min_m: -0.35
+    lidar_z_max_m: 1.5
+    lidar_max_points: 4500
+
+    dbscan_eps_m: 0.65
+    dbscan_min_samples: 6
+    min_cluster_points: 8
+
+    camera_rate_hz: 15.0
+    lidar_corridor_half_width_m: 1.05

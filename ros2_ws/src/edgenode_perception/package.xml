@@ -4,7 +4,7 @@
   <version>0.2.0</version>
 
   <description>
-    Minimal camera perception development package for EdgeNode.
+    Hansung OpenCV lane tracking and swept-corridor LiDAR perception.
   </description>
 
   <maintainer email="poj285895@gmail.com">
@@ -17,6 +17,8 @@
 
   <exec_depend>rclpy</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>python3-sklearn</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-opencv</exec_depend>
 
