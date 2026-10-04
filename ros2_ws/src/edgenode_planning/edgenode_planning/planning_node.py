@@ -13,6 +13,16 @@ from edgenode_planning.map_matcher import MapMatcher
 from edgenode_planning.speed_planner import SpeedPlanner
 
 
+def _finite_number(value):
+    """Validate drive values without accepting booleans or overflowing ints."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 class PlanningNode(Node):
     """
     Match localization and publish global and local paths at 20 Hz.
@@ -23,7 +33,8 @@ class PlanningNode(Node):
       - Global routes are recalculated only when the matched link or goal changes.
       - Local paths are extracted from the current pose every planning cycle.
       - Local geometry supplies speed recommendations for preview diagnostics.
-      - Vehicle target speed remains 0 km/h for safety.
+      - Driving requires explicit enablement, valid geometry and a finite lease.
+      - Default target speed remains 0 km/h with enable_drive=false.
 
     Future flow:
       GPS + IMU
@@ -63,7 +74,7 @@ class PlanningNode(Node):
             '/planning/state',
         )
 
-        # Recommended cruise speed; actual commands remain zero in preview.
+        # Recommendation is independent of the drive enablement and hard limit.
         self.declare_parameter(
             'cruise_speed_kmh',
             1.0,
@@ -81,6 +92,9 @@ class PlanningNode(Node):
                 ('local_path_topic', '/planning/local_path'),
                 ('local_path_length_m', 20.0),
                 ('enable_drive', False),
+                ('max_drive_speed_kmh', 1.0),
+                ('drive_duration_sec', 15.0),
+                ('drive_status_topic', '/planning/drive_status'),
                 ('curve_speed_kmh', 0.7),
                 ('sharp_curve_speed_kmh', 0.5),
                 ('speed_preview_distance_m', 10.0),
@@ -127,6 +141,11 @@ class PlanningNode(Node):
         self._route_key = None
         self._route_result = None
         self.latest_pose = None
+        self._drive_was_enabled = False
+        self._drive_session_start_ns = None
+        self._drive_session_expired = False
+        self._drive_session_duration_sec = None
+        self._drive_last_time_ns = None
 
         self.target_error_pub = self.create_publisher(
             Float32,
@@ -196,6 +215,11 @@ class PlanningNode(Node):
             self.get_parameter('speed_max_curvature_topic').value,
             10,
         )
+        self.drive_status_pub = self.create_publisher(
+            String,
+            self.get_parameter('drive_status_topic').value,
+            10,
+        )
         self.localization_sub = self.create_subscription(
             Odometry,
             self.get_parameter('localization_topic').value,
@@ -211,7 +235,7 @@ class PlanningNode(Node):
 
         self.get_logger().info(
             f'Planning node ready - loaded {len(self.map_matcher.links)} MGeo links; '
-            'waiting for localization (target speed: 0.0 km/h)'
+            'waiting for localization (drive disabled by default)'
         )
 
     def localization_callback(self, msg):
@@ -225,7 +249,7 @@ class PlanningNode(Node):
         self.latest_pose = (position.x, position.y, yaw)
 
     def plan(self):
-        """Publish diagnostics and valid cached routes with zero commands.
+        """Publish routes, recommendations and guarded, time-limited commands.
 
         Cache failures too, so an unreachable goal does not trigger a search
         every tick. During match loss retain the cache but publish no Path;
@@ -240,6 +264,28 @@ class PlanningNode(Node):
         speed_mode = 'INVALID'
         speed_curvature = float('nan')
         speed_max_curvature = float('nan')
+        local_result = None
+        speed_result = None
+        speed_valid = False
+
+        now_ns = self.get_clock().now().nanoseconds
+        enable_drive = self.get_parameter('enable_drive').value is True
+        if not enable_drive:
+            self._drive_was_enabled = False
+            self._drive_session_start_ns = None
+            self._drive_session_expired = False
+            self._drive_session_duration_sec = None
+            self._drive_last_time_ns = None
+        else:
+            if not self._drive_was_enabled:
+                self._drive_session_start_ns = now_ns
+                self._drive_session_expired = False
+                self._drive_session_duration_sec = None
+            elif now_ns < self._drive_last_time_ns:
+                # A clock rewind must not extend or resurrect the drive lease.
+                self._drive_session_expired = True
+            self._drive_was_enabled = True
+            self._drive_last_time_ns = now_ns
 
         if self.latest_pose is not None:
             x, y, yaw = self.latest_pose
@@ -297,7 +343,10 @@ class PlanningNode(Node):
                         self.local_path_pub.publish(local_path)
 
                         speed_result = self.speed_planner.plan(local_result['points'])
-                        if speed_result is not None:
+                        if (speed_result is not None
+                                and _finite_number(speed_result['target_speed_kmh'])
+                                and speed_result['target_speed_kmh'] >= 0):
+                            speed_valid = True
                             recommended_speed = speed_result['target_speed_kmh']
                             speed_mode = speed_result['speed_mode']
                             speed_curvature = speed_result['representative_curvature']
@@ -307,9 +356,32 @@ class PlanningNode(Node):
         target_error.data = 0.0
 
         target_speed = Float32()
-        # Preview only: enable_drive is reserved for a future activation step.
-        # Recommendations never become vehicle commands in this stage.
         target_speed.data = 0.0
+        drive_status = 'DISABLED'
+        if enable_drive:
+            max_speed = self.get_parameter('max_drive_speed_kmh').value
+            duration = self.get_parameter('drive_duration_sec').value
+            if (not _finite_number(max_speed) or max_speed <= 0
+                    or not _finite_number(duration) or duration <= 0):
+                drive_status = 'INVALID_CONFIG'
+            else:
+                # Live duration changes may shorten, but never extend a session.
+                if self._drive_session_duration_sec is None:
+                    self._drive_session_duration_sec = duration
+                else:
+                    self._drive_session_duration_sec = min(self._drive_session_duration_sec, duration)
+                elapsed_sec = (now_ns - self._drive_session_start_ns) / 1e9
+                if self._drive_session_expired or elapsed_sec >= self._drive_session_duration_sec:
+                    # Expiry is latched until an observed false -> true edge.
+                    self._drive_session_expired = True
+                    drive_status = 'EXPIRED'
+                elif (state_value == 'GLOBAL_PATH_READY' and status_value == 'MATCHED'
+                      and local_result is not None and speed_result is not None
+                      and speed_valid):
+                    target_speed.data = float(min(recommended_speed, max_speed))
+                    drive_status = 'ACTIVE'
+                else:
+                    drive_status = 'NOT_READY'
 
         state = String()
         state.data = state_value
@@ -325,6 +397,7 @@ class PlanningNode(Node):
         self.speed_mode_pub.publish(String(data=speed_mode))
         self.speed_curvature_pub.publish(Float32(data=speed_curvature))
         self.speed_max_curvature_pub.publish(Float32(data=speed_max_curvature))
+        self.drive_status_pub.publish(String(data=drive_status))
 
 
 def main(args=None):

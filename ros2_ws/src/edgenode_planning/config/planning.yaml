@@ -8,6 +8,7 @@ planning_node:
     speed_mode_topic: /planning/speed_mode
     speed_curvature_topic: /planning/speed_curvature
     speed_max_curvature_topic: /planning/speed_max_curvature
+    drive_status_topic: /planning/drive_status
 
     localization_topic: /localization/odometry
     current_link_topic: /planning/current_link
@@ -30,8 +31,10 @@ planning_node:
     map_match_connected_link_bonus: 0.7
     map_match_unrelated_link_penalty: 1.0
 
-    # Speed preview only. Actual target_speed remains 0.0 in this stage.
+    # Driving is opt-in, bounded by an independent speed cap and session lease.
     enable_drive: false
+    max_drive_speed_kmh: 1.0
+    drive_duration_sec: 15.0
     cruise_speed_kmh: 1.0
     curve_speed_kmh: 0.7
     sharp_curve_speed_kmh: 0.5

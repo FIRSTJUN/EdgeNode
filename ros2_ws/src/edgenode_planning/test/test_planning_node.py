@@ -28,6 +28,8 @@ class PlanningNodeTest(unittest.TestCase):
             'local_path_length_m': 20.0,
             'cruise_speed_kmh': 1.0,
             'enable_drive': False,
+            'max_drive_speed_kmh': 1.0,
+            'drive_duration_sec': 15.0,
         }
         self.route = {'points': [[0, 1, 2], [3.5, 4.5, 5.5], [6, 7, 8]]}
         self.stamp = Time(seconds=123, nanoseconds=456).to_msg()
@@ -39,10 +41,16 @@ class PlanningNodeTest(unittest.TestCase):
             speed_planner=Mock(wraps=SpeedPlanner()),
             _route_key=None,
             _route_result=None,
+            _drive_was_enabled=False,
+            _drive_session_start_ns=None,
+            _drive_session_expired=False,
+            _drive_session_duration_sec=None,
+            _drive_last_time_ns=None,
             get_parameter=lambda name: SimpleNamespace(value=self.parameters[name]),
             get_clock=Mock(),
         )
         self.node.get_clock.return_value.now.return_value.to_msg.return_value = self.stamp
+        self.node.get_clock.return_value.now.return_value.nanoseconds = 123_000_000_456
         self.node.dijkstra_planner.plan.return_value = self.route
         self.node.map_matcher.match.return_value = {
             'link_id': 'link_42', 'distance': 1.25, 'heading_diff': 12.5,
@@ -52,6 +60,7 @@ class PlanningNodeTest(unittest.TestCase):
             'map_match_status', 'map_match_distance', 'map_match_heading_diff',
             'global_path', 'local_path',
             'recommended_speed', 'speed_mode', 'speed_curvature', 'speed_max_curvature',
+            'drive_status',
         ):
             setattr(self.node, name + '_pub', Mock())
 
@@ -78,11 +87,27 @@ class PlanningNodeTest(unittest.TestCase):
             self.assertIsInstance(getattr(self.node, name + '_pub').publish.call_args.args[0], Float32)
         self.assertIsInstance(self.node.speed_mode_pub.publish.call_args.args[0], String)
         self.assertFalse(self.parameters['enable_drive'])
+        self.assertEqual(self.output('drive_status'), 'DISABLED')
         self.assert_stopped()
 
     def set_speed_route(self, points):
         self.node.dijkstra_planner.plan.return_value = {'points': points}
         self.node.latest_pose = (points[0][0], points[0][1], 0.0)
+
+    def advance_time(self, seconds):
+        now = self.node.get_clock.return_value.now.return_value
+        now.nanoseconds += round(seconds * 1e9)
+        now.to_msg.return_value = Time(nanoseconds=now.nanoseconds).to_msg()
+
+    def enable_straight_drive(self):
+        self.set_speed_route([[x, 0, 0] for x in range(31)])
+        self.parameters['enable_drive'] = True
+        PlanningNode.plan(self.node)
+
+    def assert_drive(self, status, speed=0.0):
+        self.assertEqual(self.output('drive_status'), status)
+        self.assertAlmostEqual(self.output('target_speed'), speed)
+        self.assertEqual(self.output('target_error'), 0.0)
 
     def assert_path(self, expected_points, frame_id='map', stamp=None, topic='global_path'):
         path = getattr(self.node, topic + '_pub').publish.call_args.args[0]
@@ -390,6 +415,235 @@ class PlanningNodeTest(unittest.TestCase):
         self.assertGreater(self.output('speed_max_curvature'), 0.10)
         self.assert_stopped()
 
+    def test_drive_activation_straight_is_active_with_one_kmh_target(self):
+        self.enable_straight_drive()
+        self.assert_drive('ACTIVE', 1.0)
+        self.assertEqual(self.output('recommended_speed'), 1.0)
+        self.assertEqual(self.output('state'), 'GLOBAL_PATH_READY')
+        self.assertEqual(self.node._drive_session_start_ns, 123_000_000_456)
+
+    def test_drive_activation_gentle_curve_targets_point_seven_kmh(self):
+        points = [[20 * math.sin(i * 0.1), 20 * (1 - math.cos(i * 0.1)), i]
+                  for i in range(6)]
+        self.set_speed_route(points)
+        self.parameters['enable_drive'] = True
+        PlanningNode.plan(self.node)
+        self.assert_drive('ACTIVE', 0.7)
+        self.assertEqual(self.output('speed_mode'), 'CURVE')
+
+    def test_drive_activation_sharp_curve_targets_point_five_kmh(self):
+        points = [[5 * math.sin(i * 0.1), 5 * (1 - math.cos(i * 0.1)), i]
+                  for i in range(6)]
+        self.set_speed_route(points)
+        self.parameters['enable_drive'] = True
+        PlanningNode.plan(self.node)
+        self.assert_drive('ACTIVE', 0.5)
+        self.assertEqual(self.output('speed_mode'), 'SHARP_CURVE')
+
+    def test_drive_hard_cap_is_independent_of_recommended_speed(self):
+        self.node.speed_planner = SpeedPlanner(cruise_speed_kmh=3.0)
+        self.enable_straight_drive()
+        for limit in (1.0, 0.4):
+            with self.subTest(limit=limit):
+                self.parameters['max_drive_speed_kmh'] = limit
+                PlanningNode.plan(self.node)
+                self.assert_drive('ACTIVE', limit)
+                self.assertEqual(self.output('recommended_speed'), 3.0)
+                self.assertLessEqual(self.output('target_speed'), limit)
+
+    def test_drive_map_match_loss_is_not_ready_and_recovers_with_same_session(self):
+        self.enable_straight_drive()
+        start = self.node._drive_session_start_ns
+        match = self.node.map_matcher.match.return_value
+        self.node.map_matcher.match.return_value = None
+        self.advance_time(5.0)
+        PlanningNode.plan(self.node)
+        self.assert_drive('NOT_READY')
+        self.assertEqual(self.output('state'), 'MAP_MATCH_LOST')
+        self.assert_invalid_speed_preview()
+        self.node.map_matcher.match.return_value = match
+        self.advance_time(1.0)
+        PlanningNode.plan(self.node)
+        self.assert_drive('ACTIVE', 1.0)
+        self.assertEqual(self.node._drive_session_start_ns, start)
+        self.node.dijkstra_planner.plan.assert_called_once()
+
+    def test_drive_without_localization_is_not_ready(self):
+        self.parameters['enable_drive'] = True
+        PlanningNode.plan(self.node)
+        self.assert_drive('NOT_READY')
+        self.assertEqual(self.output('state'), 'WAIT_FOR_LOCALIZATION')
+        self.node.speed_planner.plan.assert_not_called()
+
+    def test_drive_without_global_route_is_not_ready(self):
+        self.enable_straight_drive()
+        self.parameters['goal_node_id'] = 'unreachable'
+        self.node.dijkstra_planner.plan.return_value = None
+        PlanningNode.plan(self.node)
+        self.assert_drive('NOT_READY')
+        self.assertEqual(self.output('state'), 'GLOBAL_PATH_NOT_FOUND')
+
+    def test_drive_local_path_failure_is_not_ready(self):
+        self.enable_straight_drive()
+        self.parameters['local_path_length_m'] = 0.0
+        PlanningNode.plan(self.node)
+        self.assert_drive('NOT_READY')
+        self.assertEqual(self.output('state'), 'GLOBAL_PATH_READY')
+        self.node.speed_planner.plan.assert_called_once()
+
+    def test_drive_speed_planner_none_is_not_ready(self):
+        self.enable_straight_drive()
+        self.node.speed_planner.plan.return_value = None
+        PlanningNode.plan(self.node)
+        self.assert_drive('NOT_READY')
+        self.assert_invalid_speed_preview()
+        self.assertEqual(self.output('state'), 'GLOBAL_PATH_READY')
+
+    def test_drive_invalid_recommended_speed_is_not_ready_and_never_published_as_command(self):
+        self.enable_straight_drive()
+        valid = SpeedPlanner().plan([[x, 0, 0] for x in range(21)])
+        for speed in (math.nan, math.inf, -math.inf, -1.0, None, True, 10 ** 400):
+            with self.subTest(speed=speed):
+                self.node.speed_planner.plan.return_value = {**valid, 'target_speed_kmh': speed}
+                PlanningNode.plan(self.node)
+                self.assert_drive('NOT_READY')
+                self.assert_invalid_speed_preview()
+
+    def test_drive_is_active_before_lease_and_expired_at_fifteen_seconds(self):
+        self.enable_straight_drive()
+        self.advance_time(14.999)
+        PlanningNode.plan(self.node)
+        self.assert_drive('ACTIVE', 1.0)
+        self.advance_time(0.001)
+        PlanningNode.plan(self.node)
+        self.assert_drive('EXPIRED')
+        self.assertEqual(self.output('recommended_speed'), 1.0)
+        self.assertEqual(self.output('speed_mode'), 'CRUISE')
+
+    def test_expired_drive_stays_expired_while_true_and_after_duration_increase(self):
+        self.enable_straight_drive()
+        start = self.node._drive_session_start_ns
+        self.advance_time(15.0)
+        PlanningNode.plan(self.node)
+        self.assert_drive('EXPIRED')
+        self.parameters['drive_duration_sec'] = 30.0
+        for seconds in (1.0, 1.0, 20.0):
+            self.advance_time(seconds)
+            PlanningNode.plan(self.node)
+            self.assert_drive('EXPIRED')
+            self.assertEqual(self.node._drive_session_start_ns, start)
+
+    def test_false_then_true_resets_and_starts_new_drive_session(self):
+        self.enable_straight_drive()
+        start = self.node._drive_session_start_ns
+        self.advance_time(16.0)
+        PlanningNode.plan(self.node)
+        self.assert_drive('EXPIRED')
+        self.parameters['enable_drive'] = False
+        PlanningNode.plan(self.node)
+        self.assert_drive('DISABLED')
+        self.assertIsNone(self.node._drive_session_start_ns)
+        self.assertFalse(self.node._drive_session_expired)
+        self.assertIsNone(self.node._drive_session_duration_sec)
+        self.assertEqual(self.output('recommended_speed'), 1.0)
+        self.parameters['enable_drive'] = True
+        PlanningNode.plan(self.node)
+        self.assert_drive('ACTIVE', 1.0)
+        self.assertEqual(self.node._drive_session_start_ns, start + 16_000_000_000)
+
+    def test_disabling_active_drive_stops_immediately_and_keeps_preview(self):
+        self.enable_straight_drive()
+        self.parameters['enable_drive'] = False
+        PlanningNode.plan(self.node)
+        self.assert_drive('DISABLED')
+        self.assertEqual(self.output('recommended_speed'), 1.0)
+        self.assertEqual(self.output('speed_mode'), 'CRUISE')
+
+    def test_live_duration_increase_does_not_extend_session_and_decrease_expires_it(self):
+        self.enable_straight_drive()
+        self.advance_time(5.0)
+        self.parameters['drive_duration_sec'] = 30.0
+        PlanningNode.plan(self.node)
+        self.assert_drive('ACTIVE', 1.0)
+        self.advance_time(10.0)
+        PlanningNode.plan(self.node)
+        self.assert_drive('EXPIRED')
+        self.parameters['enable_drive'] = False
+        PlanningNode.plan(self.node)
+        self.parameters['enable_drive'] = True
+        self.parameters['drive_duration_sec'] = 15.0
+        PlanningNode.plan(self.node)
+        self.advance_time(5.0)
+        self.parameters['drive_duration_sec'] = 4.0
+        PlanningNode.plan(self.node)
+        self.assert_drive('EXPIRED')
+
+    def test_invalid_drive_duration_and_max_speed_fail_closed(self):
+        self.enable_straight_drive()
+        for name in ('max_drive_speed_kmh', 'drive_duration_sec'):
+            for value in (0.0, -1.0, math.nan, math.inf, -math.inf,
+                          None, 'bad', True, [], 10 ** 400):
+                with self.subTest(name=name, value=value):
+                    self.parameters['max_drive_speed_kmh'] = 1.0
+                    self.parameters['drive_duration_sec'] = 15.0
+                    self.parameters[name] = value
+                    PlanningNode.plan(self.node)
+                    self.assert_drive('INVALID_CONFIG')
+                    self.assertEqual(self.output('recommended_speed'), 1.0)
+                    self.assertEqual(self.output('state'), 'GLOBAL_PATH_READY')
+
+    def test_drive_session_starts_at_enablement_even_while_not_ready(self):
+        self.parameters['enable_drive'] = True
+        PlanningNode.plan(self.node)
+        self.assert_drive('NOT_READY')
+        start = self.node._drive_session_start_ns
+        self.advance_time(16.0)
+        self.set_speed_route([[x, 0, 0] for x in range(21)])
+        PlanningNode.plan(self.node)
+        self.assert_drive('EXPIRED')
+        self.assertEqual(self.node._drive_session_start_ns, start)
+
+    def test_invalid_config_recovery_never_restarts_lease(self):
+        self.parameters['enable_drive'] = True
+        self.parameters['drive_duration_sec'] = -1.0
+        PlanningNode.plan(self.node)
+        self.assert_drive('INVALID_CONFIG')
+        self.advance_time(16.0)
+        self.parameters['drive_duration_sec'] = 15.0
+        self.set_speed_route([[x, 0, 0] for x in range(21)])
+        PlanningNode.plan(self.node)
+        self.assert_drive('EXPIRED')
+
+    def test_clock_rewind_expires_drive_until_false_then_true(self):
+        self.enable_straight_drive()
+        self.advance_time(5.0)
+        PlanningNode.plan(self.node)
+        self.assert_drive('ACTIVE', 1.0)
+        # Rewind remains after the original start, but must still stop the lease.
+        self.advance_time(-1.0)
+        PlanningNode.plan(self.node)
+        self.assert_drive('EXPIRED')
+        self.advance_time(2.0)
+        PlanningNode.plan(self.node)
+        self.assert_drive('EXPIRED')
+
+    def test_drive_session_start_at_ros_time_zero_is_valid(self):
+        now = self.node.get_clock.return_value.now.return_value
+        now.nanoseconds = 0
+        now.to_msg.return_value = Time(nanoseconds=0).to_msg()
+        self.enable_straight_drive()
+        self.assert_drive('ACTIVE', 1.0)
+        self.assertEqual(self.node._drive_session_start_ns, 0)
+        self.advance_time(15.0)
+        PlanningNode.plan(self.node)
+        self.assert_drive('EXPIRED')
+
+    def test_valid_zero_recommendation_does_not_invent_positive_speed(self):
+        self.node.speed_planner = SpeedPlanner(cruise_speed_kmh=0.0)
+        self.enable_straight_drive()
+        self.assert_drive('ACTIVE', 0.0)
+        self.assertEqual(self.output('recommended_speed'), 0.0)
+
     def test_link_change_replans_and_publishes_new_points(self):
         self.node.latest_pose = (12.0, -3.0, 0.0)
         PlanningNode.plan(self.node)
@@ -547,6 +801,7 @@ class PlanningNodeTest(unittest.TestCase):
             'speed_mode_topic': '/custom/speed_mode',
             'speed_curvature_topic': '/custom/speed_curvature',
             'speed_max_curvature_topic': '/custom/speed_max_curvature',
+            'drive_status_topic': '/custom/drive_status',
         }
         declared = {}
 
@@ -583,6 +838,7 @@ class PlanningNodeTest(unittest.TestCase):
                     publisher.assert_any_call(String, '/custom/speed_mode', 10)
                     publisher.assert_any_call(Float32, '/custom/speed_curvature', 10)
                     publisher.assert_any_call(Float32, '/custom/speed_max_curvature', 10)
+                    publisher.assert_any_call(String, '/custom/drive_status', 10)
                     timer.assert_called_once_with(0.05, node.plan)
                     self.assertEqual(declared['goal_node_id'], 'A122CC001096')
                     self.assertEqual(declared['global_path_topic'], '/planning/global_path')
@@ -592,6 +848,14 @@ class PlanningNodeTest(unittest.TestCase):
                     self.assertIsInstance(node.local_path_planner, LocalPathPlanner)
                     self.assertIsInstance(node.speed_planner, SpeedPlanner)
                     self.assertFalse(declared['enable_drive'])
+                    self.assertEqual(declared['max_drive_speed_kmh'], 1.0)
+                    self.assertEqual(declared['drive_duration_sec'], 15.0)
+                    self.assertEqual(declared['drive_status_topic'], '/planning/drive_status')
+                    self.assertFalse(node._drive_was_enabled)
+                    self.assertIsNone(node._drive_session_start_ns)
+                    self.assertFalse(node._drive_session_expired)
+                    self.assertIsNone(node._drive_session_duration_sec)
+                    self.assertIsNone(node._drive_last_time_ns)
                     self.assertEqual(declared['cruise_speed_kmh'], 1.0)
                     self.assertEqual(declared['curve_speed_kmh'], 0.7)
                     self.assertEqual(declared['sharp_curve_speed_kmh'], 0.5)
