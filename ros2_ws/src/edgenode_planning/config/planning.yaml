@@ -4,6 +4,10 @@ planning_node:
     target_error_topic: /planning/target_error
     target_speed_topic: /planning/target_speed
     state_topic: /planning/state
+    recommended_speed_topic: /planning/recommended_speed
+    speed_mode_topic: /planning/speed_mode
+    speed_curvature_topic: /planning/speed_curvature
+    speed_max_curvature_topic: /planning/speed_max_curvature
 
     localization_topic: /localization/odometry
     current_link_topic: /planning/current_link
@@ -26,5 +30,11 @@ planning_node:
     map_match_connected_link_bonus: 0.7
     map_match_unrelated_link_penalty: 1.0
 
-    # Global / Local Path 발행 단계에서도 경로 생성 여부와 관계없이 항상 정지한다.
-    cruise_speed_kmh: 0.0
+    # Speed preview only. Actual target_speed remains 0.0 in this stage.
+    enable_drive: false
+    cruise_speed_kmh: 1.0
+    curve_speed_kmh: 0.7
+    sharp_curve_speed_kmh: 0.5
+    speed_preview_distance_m: 10.0
+    curve_curvature_threshold: 0.04
+    sharp_curvature_threshold: 0.10

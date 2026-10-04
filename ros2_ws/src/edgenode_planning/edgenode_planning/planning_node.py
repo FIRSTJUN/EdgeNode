@@ -10,6 +10,7 @@ from std_msgs.msg import Float32, String
 from edgenode_planning.dijkstra_planner import DijkstraPlanner
 from edgenode_planning.local_path_planner import LocalPathPlanner
 from edgenode_planning.map_matcher import MapMatcher
+from edgenode_planning.speed_planner import SpeedPlanner
 
 
 class PlanningNode(Node):
@@ -21,6 +22,7 @@ class PlanningNode(Node):
       - Localization odometry is the only pose input.
       - Global routes are recalculated only when the matched link or goal changes.
       - Local paths are extracted from the current pose every planning cycle.
+      - Local geometry supplies speed recommendations for preview diagnostics.
       - Vehicle target speed remains 0 km/h for safety.
 
     Future flow:
@@ -61,10 +63,10 @@ class PlanningNode(Node):
             '/planning/state',
         )
 
-        # Retained for compatibility; this stage always publishes zero speed.
+        # Recommended cruise speed; actual commands remain zero in preview.
         self.declare_parameter(
             'cruise_speed_kmh',
-            0.0,
+            1.0,
         )
 
         self.declare_parameters(
@@ -78,6 +80,16 @@ class PlanningNode(Node):
                 ('global_path_topic', '/planning/global_path'),
                 ('local_path_topic', '/planning/local_path'),
                 ('local_path_length_m', 20.0),
+                ('enable_drive', False),
+                ('curve_speed_kmh', 0.7),
+                ('sharp_curve_speed_kmh', 0.5),
+                ('speed_preview_distance_m', 10.0),
+                ('curve_curvature_threshold', 0.04),
+                ('sharp_curvature_threshold', 0.10),
+                ('recommended_speed_topic', '/planning/recommended_speed'),
+                ('speed_mode_topic', '/planning/speed_mode'),
+                ('speed_curvature_topic', '/planning/speed_curvature'),
+                ('speed_max_curvature_topic', '/planning/speed_max_curvature'),
                 ('goal_node_id', 'A122CC001096'),
                 ('global_path_frame_id', 'map'),
                 ('mgeo_dir', '/workspace/local_data/c_track_mgeo'),
@@ -104,6 +116,14 @@ class PlanningNode(Node):
         )
         self.dijkstra_planner = DijkstraPlanner(mgeo_dir=mgeo_dir)
         self.local_path_planner = LocalPathPlanner()
+        self.speed_planner = SpeedPlanner(
+            cruise_speed_kmh=self.get_parameter('cruise_speed_kmh').value,
+            curve_speed_kmh=self.get_parameter('curve_speed_kmh').value,
+            sharp_curve_speed_kmh=self.get_parameter('sharp_curve_speed_kmh').value,
+            preview_distance_m=self.get_parameter('speed_preview_distance_m').value,
+            curve_curvature_threshold=self.get_parameter('curve_curvature_threshold').value,
+            sharp_curvature_threshold=self.get_parameter('sharp_curvature_threshold').value,
+        )
         self._route_key = None
         self._route_result = None
         self.latest_pose = None
@@ -156,6 +176,26 @@ class PlanningNode(Node):
             self.get_parameter('local_path_topic').value,
             10,
         )
+        self.recommended_speed_pub = self.create_publisher(
+            Float32,
+            self.get_parameter('recommended_speed_topic').value,
+            10,
+        )
+        self.speed_mode_pub = self.create_publisher(
+            String,
+            self.get_parameter('speed_mode_topic').value,
+            10,
+        )
+        self.speed_curvature_pub = self.create_publisher(
+            Float32,
+            self.get_parameter('speed_curvature_topic').value,
+            10,
+        )
+        self.speed_max_curvature_pub = self.create_publisher(
+            Float32,
+            self.get_parameter('speed_max_curvature_topic').value,
+            10,
+        )
         self.localization_sub = self.create_subscription(
             Odometry,
             self.get_parameter('localization_topic').value,
@@ -196,6 +236,10 @@ class PlanningNode(Node):
         current_link = ''
         distance = float('nan')
         heading_diff = float('nan')
+        recommended_speed = 0.0
+        speed_mode = 'INVALID'
+        speed_curvature = float('nan')
+        speed_max_curvature = float('nan')
 
         if self.latest_pose is not None:
             x, y, yaw = self.latest_pose
@@ -252,10 +296,19 @@ class PlanningNode(Node):
                             local_path.poses.append(pose)
                         self.local_path_pub.publish(local_path)
 
+                        speed_result = self.speed_planner.plan(local_result['points'])
+                        if speed_result is not None:
+                            recommended_speed = speed_result['target_speed_kmh']
+                            speed_mode = speed_result['speed_mode']
+                            speed_curvature = speed_result['representative_curvature']
+                            speed_max_curvature = speed_result['max_curvature']
+
         target_error = Float32()
         target_error.data = 0.0
 
         target_speed = Float32()
+        # Preview only: enable_drive is reserved for a future activation step.
+        # Recommendations never become vehicle commands in this stage.
         target_speed.data = 0.0
 
         state = String()
@@ -268,6 +321,10 @@ class PlanningNode(Node):
         self.map_match_status_pub.publish(String(data=status_value))
         self.map_match_distance_pub.publish(Float32(data=distance))
         self.map_match_heading_diff_pub.publish(Float32(data=heading_diff))
+        self.recommended_speed_pub.publish(Float32(data=recommended_speed))
+        self.speed_mode_pub.publish(String(data=speed_mode))
+        self.speed_curvature_pub.publish(Float32(data=speed_curvature))
+        self.speed_max_curvature_pub.publish(Float32(data=speed_max_curvature))
 
 
 def main(args=None):

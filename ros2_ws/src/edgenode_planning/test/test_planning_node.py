@@ -11,11 +11,13 @@ from unittest.mock import Mock, call, patch
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry, Path
 from rclpy.time import Time
+from std_msgs.msg import Float32, String
 
 from edgenode_planning.dijkstra_planner import DijkstraPlanner
 from edgenode_planning.local_path_planner import LocalPathPlanner
 from edgenode_planning.map_matcher import MapMatcher
 from edgenode_planning.planning_node import PlanningNode
+from edgenode_planning.speed_planner import SpeedPlanner
 
 
 class PlanningNodeTest(unittest.TestCase):
@@ -24,7 +26,8 @@ class PlanningNodeTest(unittest.TestCase):
             'goal_node_id': 'goal_default',
             'global_path_frame_id': 'map',
             'local_path_length_m': 20.0,
-            'cruise_speed_kmh': 50.0,
+            'cruise_speed_kmh': 1.0,
+            'enable_drive': False,
         }
         self.route = {'points': [[0, 1, 2], [3.5, 4.5, 5.5], [6, 7, 8]]}
         self.stamp = Time(seconds=123, nanoseconds=456).to_msg()
@@ -33,6 +36,7 @@ class PlanningNodeTest(unittest.TestCase):
             map_matcher=Mock(),
             dijkstra_planner=Mock(),
             local_path_planner=Mock(wraps=LocalPathPlanner()),
+            speed_planner=Mock(wraps=SpeedPlanner()),
             _route_key=None,
             _route_result=None,
             get_parameter=lambda name: SimpleNamespace(value=self.parameters[name]),
@@ -47,6 +51,7 @@ class PlanningNodeTest(unittest.TestCase):
             'target_error', 'target_speed', 'state', 'current_link',
             'map_match_status', 'map_match_distance', 'map_match_heading_diff',
             'global_path', 'local_path',
+            'recommended_speed', 'speed_mode', 'speed_curvature', 'speed_max_curvature',
         ):
             setattr(self.node, name + '_pub', Mock())
 
@@ -56,6 +61,28 @@ class PlanningNodeTest(unittest.TestCase):
     def assert_stopped(self):
         self.assertEqual(self.output('target_speed'), 0.0)
         self.assertEqual(self.output('target_error'), 0.0)
+
+    def assert_invalid_speed_preview(self):
+        self.assertEqual(self.output('recommended_speed'), 0.0)
+        self.assertEqual(self.output('speed_mode'), 'INVALID')
+        self.assertTrue(math.isnan(self.output('speed_curvature')))
+        self.assertTrue(math.isnan(self.output('speed_max_curvature')))
+        self.assert_stopped()
+
+    def assert_speed_preview(self, speed, mode, curvature):
+        self.assertEqual(self.output('recommended_speed'), speed)
+        self.assertEqual(self.output('speed_mode'), mode)
+        self.assertAlmostEqual(self.output('speed_curvature'), curvature)
+        self.assertAlmostEqual(self.output('speed_max_curvature'), curvature)
+        for name in ('recommended_speed', 'speed_curvature', 'speed_max_curvature'):
+            self.assertIsInstance(getattr(self.node, name + '_pub').publish.call_args.args[0], Float32)
+        self.assertIsInstance(self.node.speed_mode_pub.publish.call_args.args[0], String)
+        self.assertFalse(self.parameters['enable_drive'])
+        self.assert_stopped()
+
+    def set_speed_route(self, points):
+        self.node.dijkstra_planner.plan.return_value = {'points': points}
+        self.node.latest_pose = (points[0][0], points[0][1], 0.0)
 
     def assert_path(self, expected_points, frame_id='map', stamp=None, topic='global_path'):
         path = getattr(self.node, topic + '_pub').publish.call_args.args[0]
@@ -85,6 +112,9 @@ class PlanningNodeTest(unittest.TestCase):
         self.assertTrue(math.isnan(self.output('map_match_distance')))
         self.assertTrue(math.isnan(self.output('map_match_heading_diff')))
         self.assert_stopped()
+
+        self.assert_invalid_speed_preview()
+        self.node.speed_planner.plan.assert_not_called()
 
     def test_callback_stores_only_latest_pose_with_enu_yaw(self):
         for degrees in [0.0, 90.0, -90.0, 179.0, -179.0]:
@@ -147,6 +177,7 @@ class PlanningNodeTest(unittest.TestCase):
         self.node.dijkstra_planner.plan.assert_called_once()
         self.node.global_path_pub.publish.assert_called_once()
         self.assert_stopped()
+        self.assert_invalid_speed_preview()
 
     def test_initial_match_failure_does_not_plan_or_publish_path(self):
         self.node.latest_pose = (12.0, -3.0, 0.0)
@@ -159,6 +190,8 @@ class PlanningNodeTest(unittest.TestCase):
         self.assertEqual(self.output('state'), 'MAP_MATCH_LOST')
         self.assertEqual(self.output('map_match_status'), 'NO_MATCH')
         self.assert_stopped()
+        self.assert_invalid_speed_preview()
+        self.node.speed_planner.plan.assert_not_called()
 
     def test_dijkstra_failure_preserves_matching_diagnostics_and_stops(self):
         self.node.latest_pose = (12.0, -3.0, 0.0)
@@ -173,6 +206,8 @@ class PlanningNodeTest(unittest.TestCase):
         self.node.local_path_pub.publish.assert_not_called()
         self.node.local_path_planner.extract.assert_not_called()
         self.assert_stopped()
+        self.assert_invalid_speed_preview()
+        self.node.speed_planner.plan.assert_not_called()
 
     def test_same_link_and_goal_reuse_route_while_publishing_each_tick(self):
         for x in (12.0, 13.0, 14.0):
@@ -231,6 +266,128 @@ class PlanningNodeTest(unittest.TestCase):
         self.node.global_path_pub.publish.assert_called_once()
         self.node.local_path_pub.publish.assert_not_called()
         self.assertEqual(self.output('state'), 'GLOBAL_PATH_READY')
+        self.assert_stopped()
+        self.assert_invalid_speed_preview()
+        self.node.speed_planner.plan.assert_not_called()
+
+    def test_straight_local_path_previews_cruise_but_target_speed_stays_zero(self):
+        points = [[x, 0, x / 10.0] for x in range(31)]
+        self.set_speed_route(points)
+        PlanningNode.plan(self.node)
+        self.assert_speed_preview(1.0, 'CRUISE', 0.0)
+        self.assert_path(points)
+        self.assert_path(points[:21], topic='local_path')
+        self.node.speed_planner.plan.assert_called_once_with(points[:21])
+        self.assertEqual(self.output('state'), 'GLOBAL_PATH_READY')
+
+    def test_gentle_local_curve_previews_curve_speed_but_stays_stopped(self):
+        points = [[20 * math.sin(i * 0.1), 20 * (1 - math.cos(i * 0.1)), i]
+                  for i in range(6)]
+        self.set_speed_route(points)
+        PlanningNode.plan(self.node)
+        self.assert_speed_preview(0.7, 'CURVE', 0.05)
+        self.assert_path(points)
+        self.assert_path(points, topic='local_path')
+
+    def test_sharp_local_curve_previews_sharp_speed_but_stays_stopped(self):
+        points = [[5 * math.sin(i * 0.1), 5 * (1 - math.cos(i * 0.1)), i]
+                  for i in range(6)]
+        self.set_speed_route(points)
+        PlanningNode.plan(self.node)
+        self.assert_speed_preview(0.5, 'SHARP_CURVE', 0.2)
+        self.assert_path(points)
+        self.assert_path(points, topic='local_path')
+
+    def test_speed_planner_failure_clears_previous_recommendation_without_changing_paths(self):
+        points = [[x, 0, 0] for x in range(21)]
+        self.set_speed_route(points)
+        PlanningNode.plan(self.node)
+        self.assert_speed_preview(1.0, 'CRUISE', 0.0)
+        self.node.speed_planner.plan.return_value = None
+        PlanningNode.plan(self.node)
+        self.assert_invalid_speed_preview()
+        self.assertEqual(self.output('state'), 'GLOBAL_PATH_READY')
+        self.assert_path(points)
+        self.assert_path(points, topic='local_path')
+        self.assertEqual(self.node.global_path_pub.publish.call_count, 2)
+        self.assertEqual(self.node.local_path_pub.publish.call_count, 2)
+        self.node.dijkstra_planner.plan.assert_called_once()
+
+    def test_too_short_local_path_produces_invalid_speed_preview(self):
+        self.set_speed_route([[0, 0, 1], [5, 0, 2]])
+        PlanningNode.plan(self.node)
+        self.assert_invalid_speed_preview()
+        self.assertEqual(self.output('state'), 'GLOBAL_PATH_READY')
+        self.node.global_path_pub.publish.assert_called_once()
+        self.node.local_path_pub.publish.assert_called_once()
+        self.node.speed_planner.plan.assert_called_once()
+
+    def test_preview_refreshes_each_pose_cycle_using_cached_global_route(self):
+        points = [[x, 0, 0] for x in range(31)]
+        self.set_speed_route(points)
+        for x in (0.0, 1.0, 2.0):
+            self.node.latest_pose = (x, 0.0, 0.0)
+            PlanningNode.plan(self.node)
+            self.assert_speed_preview(1.0, 'CRUISE', 0.0)
+        self.node.dijkstra_planner.plan.assert_called_once()
+        self.assertEqual(self.node.speed_planner.plan.call_args_list, [
+            call(points[:21]), call(points[1:22]), call(points[2:23]),
+        ])
+        for name in ('global_path', 'local_path', 'recommended_speed', 'speed_mode',
+                     'speed_curvature', 'speed_max_curvature'):
+            self.assertEqual(getattr(self.node, name + '_pub').publish.call_count, 3)
+
+    def test_match_loss_and_failed_route_clear_valid_speed_preview(self):
+        points = [[x, 0, 0] for x in range(21)]
+        self.set_speed_route(points)
+        PlanningNode.plan(self.node)
+        self.assert_speed_preview(1.0, 'CRUISE', 0.0)
+        match = self.node.map_matcher.match.return_value
+        self.node.map_matcher.match.return_value = None
+        PlanningNode.plan(self.node)
+        self.assertEqual(self.output('state'), 'MAP_MATCH_LOST')
+        self.assert_invalid_speed_preview()
+        self.node.global_path_pub.publish.assert_called_once()
+        self.node.local_path_pub.publish.assert_called_once()
+        self.node.speed_planner.plan.assert_called_once()
+        self.node.map_matcher.match.return_value = match
+        self.parameters['goal_node_id'] = 'unreachable'
+        self.node.dijkstra_planner.plan.return_value = None
+        PlanningNode.plan(self.node)
+        self.assertEqual(self.output('state'), 'GLOBAL_PATH_NOT_FOUND')
+        self.assert_invalid_speed_preview()
+        self.node.global_path_pub.publish.assert_called_once()
+        self.node.local_path_pub.publish.assert_called_once()
+        self.node.speed_planner.plan.assert_called_once()
+
+    def test_invalid_speed_parameters_fail_closed_with_paths_still_available(self):
+        self.set_speed_route([[x, 0, 0] for x in range(21)])
+        self.node.speed_planner = SpeedPlanner(cruise_speed_kmh=-1.0)
+        PlanningNode.plan(self.node)
+        self.assert_invalid_speed_preview()
+        self.assertEqual(self.output('state'), 'GLOBAL_PATH_READY')
+        self.node.global_path_pub.publish.assert_called_once()
+        self.node.local_path_pub.publish.assert_called_once()
+
+    def test_speed_preview_uses_identical_numeric_list_from_local_extraction(self):
+        points = [[x, 0, x] for x in range(31)]
+        local_points = points[5:10]
+        self.set_speed_route(points)
+        self.node.local_path_planner.extract.return_value = {'points': local_points}
+        PlanningNode.plan(self.node)
+        self.assertIs(self.node.speed_planner.plan.call_args.args[0], local_points)
+        self.assert_speed_preview(1.0, 'CRUISE', 0.0)
+        self.assert_path(local_points, topic='local_path')
+
+    def test_representative_and_maximum_curvature_publish_distinct_diagnostics(self):
+        points = [[i * 0.25, 0, 0] for i in range(31)]
+        points[15][1] = 1.0
+        self.set_speed_route(points)
+        PlanningNode.plan(self.node)
+        self.assertEqual(self.output('speed_mode'), 'CRUISE')
+        self.assertEqual(self.output('recommended_speed'), 1.0)
+        self.assertEqual(self.output('speed_curvature'), 0.0)
+        self.assertGreater(self.output('speed_max_curvature'), 0.10)
         self.assert_stopped()
 
     def test_link_change_replans_and_publishes_new_points(self):
@@ -379,6 +536,17 @@ class PlanningNodeTest(unittest.TestCase):
             'local_path_topic': '/custom/local_path',
             'local_path_length_m': 12.0,
             'global_path_frame_id': 'custom_map',
+            'enable_drive': False,
+            'cruise_speed_kmh': 0.9,
+            'curve_speed_kmh': 0.6,
+            'sharp_curve_speed_kmh': 0.3,
+            'speed_preview_distance_m': 5.0,
+            'curve_curvature_threshold': 0.03,
+            'sharp_curvature_threshold': 0.08,
+            'recommended_speed_topic': '/custom/recommended_speed',
+            'speed_mode_topic': '/custom/speed_mode',
+            'speed_curvature_topic': '/custom/speed_curvature',
+            'speed_max_curvature_topic': '/custom/speed_max_curvature',
         }
         declared = {}
 
@@ -411,6 +579,10 @@ class PlanningNodeTest(unittest.TestCase):
                     planner.assert_called_once_with(mgeo_dir='/synthetic/map')
                     publisher.assert_any_call(Path, '/custom/global_path', 10)
                     publisher.assert_any_call(Path, '/custom/local_path', 10)
+                    publisher.assert_any_call(Float32, '/custom/recommended_speed', 10)
+                    publisher.assert_any_call(String, '/custom/speed_mode', 10)
+                    publisher.assert_any_call(Float32, '/custom/speed_curvature', 10)
+                    publisher.assert_any_call(Float32, '/custom/speed_max_curvature', 10)
                     timer.assert_called_once_with(0.05, node.plan)
                     self.assertEqual(declared['goal_node_id'], 'A122CC001096')
                     self.assertEqual(declared['global_path_topic'], '/planning/global_path')
@@ -418,6 +590,20 @@ class PlanningNodeTest(unittest.TestCase):
                     self.assertEqual(declared['local_path_topic'], '/planning/local_path')
                     self.assertEqual(declared['local_path_length_m'], 20.0)
                     self.assertIsInstance(node.local_path_planner, LocalPathPlanner)
+                    self.assertIsInstance(node.speed_planner, SpeedPlanner)
+                    self.assertFalse(declared['enable_drive'])
+                    self.assertEqual(declared['cruise_speed_kmh'], 1.0)
+                    self.assertEqual(declared['curve_speed_kmh'], 0.7)
+                    self.assertEqual(declared['sharp_curve_speed_kmh'], 0.5)
+                    self.assertEqual(declared['speed_preview_distance_m'], 10.0)
+                    self.assertEqual(declared['curve_curvature_threshold'], 0.04)
+                    self.assertEqual(declared['sharp_curvature_threshold'], 0.10)
+                    for name in ('recommended_speed', 'speed_mode', 'speed_curvature', 'speed_max_curvature'):
+                        self.assertEqual(declared[name + '_topic'], '/planning/' + name)
+                    for name in ('cruise_speed_kmh', 'curve_speed_kmh', 'sharp_curve_speed_kmh',
+                                 'curve_curvature_threshold', 'sharp_curvature_threshold'):
+                        self.assertEqual(getattr(node.speed_planner, name), overrides[name])
+                    self.assertEqual(node.speed_planner.preview_distance_m, 5.0)
                     self.assertIsNone(node._route_key)
                     self.assertIsNone(node._route_result)
 
