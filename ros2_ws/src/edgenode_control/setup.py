@@ -17,7 +17,7 @@ setup(
     zip_safe=True,
     maintainer='EdgeNode Team',
     maintainer_email='poj285895@gmail.com',
-    description='PID steering and longitudinal control for MORAI.',
+    description='Pure Pursuit steering and PID longitudinal control for MORAI.',
     license='MIT',
     entry_points={
         'console_scripts': [

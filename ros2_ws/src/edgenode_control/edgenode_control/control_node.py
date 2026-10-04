@@ -4,7 +4,11 @@ import rclpy
 from rclpy.node import Node
 
 from std_msgs.msg import Float32
+from nav_msgs.msg import Odometry, Path
 from morai_ros2_msgs.msg import CtrlCmd, EgoVehicleStatus
+
+from edgenode_control.pure_pursuit import PurePursuit
+from edgenode_control.steering_command import to_morai_front_steer
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -46,7 +50,7 @@ class PID:
 
 class ControlNode(Node):
     """
-    MORAI 26.R1 CtrlCmd baseline for ERP42.
+    Pure Pursuit steering and PID throttle/brake for MORAI ERP42.
 
     longl_cmd_type = 1 -> throttle/brake mode.
     front_steer is normalized [-1, 1] for MoraiCmdController in 26.R1.
@@ -59,6 +63,8 @@ class ControlNode(Node):
         for name, default in [
             ('target_error_topic', '/planning/target_error'),
             ('target_speed_topic', '/planning/target_speed'),
+            ('local_path_topic', '/planning/local_path'),
+            ('localization_topic', '/localization/odometry'),
             ('ego_status_topic', '/ego_vehicle_status'),
             ('ctrl_cmd_topic', '/ctrl_cmd'),
         ]:
@@ -68,12 +74,13 @@ class ControlNode(Node):
             ('control_rate_hz', 30.0),
             ('command_timeout_sec', 0.6),
             ('status_timeout_sec', 0.6),
+            ('local_path_timeout_sec', 0.6),
+            ('localization_timeout_sec', 0.6),
+            ('wheelbase_m', 1.04),
+            ('max_wheel_angle_rad', 0.49),
+            ('lookahead_distance_m', 2.5),
             ('steering_sign', -1.0),
             ('max_front_steer_normalized', 0.70),
-            ('steering_kp', 0.80),
-            ('steering_ki', 0.00),
-            ('steering_kd', 0.12),
-            ('steering_integral_limit', 0.50),
             ('speed_kp', 0.14),
             ('speed_ki', 0.015),
             ('speed_kd', 0.02),
@@ -86,15 +93,18 @@ class ControlNode(Node):
         self.target_error = 0.0
         self.target_speed_kmh = 0.0
         self.current_speed_kmh = 0.0
-        self.command_stamp_ns = 0
-        self.status_stamp_ns = 0
+        self.local_path_points = []
+        self.latest_pose = None
+        # None means never received; a receive time of zero is valid in ROS time.
+        self.target_speed_stamp_ns = None
+        self.local_path_stamp_ns = None
+        self.localization_stamp_ns = None
+        self.status_stamp_ns = None
         self.last_control_ns = self.get_clock().now().nanoseconds
 
-        self.steer_pid = PID(
-            float(self.get_parameter('steering_kp').value),
-            float(self.get_parameter('steering_ki').value),
-            float(self.get_parameter('steering_kd').value),
-            float(self.get_parameter('steering_integral_limit').value),
+        self.pure_pursuit = PurePursuit(
+            wheelbase_m=self.get_parameter('wheelbase_m').value,
+            max_wheel_angle_rad=self.get_parameter('max_wheel_angle_rad').value,
         )
         self.speed_pid = PID(
             float(self.get_parameter('speed_kp').value),
@@ -112,6 +122,12 @@ class ControlNode(Node):
         self.create_subscription(
             EgoVehicleStatus, self.get_parameter('ego_status_topic').value,
             self.status_cb, 10)
+        self.create_subscription(
+            Path, self.get_parameter('local_path_topic').value,
+            self.local_path_cb, 10)
+        self.create_subscription(
+            Odometry, self.get_parameter('localization_topic').value,
+            self.localization_cb, 10)
 
         self.ctrl_pub = self.create_publisher(
             CtrlCmd, self.get_parameter('ctrl_cmd_topic').value, 10)
@@ -120,18 +136,41 @@ class ControlNode(Node):
         self.create_timer(1.0 / rate, self.control_loop)
 
         self.get_logger().info(
-            'Control ready: PID steering + PID throttle/brake, CtrlCmd longl_cmd_type=1')
+            'Control ready: Pure Pursuit steering + PID throttle/brake, '
+            'CtrlCmd longl_cmd_type=1')
 
     def now_ns(self) -> int:
         return self.get_clock().now().nanoseconds
 
     def target_error_cb(self, msg: Float32):
+        # Compatibility/debug only: this input never refreshes a watchdog.
         self.target_error = float(msg.data)
-        self.command_stamp_ns = self.now_ns()
 
     def target_speed_cb(self, msg: Float32):
-        self.target_speed_kmh = max(0.0, float(msg.data))
-        self.command_stamp_ns = self.now_ns()
+        speed = float(msg.data)
+        self.target_speed_kmh = max(0.0, speed) if math.isfinite(speed) else speed
+        self.target_speed_stamp_ns = self.now_ns()
+
+    def local_path_cb(self, msg: Path):
+        self.local_path_points = [
+            [pose.pose.position.x, pose.pose.position.y, pose.pose.position.z]
+            for pose in msg.poses
+        ]
+        self.local_path_stamp_ns = self.now_ns()
+
+    def localization_cb(self, msg: Odometry):
+        position = msg.pose.pose.position
+        q = msg.pose.pose.orientation
+        self.localization_stamp_ns = self.now_ns()
+        if not all(math.isfinite(value) for value in
+                   (position.x, position.y, q.x, q.y, q.z, q.w)):
+            self.latest_pose = None
+            return
+        yaw = math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+        )
+        self.latest_pose = (position.x, position.y, yaw)
 
     def status_cb(self, msg: EgoVehicleStatus):
         vx = float(msg.velocity.x)
@@ -145,29 +184,45 @@ class ControlNode(Node):
         dt = (now - self.last_control_ns) / 1e9
         self.last_control_ns = now
 
-        command_timeout = float(self.get_parameter('command_timeout_sec').value)
-        status_timeout = float(self.get_parameter('status_timeout_sec').value)
-
-        command_age = (
-            (now - self.command_stamp_ns) / 1e9
-            if self.command_stamp_ns else float('inf')
+        watchdogs = (
+            (self.target_speed_stamp_ns, 'command_timeout_sec'),
+            (self.local_path_stamp_ns, 'local_path_timeout_sec'),
+            (self.localization_stamp_ns, 'localization_timeout_sec'),
+            (self.status_stamp_ns, 'status_timeout_sec'),
         )
-        status_age = (
-            (now - self.status_stamp_ns) / 1e9
-            if self.status_stamp_ns else float('inf')
-        )
+        for stamp, timeout_parameter in watchdogs:
+            timeout = float(self.get_parameter(timeout_parameter).value)
+            age = (now - stamp) / 1e9 if stamp is not None else math.inf
+            if not math.isfinite(timeout) or timeout < 0 or not 0 <= age <= timeout:
+                self.publish_safe_stop()
+                self.speed_pid.reset()
+                return
 
-        if command_age > command_timeout or status_age > status_timeout:
+        if (self.latest_pose is None or len(self.local_path_points) < 2
+                or not math.isfinite(self.target_speed_kmh)
+                or not math.isfinite(self.current_speed_kmh)):
             self.publish_safe_stop()
-            self.steer_pid.reset()
             self.speed_pid.reset()
             return
 
-        # Lateral PID
-        steer_raw = self.steer_pid.update(self.target_error, dt)
-        steer_sign = float(self.get_parameter('steering_sign').value)
-        max_steer = float(self.get_parameter('max_front_steer_normalized').value)
-        front_steer = clamp(steer_sign * steer_raw, -max_steer, max_steer)
+        # Pure Pursuit is LEFT-positive; MORAI sign conversion happens here.
+        result = self.pure_pursuit.compute(
+            self.local_path_points, *self.latest_pose,
+            lookahead_distance_m=self.get_parameter('lookahead_distance_m').value,
+        )
+        if result is None:
+            self.publish_safe_stop()
+            self.speed_pid.reset()
+            return
+        front_steer = to_morai_front_steer(
+            result['steering_normalized'],
+            steering_sign=self.get_parameter('steering_sign').value,
+            max_front_steer_normalized=self.get_parameter('max_front_steer_normalized').value,
+        )
+        if front_steer is None:
+            self.publish_safe_stop()
+            self.speed_pid.reset()
+            return
 
         # Longitudinal PID in km/h -> normalized pedal command.
         speed_error = self.target_speed_kmh - self.current_speed_kmh
