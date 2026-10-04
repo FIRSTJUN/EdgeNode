@@ -224,20 +224,21 @@ class ControlNode(Node):
             self.speed_pid.reset()
             return
 
-        # Longitudinal PID in km/h -> normalized pedal command.
-        speed_error = self.target_speed_kmh - self.current_speed_kmh
-        pedal = self.speed_pid.update(speed_error, dt)
-
-        max_accel = float(self.get_parameter('max_accel_cmd').value)
-        max_brake = float(self.get_parameter('max_brake_cmd').value)
-
-        accel = clamp(pedal, 0.0, max_accel)
-        brake = clamp(-pedal, 0.0, max_brake)
-
-        # Explicit stop command gets stronger braking near zero target speed.
+        # Explicit stop clears PID history and bypasses its update entirely.
         if self.target_speed_kmh <= 0.05:
+            self.speed_pid.reset()
             accel = 0.0
-            brake = max(brake, 0.65)
+            brake = 0.65
+        else:
+            # Longitudinal PID in km/h -> normalized pedal command.
+            speed_error = self.target_speed_kmh - self.current_speed_kmh
+            pedal = self.speed_pid.update(speed_error, dt)
+
+            max_accel = float(self.get_parameter('max_accel_cmd').value)
+            max_brake = float(self.get_parameter('max_brake_cmd').value)
+
+            accel = clamp(pedal, 0.0, max_accel)
+            brake = clamp(-pedal, 0.0, max_brake)
 
         cmd = CtrlCmd()
         cmd.header.stamp = self.get_clock().now().to_msg()

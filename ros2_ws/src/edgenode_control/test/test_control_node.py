@@ -90,7 +90,9 @@ class ControlNodeTest(unittest.TestCase):
     def assert_safe_stop(self):
         self.node.speed_pid.integral = 10.0
         self.node.speed_pid.prev_error = 1.0
-        command = self.command()
+        with patch.object(self.node.speed_pid, 'update', wraps=self.node.speed_pid.update) as update:
+            command = self.command()
+            update.assert_not_called()
         self.assertEqual(command.accel, 0.0)
         self.assertEqual(command.brake, 0.8)
         self.assertEqual(command.front_steer, 0.0)
@@ -147,6 +149,72 @@ class ControlNodeTest(unittest.TestCase):
         self.assertGreaterEqual(command.brake, 0.65)
         self.assertNotEqual(command.front_steer, 0.0)
         self.node.pure_pursuit.compute.assert_called_once()
+
+    def test_repeated_explicit_stop_never_updates_pid_and_clears_old_state(self):
+        self.node.speed_pid.integral = -12.0
+        self.node.speed_pid.prev_error = -3.6
+        status = EgoVehicleStatus()
+        status.velocity.x = 1.0
+        with patch.object(self.node.speed_pid, 'update', wraps=self.node.speed_pid.update) as update:
+            for _ in range(100):
+                self.now += 100_000_000
+                self.feed_inputs()
+                self.node.status_cb(status)
+                command = self.command()
+                self.assertEqual(command.accel, 0.0)
+                self.assertGreaterEqual(command.brake, 0.65)
+                self.assertEqual(self.node.speed_pid.integral, 0.0)
+                self.assertIsNone(self.node.speed_pid.prev_error)
+            update.assert_not_called()
+
+    def test_zero_to_one_kmh_restart_matches_fresh_pid_after_long_stop(self):
+        status = EgoVehicleStatus()
+        status.velocity.x = 1.0
+        # Simulate coasting while a stop command persists, then settling to rest.
+        for _ in range(100):
+            self.now += 100_000_000
+            self.feed_inputs()
+            self.node.status_cb(status)
+            self.command()
+        self.now += 100_000_000
+        self.feed_inputs()
+        stopped = self.command()
+        self.assertEqual(stopped.accel, 0.0)
+        self.assertGreaterEqual(stopped.brake, 0.65)
+
+        self.now += 500_000_000
+        self.feed_inputs()
+        self.node.target_speed_cb(Float32(data=1.0))
+        with patch.object(self.node.speed_pid, 'update', wraps=self.node.speed_pid.update) as update:
+            command = self.command()
+            update.assert_called_once_with(1.0, 0.5)
+        reference = PID(0.14, 0.015, 0.02, 12.0)
+        expected_accel = reference.update(1.0, 0.5)
+        self.assertAlmostEqual(command.accel, expected_accel)
+        self.assertAlmostEqual(command.accel, 0.1475)
+        self.assertGreater(command.accel, 0.14)
+        self.assertEqual(command.brake, 0.0)
+        self.assertEqual(self.node.speed_pid.integral, reference.integral)
+        self.assertEqual(self.node.speed_pid.prev_error, reference.prev_error)
+
+    def test_explicit_stop_threshold_precedes_pid_update(self):
+        with patch.object(self.node.speed_pid, 'update', wraps=self.node.speed_pid.update) as update:
+            for target in (0.0, 0.05):
+                self.node.target_speed_cb(Float32(data=target))
+                self.node.speed_pid.integral = -12.0
+                self.node.speed_pid.prev_error = -1.0
+                command = self.command()
+                self.assertEqual(command.accel, 0.0)
+                self.assertGreaterEqual(command.brake, 0.65)
+                self.assertEqual(self.node.speed_pid.integral, 0.0)
+                self.assertIsNone(self.node.speed_pid.prev_error)
+            update.assert_not_called()
+            self.now += 100_000_000
+            self.feed_inputs()
+            self.node.target_speed_cb(Float32(data=0.050001))
+            command = self.command()
+            update.assert_called_once()
+            self.assertGreater(command.accel, 0.0)
 
     def test_stale_local_path_safe_stops(self):
         self.node.local_path_stamp_ns = self.now - 600_000_001
@@ -264,15 +332,16 @@ class ControlNodeTest(unittest.TestCase):
         status.velocity.x, status.velocity.y, status.velocity.z = 0.3, 0.4, 0.0
         self.node.status_cb(status)
         self.assertEqual(self.node.current_speed_kmh, 1.8)
-        # Isolate PID output comparison without asking for positive target speed.
+        # Verify the normal driving branch separately from explicit zero-speed stop.
+        self.node.target_speed_cb(Float32(data=1.0))
         reference = PID(0.14, 0.015, 0.02, 12.0)
-        error = -self.node.current_speed_kmh
+        error = 1.0 - self.node.current_speed_kmh
         expected_pedal = reference.update(error, 0.1)
         command = self.command()
         self.assertEqual(self.node.speed_pid.integral, reference.integral)
         self.assertEqual(self.node.speed_pid.prev_error, reference.prev_error)
         self.assertEqual(command.accel, 0.0)
-        self.assertAlmostEqual(command.brake, max(min(-expected_pedal, 0.8), 0.65))
+        self.assertAlmostEqual(command.brake, min(-expected_pedal, 0.8))
 
 
 if __name__ == '__main__':
