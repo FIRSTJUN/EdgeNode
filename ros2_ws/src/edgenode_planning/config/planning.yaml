@@ -12,6 +12,8 @@ planning_node:
     map_match_heading_diff_topic: /planning/map_match_heading_diff
 
     global_path_topic: /planning/global_path
+    local_path_topic: /planning/local_path
+    local_path_length_m: 20.0
     goal_node_id: A122CC001096
     global_path_frame_id: map
 
@@ -24,5 +26,5 @@ planning_node:
     map_match_connected_link_bonus: 0.7
     map_match_unrelated_link_penalty: 1.0
 
-    # Global Path 발행 단계에서도 경로 생성 여부와 관계없이 항상 정지한다.
+    # Global / Local Path 발행 단계에서도 경로 생성 여부와 관계없이 항상 정지한다.
     cruise_speed_kmh: 0.0

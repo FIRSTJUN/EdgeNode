@@ -8,17 +8,19 @@ from nav_msgs.msg import Odometry, Path
 from std_msgs.msg import Float32, String
 
 from edgenode_planning.dijkstra_planner import DijkstraPlanner
+from edgenode_planning.local_path_planner import LocalPathPlanner
 from edgenode_planning.map_matcher import MapMatcher
 
 
 class PlanningNode(Node):
     """
-    Match localization and publish a cached global route at 20 Hz.
+    Match localization and publish global and local paths at 20 Hz.
 
     Current stage:
       - Perception is intentionally disconnected.
       - Localization odometry is the only pose input.
       - Global routes are recalculated only when the matched link or goal changes.
+      - Local paths are extracted from the current pose every planning cycle.
       - Vehicle target speed remains 0 km/h for safety.
 
     Future flow:
@@ -74,6 +76,8 @@ class PlanningNode(Node):
                 ('map_match_distance_topic', '/planning/map_match_distance'),
                 ('map_match_heading_diff_topic', '/planning/map_match_heading_diff'),
                 ('global_path_topic', '/planning/global_path'),
+                ('local_path_topic', '/planning/local_path'),
+                ('local_path_length_m', 20.0),
                 ('goal_node_id', 'A122CC001096'),
                 ('global_path_frame_id', 'map'),
                 ('mgeo_dir', '/workspace/local_data/c_track_mgeo'),
@@ -99,6 +103,7 @@ class PlanningNode(Node):
             unrelated_link_penalty=self.get_parameter('map_match_unrelated_link_penalty').value,
         )
         self.dijkstra_planner = DijkstraPlanner(mgeo_dir=mgeo_dir)
+        self.local_path_planner = LocalPathPlanner()
         self._route_key = None
         self._route_result = None
         self.latest_pose = None
@@ -144,6 +149,11 @@ class PlanningNode(Node):
         self.global_path_pub = self.create_publisher(
             Path,
             self.get_parameter('global_path_topic').value,
+            10,
+        )
+        self.local_path_pub = self.create_publisher(
+            Path,
+            self.get_parameter('local_path_topic').value,
             10,
         )
         self.localization_sub = self.create_subscription(
@@ -224,6 +234,23 @@ class PlanningNode(Node):
                         pose.pose.orientation.w = 1.0
                         path.poses.append(pose)
                     self.global_path_pub.publish(path)
+
+                    local_result = self.local_path_planner.extract(
+                        self._route_result['points'], x, y,
+                        horizon_m=self.get_parameter('local_path_length_m').value,
+                    )
+                    if local_result is not None:
+                        local_path = Path()
+                        local_path.header = path.header
+                        for point in local_result['points']:
+                            pose = PoseStamped()
+                            pose.header = local_path.header
+                            pose.pose.position.x = float(point[0])
+                            pose.pose.position.y = float(point[1])
+                            pose.pose.position.z = float(point[2])
+                            pose.pose.orientation.w = 1.0
+                            local_path.poses.append(pose)
+                        self.local_path_pub.publish(local_path)
 
         target_error = Float32()
         target_error.data = 0.0

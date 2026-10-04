@@ -13,6 +13,7 @@ from nav_msgs.msg import Odometry, Path
 from rclpy.time import Time
 
 from edgenode_planning.dijkstra_planner import DijkstraPlanner
+from edgenode_planning.local_path_planner import LocalPathPlanner
 from edgenode_planning.map_matcher import MapMatcher
 from edgenode_planning.planning_node import PlanningNode
 
@@ -22,6 +23,7 @@ class PlanningNodeTest(unittest.TestCase):
         self.parameters = {
             'goal_node_id': 'goal_default',
             'global_path_frame_id': 'map',
+            'local_path_length_m': 20.0,
             'cruise_speed_kmh': 50.0,
         }
         self.route = {'points': [[0, 1, 2], [3.5, 4.5, 5.5], [6, 7, 8]]}
@@ -30,6 +32,7 @@ class PlanningNodeTest(unittest.TestCase):
             latest_pose=None,
             map_matcher=Mock(),
             dijkstra_planner=Mock(),
+            local_path_planner=Mock(wraps=LocalPathPlanner()),
             _route_key=None,
             _route_result=None,
             get_parameter=lambda name: SimpleNamespace(value=self.parameters[name]),
@@ -43,7 +46,7 @@ class PlanningNodeTest(unittest.TestCase):
         for name in (
             'target_error', 'target_speed', 'state', 'current_link',
             'map_match_status', 'map_match_distance', 'map_match_heading_diff',
-            'global_path',
+            'global_path', 'local_path',
         ):
             setattr(self.node, name + '_pub', Mock())
 
@@ -54,8 +57,8 @@ class PlanningNodeTest(unittest.TestCase):
         self.assertEqual(self.output('target_speed'), 0.0)
         self.assertEqual(self.output('target_error'), 0.0)
 
-    def assert_path(self, expected_points, frame_id='map', stamp=None):
-        path = self.node.global_path_pub.publish.call_args.args[0]
+    def assert_path(self, expected_points, frame_id='map', stamp=None, topic='global_path'):
+        path = getattr(self.node, topic + '_pub').publish.call_args.args[0]
         self.assertIsInstance(path, Path)
         self.assertEqual(path.header.frame_id, frame_id)
         self.assertEqual(path.header.stamp, self.stamp if stamp is None else stamp)
@@ -74,6 +77,8 @@ class PlanningNodeTest(unittest.TestCase):
         self.node.map_matcher.match.assert_not_called()
         self.node.dijkstra_planner.plan.assert_not_called()
         self.node.global_path_pub.publish.assert_not_called()
+        self.node.local_path_pub.publish.assert_not_called()
+        self.node.local_path_planner.extract.assert_not_called()
         self.assertEqual(self.output('state'), 'WAIT_FOR_LOCALIZATION')
         self.assertEqual(self.output('map_match_status'), 'WAIT_FOR_LOCALIZATION')
         self.assertEqual(self.output('current_link'), '')
@@ -149,6 +154,8 @@ class PlanningNodeTest(unittest.TestCase):
         PlanningNode.plan(self.node)
         self.node.dijkstra_planner.plan.assert_not_called()
         self.node.global_path_pub.publish.assert_not_called()
+        self.node.local_path_pub.publish.assert_not_called()
+        self.node.local_path_planner.extract.assert_not_called()
         self.assertEqual(self.output('state'), 'MAP_MATCH_LOST')
         self.assertEqual(self.output('map_match_status'), 'NO_MATCH')
         self.assert_stopped()
@@ -163,6 +170,8 @@ class PlanningNodeTest(unittest.TestCase):
         self.assertEqual(self.output('map_match_distance'), 1.25)
         self.assertEqual(self.output('map_match_heading_diff'), 12.5)
         self.node.global_path_pub.publish.assert_not_called()
+        self.node.local_path_pub.publish.assert_not_called()
+        self.node.local_path_planner.extract.assert_not_called()
         self.assert_stopped()
 
     def test_same_link_and_goal_reuse_route_while_publishing_each_tick(self):
@@ -185,6 +194,44 @@ class PlanningNodeTest(unittest.TestCase):
             self.assert_stopped()
         self.node.dijkstra_planner.plan.assert_called_once()
         self.node.global_path_pub.publish.assert_not_called()
+        self.node.local_path_pub.publish.assert_not_called()
+
+    def test_pose_changes_refresh_local_path_without_replanning_global_route(self):
+        points = [[x, 0, x / 10.0] for x in range(0, 61, 5)]
+        self.node.dijkstra_planner.plan.return_value = {'points': points}
+        for x, expected in ((10.0, points[2:7]), (20.0, points[4:9]), (50.0, points[10:])):
+            self.node.latest_pose = (x, 0.0, 0.0)
+            PlanningNode.plan(self.node)
+            self.assert_path(points)
+            self.assert_path(expected, topic='local_path')
+            self.assertEqual(self.output('state'), 'GLOBAL_PATH_READY')
+            self.assert_stopped()
+        self.node.dijkstra_planner.plan.assert_called_once_with('link_42', 'goal_default')
+        self.assertEqual(self.node.local_path_planner.extract.call_args_list, [
+            call(points, x, 0.0, horizon_m=20.0) for x in (10.0, 20.0, 50.0)
+        ])
+        self.assertEqual(self.node.local_path_pub.publish.call_count, 3)
+
+    def test_local_horizon_change_applies_without_global_replanning(self):
+        points = [[x, 0, 1] for x in range(0, 51, 5)]
+        self.node.dijkstra_planner.plan.return_value = {'points': points}
+        self.node.latest_pose = (10.0, 0.0, 0.0)
+        PlanningNode.plan(self.node)
+        self.assert_path(points[2:7], topic='local_path')
+        self.parameters['local_path_length_m'] = 8.0
+        PlanningNode.plan(self.node)
+        self.assert_path(points[2:5], topic='local_path')
+        self.node.dijkstra_planner.plan.assert_called_once()
+        self.assert_stopped()
+
+    def test_invalid_local_horizon_suppresses_local_publish_and_keeps_zero_commands(self):
+        self.node.latest_pose = (12.0, -3.0, 0.0)
+        self.parameters['local_path_length_m'] = 0.0
+        PlanningNode.plan(self.node)
+        self.node.global_path_pub.publish.assert_called_once()
+        self.node.local_path_pub.publish.assert_not_called()
+        self.assertEqual(self.output('state'), 'GLOBAL_PATH_READY')
+        self.assert_stopped()
 
     def test_link_change_replans_and_publishes_new_points(self):
         self.node.latest_pose = (12.0, -3.0, 0.0)
@@ -217,6 +264,7 @@ class PlanningNodeTest(unittest.TestCase):
         self.node.latest_pose = (12.0, -3.0, 0.0)
         PlanningNode.plan(self.node)
         self.node.global_path_pub.publish.reset_mock()
+        self.node.local_path_pub.publish.reset_mock()
         self.parameters['goal_node_id'] = 'unreachable'
         self.node.dijkstra_planner.plan.return_value = None
         for _ in range(3):
@@ -225,6 +273,7 @@ class PlanningNodeTest(unittest.TestCase):
             self.assert_stopped()
         self.assertEqual(self.node.dijkstra_planner.plan.call_count, 2)
         self.node.global_path_pub.publish.assert_not_called()
+        self.node.local_path_pub.publish.assert_not_called()
 
         self.parameters['goal_node_id'] = 'goal_default'
         self.node.dijkstra_planner.plan.return_value = self.route
@@ -244,10 +293,13 @@ class PlanningNodeTest(unittest.TestCase):
             self.assertEqual(self.output('state'), 'MAP_MATCH_LOST')
             self.assert_stopped()
         self.node.global_path_pub.publish.assert_called_once()
+        self.node.local_path_pub.publish.assert_called_once()
+        self.node.local_path_planner.extract.assert_called_once()
         self.node.map_matcher.match.return_value = match
         PlanningNode.plan(self.node)
         self.node.dijkstra_planner.plan.assert_called_once()
         self.assertEqual(self.node.global_path_pub.publish.call_count, 2)
+        self.assertEqual(self.node.local_path_pub.publish.call_count, 2)
         self.assertEqual(self.output('state'), 'GLOBAL_PATH_READY')
         self.assert_stopped()
 
@@ -277,6 +329,8 @@ class PlanningNodeTest(unittest.TestCase):
         self.node.get_clock.return_value.now.return_value.to_msg.return_value = next_stamp
         PlanningNode.plan(self.node)
         self.assert_path(self.route['points'], frame_id='mgeo_map', stamp=next_stamp)
+        self.assert_path(self.route['points'][1:], frame_id='mgeo_map',
+                         stamp=next_stamp, topic='local_path')
         self.assertEqual(previous_path.header.frame_id, 'map')
         self.assertEqual(previous_path.header.stamp, self.stamp)
         self.node.dijkstra_planner.plan.assert_called_once()
@@ -322,6 +376,8 @@ class PlanningNodeTest(unittest.TestCase):
             'mgeo_dir': '/synthetic/map',
             'goal_node_id': 'custom_goal',
             'global_path_topic': '/custom/global_path',
+            'local_path_topic': '/custom/local_path',
+            'local_path_length_m': 12.0,
             'global_path_frame_id': 'custom_map',
         }
         declared = {}
@@ -354,10 +410,14 @@ class PlanningNodeTest(unittest.TestCase):
                     self.assertEqual(matcher.call_args.kwargs['mgeo_dir'], '/synthetic/map')
                     planner.assert_called_once_with(mgeo_dir='/synthetic/map')
                     publisher.assert_any_call(Path, '/custom/global_path', 10)
+                    publisher.assert_any_call(Path, '/custom/local_path', 10)
                     timer.assert_called_once_with(0.05, node.plan)
                     self.assertEqual(declared['goal_node_id'], 'A122CC001096')
                     self.assertEqual(declared['global_path_topic'], '/planning/global_path')
                     self.assertEqual(declared['global_path_frame_id'], 'map')
+                    self.assertEqual(declared['local_path_topic'], '/planning/local_path')
+                    self.assertEqual(declared['local_path_length_m'], 20.0)
+                    self.assertIsInstance(node.local_path_planner, LocalPathPlanner)
                     self.assertIsNone(node._route_key)
                     self.assertIsNone(node._route_result)
 
