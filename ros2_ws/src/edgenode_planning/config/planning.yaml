@@ -33,9 +33,9 @@ planning_node:
 
     # Driving is opt-in, bounded by an independent speed cap and session lease.
     enable_drive: false
-    max_drive_speed_kmh: 1.0
+    max_drive_speed_kmh: 10.0
     drive_duration_sec: 15.0
-    cruise_speed_kmh: 1.0
+    cruise_speed_kmh: 10.0
     curve_speed_kmh: 0.7
     sharp_curve_speed_kmh: 0.5
     speed_preview_distance_m: 10.0
