@@ -3,7 +3,7 @@ import math
 import rclpy
 from rclpy.node import Node
 
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseArray, PoseStamped
 from nav_msgs.msg import Odometry, Path
 from std_msgs.msg import Float32, String
 
@@ -21,6 +21,10 @@ def _finite_number(value):
         return math.isfinite(value)
     except OverflowError:
         return False
+
+
+from .planning_fsm import PlanningFSM
+from .lattice_planner import LatticePlanner
 
 
 class PlanningNode(Node):
@@ -95,6 +99,12 @@ class PlanningNode(Node):
                 ('max_drive_speed_kmh', 1.0),
                 ('drive_duration_sec', 15.0),
                 ('drive_status_topic', '/planning/drive_status'),
+                ('obstacle_topic', '/planning/obstacles'),
+                ('lattice_status_topic', '/planning/lattice_status'),
+                ('lattice_offset_topic', '/planning/lattice_offset'),
+                ('lattice_clearance_topic', '/planning/lattice_clearance'),
+                ('lattice_clearance_m', 0.55),
+                ('fsm_state_topic', '/planning/fsm_state'),
                 ('curve_speed_kmh', 0.7),
                 ('sharp_curve_speed_kmh', 0.5),
                 ('speed_preview_distance_m', 10.0),
@@ -146,6 +156,11 @@ class PlanningNode(Node):
         self._drive_session_expired = False
         self._drive_session_duration_sec = None
         self._drive_last_time_ns = None
+        self.fsm = PlanningFSM()
+        self.lattice_planner = LatticePlanner(
+            obstacle_clearance_m=self.get_parameter('lattice_clearance_m').value,
+        )
+        self.latest_obstacles = []
 
         self.target_error_pub = self.create_publisher(
             Float32,
@@ -220,6 +235,32 @@ class PlanningNode(Node):
             self.get_parameter('drive_status_topic').value,
             10,
         )
+        self.fsm_state_pub = self.create_publisher(
+            String,
+            self.get_parameter('fsm_state_topic').value,
+            10,
+        )
+        self.lattice_status_pub = self.create_publisher(
+            String,
+            self.get_parameter('lattice_status_topic').value,
+            10,
+        )
+        self.lattice_offset_pub = self.create_publisher(
+            Float32,
+            self.get_parameter('lattice_offset_topic').value,
+            10,
+        )
+        self.lattice_clearance_pub = self.create_publisher(
+            Float32,
+            self.get_parameter('lattice_clearance_topic').value,
+            10,
+        )
+        self.obstacle_sub = self.create_subscription(
+            PoseArray,
+            self.get_parameter('obstacle_topic').value,
+            self.obstacle_callback,
+            10,
+        )
         self.localization_sub = self.create_subscription(
             Odometry,
             self.get_parameter('localization_topic').value,
@@ -237,6 +278,19 @@ class PlanningNode(Node):
             f'Planning node ready - loaded {len(self.map_matcher.links)} MGeo links; '
             'waiting for localization (drive disabled by default)'
         )
+
+    def obstacle_callback(self, msg):
+        """Store world-frame obstacle XY positions for Lattice planning."""
+        obstacles = []
+
+        for pose in msg.poses:
+            x = pose.position.x
+            y = pose.position.y
+
+            if _finite_number(x) and _finite_number(y):
+                obstacles.append((float(x), float(y)))
+
+        self.latest_obstacles = obstacles
 
     def localization_callback(self, msg):
         """Store the latest pose; map matching runs only in the planning timer."""
@@ -267,6 +321,11 @@ class PlanningNode(Node):
         local_result = None
         speed_result = None
         speed_valid = False
+        lattice_status = 'IDLE'
+        lattice_offset = 0.0
+        lattice_clearance = float('nan')
+        lattice_blocked = False
+        obstacle_avoid_requested = False
 
         now_ns = self.get_clock().now().nanoseconds
         enable_drive = self.get_parameter('enable_drive').value is True
@@ -330,9 +389,30 @@ class PlanningNode(Node):
                         horizon_m=self.get_parameter('local_path_length_m').value,
                     )
                     if local_result is not None:
+                        active_local_points = local_result['points']
+
+                        lattice_result = self.lattice_planner.plan(
+                            active_local_points,
+                            self.latest_obstacles,
+                            current_position=(x, y),
+                        )
+
+                        if lattice_result is not None:
+                            lattice_status = lattice_result['status']
+                            lattice_offset = lattice_result['selected_offset_m']
+                            lattice_clearance = lattice_result['minimum_clearance_m']
+                            lattice_blocked = lattice_result['blocked']
+                            obstacle_avoid_requested = lattice_result[
+                                'obstacle_avoid_requested'
+                            ]
+
+                            if not lattice_blocked:
+                                active_local_points = lattice_result['points']
+
                         local_path = Path()
                         local_path.header = path.header
-                        for point in local_result['points']:
+
+                        for point in active_local_points:
                             pose = PoseStamped()
                             pose.header = local_path.header
                             pose.pose.position.x = float(point[0])
@@ -340,9 +420,12 @@ class PlanningNode(Node):
                             pose.pose.position.z = float(point[2])
                             pose.pose.orientation.w = 1.0
                             local_path.poses.append(pose)
+
                         self.local_path_pub.publish(local_path)
 
-                        speed_result = self.speed_planner.plan(local_result['points'])
+                        speed_result = self.speed_planner.plan(
+                            active_local_points
+                        )
                         if (speed_result is not None
                                 and _finite_number(speed_result['target_speed_kmh'])
                                 and speed_result['target_speed_kmh'] >= 0):
@@ -357,6 +440,7 @@ class PlanningNode(Node):
 
         target_speed = Float32()
         target_speed.data = 0.0
+        requested_target_speed = 0.0
         drive_status = 'DISABLED'
         if enable_drive:
             max_speed = self.get_parameter('max_drive_speed_kmh').value
@@ -378,10 +462,41 @@ class PlanningNode(Node):
                 elif (state_value == 'GLOBAL_PATH_READY' and status_value == 'MATCHED'
                       and local_result is not None and speed_result is not None
                       and speed_valid):
-                    target_speed.data = float(min(recommended_speed, max_speed))
+                    requested_target_speed = float(min(recommended_speed, max_speed))
                     drive_status = 'ACTIVE'
                 else:
                     drive_status = 'NOT_READY'
+
+        previous_fsm_state = self.fsm.state
+
+        fsm_state_value = self.fsm.update(
+            localization_ready=self.latest_pose is not None,
+            map_match_ready=status_value == 'MATCHED',
+            global_path_ready=state_value == 'GLOBAL_PATH_READY',
+            local_path_ready=local_result is not None,
+            speed_ready=speed_valid,
+            drive_status=drive_status,
+            # Future behavior inputs.
+            # These remain False until Lattice / Perception / goal detection
+            # are connected to the planning layer.
+            obstacle_avoid_requested=obstacle_avoid_requested,
+            traffic_stop_requested=False,
+            emergency_stop_requested=lattice_blocked,
+            goal_reached=False,
+        )
+
+        if fsm_state_value != previous_fsm_state:
+            self.get_logger().info(
+                f'FSM transition: {previous_fsm_state} -> {fsm_state_value}'
+            )
+
+        # High-level FSM is the final motion gate.
+        # Speed Planning may recommend a speed, but motion is permitted
+        # only while the FSM is explicitly in DRIVING.
+        if self.fsm.motion_allowed:
+            target_speed.data = requested_target_speed
+        else:
+            target_speed.data = 0.0
 
         state = String()
         state.data = state_value
@@ -389,6 +504,7 @@ class PlanningNode(Node):
         self.target_error_pub.publish(target_error)
         self.target_speed_pub.publish(target_speed)
         self.state_pub.publish(state)
+        self.fsm_state_pub.publish(String(data=fsm_state_value))
         self.current_link_pub.publish(String(data=current_link))
         self.map_match_status_pub.publish(String(data=status_value))
         self.map_match_distance_pub.publish(Float32(data=distance))
@@ -398,6 +514,9 @@ class PlanningNode(Node):
         self.speed_curvature_pub.publish(Float32(data=speed_curvature))
         self.speed_max_curvature_pub.publish(Float32(data=speed_max_curvature))
         self.drive_status_pub.publish(String(data=drive_status))
+        self.lattice_status_pub.publish(String(data=lattice_status))
+        self.lattice_offset_pub.publish(Float32(data=lattice_offset))
+        self.lattice_clearance_pub.publish(Float32(data=lattice_clearance))
 
 
 def main(args=None):

@@ -19,6 +19,13 @@ def generate_launch_description():
 
     return LaunchDescription([
         Node(
+            package='edgenode_localization',
+            executable='localization_node',
+            name='localization_node',
+            output='screen',
+        ),
+
+        Node(
             package='edgenode_planning',
             executable='planning_node',
             name='planning_node',

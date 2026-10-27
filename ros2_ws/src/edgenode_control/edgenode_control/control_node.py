@@ -132,6 +132,22 @@ class ControlNode(Node):
         self.ctrl_pub = self.create_publisher(
             CtrlCmd, self.get_parameter('ctrl_cmd_topic').value, 10)
 
+        self.ctrl_pub = self.create_publisher(
+            CtrlCmd, self.get_parameter('ctrl_cmd_topic').value, 10)
+
+        self.path_error_pub = self.create_publisher(
+            Float32, '/control/path_error', 10)
+
+        self.target_left_pub = self.create_publisher(
+            Float32, '/control/target_left', 10)
+
+        self.target_forward_pub = self.create_publisher(
+            Float32, '/control/target_forward', 10)
+
+        self.pure_pursuit_steering_pub = self.create_publisher(
+            Float32, '/control/pure_pursuit_steering', 10)
+
+        rate = max(1.0, float(self.get_parameter('control_rate_hz').value))
         rate = max(1.0, float(self.get_parameter('control_rate_hz').value))
         self.create_timer(1.0 / rate, self.control_loop)
 
@@ -214,6 +230,21 @@ class ControlNode(Node):
             self.publish_safe_stop()
             self.speed_pid.reset()
             return
+        path_error_msg = Float32()
+        path_error_msg.data = float(result['nearest_distance_m'])
+        self.path_error_pub.publish(path_error_msg)
+
+        target_left_msg = Float32()
+        target_left_msg.data = float(result['target_left_m'])
+        self.target_left_pub.publish(target_left_msg)
+
+        target_forward_msg = Float32()
+        target_forward_msg.data = float(result['target_forward_m'])
+        self.target_forward_pub.publish(target_forward_msg)
+
+        steering_msg = Float32()
+        steering_msg.data = float(result['steering_normalized'])
+        self.pure_pursuit_steering_pub.publish(steering_msg)
         front_steer = to_morai_front_steer(
             result['steering_normalized'],
             steering_sign=self.get_parameter('steering_sign').value,

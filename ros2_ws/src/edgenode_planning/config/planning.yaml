@@ -36,8 +36,8 @@ planning_node:
     max_drive_speed_kmh: 10.0
     drive_duration_sec: 15.0
     cruise_speed_kmh: 10.0
-    curve_speed_kmh: 0.7
-    sharp_curve_speed_kmh: 0.5
+    curve_speed_kmh: 5.0
+    sharp_curve_speed_kmh: 3.5
     speed_preview_distance_m: 10.0
     curve_curvature_threshold: 0.04
     sharp_curvature_threshold: 0.10
