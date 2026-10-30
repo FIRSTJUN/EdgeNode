@@ -44,6 +44,11 @@ class LatticePlanner:
         self.hold_half_length_m = float(hold_half_length_m)
         self.recovery_threshold_m = float(recovery_threshold_m)
 
+        # RECOVERING은 실제 장애물 회피 이후에만 허용한다.
+        # 시작 위치가 기준 경로에서 약간 벗어나 있다는 이유만으로
+        # OBSTACLE_AVOID 상태에 들어가는 것을 방지한다.
+        self._avoidance_active = False
+
     @staticmethod
     def _arc_lengths(points):
         s = [0.0]
@@ -404,7 +409,10 @@ class LatticePlanner:
         # No obstacle remains ahead:
         # smoothly recover from the current lateral displacement.
         if not relevant:
-            if abs(current_offset) > self.recovery_threshold_m:
+            if (
+                self._avoidance_active
+                and abs(current_offset) > self.recovery_threshold_m
+            ):
                 recovery_points = self._generate_recovery_candidate(
                     points,
                     arc_lengths,
@@ -420,6 +428,8 @@ class LatticePlanner:
                     'obstacle_avoid_requested': True,
                     'blocked': False,
                 }
+
+            self._avoidance_active = False
 
             return {
                 'status': 'CLEAR',
@@ -503,6 +513,8 @@ class LatticePlanner:
             safe_candidates,
             key=lambda candidate: candidate['score'],
         )
+
+        self._avoidance_active = True
 
         return {
             'status': 'AVOIDING',

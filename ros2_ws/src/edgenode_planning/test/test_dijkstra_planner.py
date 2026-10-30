@@ -291,6 +291,78 @@ class DijkstraPlannerTest(unittest.TestCase):
                 self.assertIsNone(planner.plan(value, 'C'))
                 self.assertIsNone(planner.plan('AB', value))
 
+    def test_single_waypoint_is_identical_to_legacy_goal(self):
+        planner = self.planner()
+        self.assertEqual(planner.plan_route('AB', ['C']), planner.plan('AB', 'C'))
+
+    def test_multiple_waypoints_preserve_order_boundaries_and_total_cost(self):
+        planner = self.planner([
+            make_link('AB', 'A', 'B', 5.0, [[0, 0, 0], [5, 0, 0]]),
+            make_link('BC', 'B', 'C', 7.0, [[5, 0, 0], [12, 0, 0]]),
+            make_link('CD', 'C', 'D', 9.0, [[12, 0, 0], [21, 0, 0]]),
+            # A shortcut to D must not bypass the required waypoint C.
+            make_link('BD', 'B', 'D', 1.0),
+        ])
+        result = planner.plan_route('AB', ['C', 'D'])
+        self.assertEqual(result['link_ids'], ['AB', 'BC', 'CD'])
+        self.assertEqual(result['node_ids'], ['A', 'B', 'C', 'D'])
+        self.assertEqual(result['points'], [[0, 0, 0], [5, 0, 0], [12, 0, 0], [21, 0, 0]])
+        self.assertEqual(result['total_cost_m'], 21.0)
+        self.assertEqual(result['goal_node_id'], 'D')
+
+    def test_invalid_waypoint_anywhere_fails_entire_route(self):
+        planner = self.planner()
+        for nodes in (['missing'], ['C', 'missing'], ['missing', 'C'], ['C', '']):
+            with self.subTest(nodes=nodes):
+                self.assertIsNone(planner.plan_route('AB', nodes))
+
+    def test_unreachable_first_or_later_waypoint_fails_entire_route(self):
+        planner = self.planner()
+        for nodes in (['D'], ['C', 'D'], ['D', 'C'], ['C', 'B']):
+            with self.subTest(nodes=nodes):
+                self.assertIsNone(planner.plan_route('AB', nodes))
+
+    def test_repeated_boundary_waypoints_do_not_duplicate_nodes_or_cost(self):
+        planner = self.planner()
+        self.assertEqual(planner.plan_route('AB', ['B', 'B', 'C', 'C']),
+                         planner.plan('AB', 'C'))
+
+    def test_directed_revisit_preserves_nonconsecutive_nodes_links_and_cost(self):
+        planner = self.planner([
+            make_link('AB', 'A', 'B', 2.0, [[0, 0, 0], [1, 0, 0]]),
+            make_link('BC', 'B', 'C', 3.0, [[1, 0, 0], [2, 0, 0]]),
+            make_link('CA', 'C', 'A', 4.0, [[2, 0, 0], [0, 0, 0]]),
+        ])
+        result = planner.plan_route('AB', ['C', 'B'])
+        self.assertEqual(result['link_ids'], ['AB', 'BC', 'CA', 'AB'])
+        self.assertEqual(result['node_ids'], ['A', 'B', 'C', 'A', 'B'])
+        self.assertEqual(result['points'], [[0, 0, 0], [1, 0, 0], [2, 0, 0],
+                                            [0, 0, 0], [1, 0, 0]])
+        self.assertEqual(result['total_cost_m'], 11.0)
+
+    def test_waypoint_route_rejects_malformed_lists_and_start_links(self):
+        planner = self.planner()
+        for nodes in (None, [], (), 'C', {}, ['C', None], ['C', True], ['C', []]):
+            with self.subTest(nodes=nodes):
+                self.assertIsNone(planner.plan_route('AB', nodes))
+        self.assertIsNone(planner.plan_route('missing', ['C']))
+        self.assertIsNone(planner.plan_route([], ['C']))
+
+    def test_waypoint_cost_overflow_fails_without_partial_result(self):
+        planner = self.planner([
+            make_link('AB', 'A', 'B', 1e308),
+            make_link('BC', 'B', 'C', 1e308),
+        ])
+        self.assertIsNone(planner.plan_route('AB', ['B', 'C']))
+
+    def test_waypoint_points_do_not_alias_map_or_future_results(self):
+        planner = self.planner()
+        result = planner.plan_route('AB', ('B', 'C'))
+        result['points'][0][0] = 999
+        result['node_ids'].clear()
+        result['link_ids'].clear()
+        self.assertEqual(planner.plan_route('AB', ['B', 'C']), planner.plan('AB', 'C'))
+
 
 if __name__ == '__main__':
     unittest.main()

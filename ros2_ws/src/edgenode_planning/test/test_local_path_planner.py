@@ -89,6 +89,76 @@ class LocalPathPlannerTest(unittest.TestCase):
         points = [[0, 0, 0], [1e308, 0, 0], [0, 0, 0]]
         self.assertIsNone(self.planner.extract(points, 0, 0, horizon_m=1.5e308))
 
+    def test_progress_increases_sequentially_on_straight_path(self):
+        points = [[x, 0, 0] for x in range(100)]
+        previous = None
+        for x in range(50):
+            result = self.planner.extract(points, x, 0, previous_index=previous)
+            self.assertEqual(result['nearest_index'], x)
+            previous = result['nearest_index']
+
+    def test_small_backwards_pose_noise_never_retreats_progress(self):
+        points = [[x, 0, 0] for x in range(30)]
+        previous = 10
+        for x in (9.4, 10.2, 9.2, 11.0, 10.3):
+            result = self.planner.extract(points, x, 0, previous_index=previous)
+            self.assertGreaterEqual(result['nearest_index'], previous)
+            self.assertAlmostEqual(result['nearest_distance_m'],
+                                   abs(result['nearest_index'] - x))
+            previous = result['nearest_index']
+        self.assertEqual(previous, 11)
+
+    def test_crossing_geometry_does_not_select_distant_future_section(self):
+        points = [[x, 0, 0] for x in range(51)]
+        points += [[25, y, 0] for y in range(30, -31, -1)]
+        # Full-path nearest picks a later crossing point at index 80.
+        self.assertEqual(self.planner.extract(points, 25, 1)['nearest_index'], 80)
+        result = self.planner.extract(points, 25, 1, previous_index=24,
+                                      search_back=3, search_forward=5)
+        self.assertEqual(result['nearest_index'], 25)
+        self.assertEqual(result['points'][0], points[25])
+
+    def test_per_cycle_advance_is_limited_even_after_large_pose_jump(self):
+        points = [[x, 0, 0] for x in range(100)]
+        previous = 10
+        for _ in range(3):
+            result = self.planner.extract(points, 90, 0, previous_index=previous,
+                                          search_forward=4)
+            self.assertEqual(result['nearest_index'], previous + 4)
+            previous = result['nearest_index']
+
+    def test_initialization_and_explicit_reset_allow_mid_route_start(self):
+        points = [[x, 0, 0] for x in range(100)]
+        self.assertEqual(self.planner.extract(points, 70, 0)['nearest_index'], 70)
+        # A replacement, shorter path is initialized independently of old progress.
+        result = self.planner.extract(self.points, 10, 0, previous_index=None)
+        self.assertEqual(result['nearest_index'], 2)
+
+    def test_progress_window_is_clipped_at_both_path_ends(self):
+        for previous, x, expected in ((0, -10, 0), (11, 60, 12), (12, 59, 12)):
+            result = self.planner.extract(self.points, x, 0, previous_index=previous)
+            self.assertEqual(result['nearest_index'], expected)
+            self.assertEqual(result['points'], self.points[expected:expected + 5])
+
+    def test_invalid_progress_and_windows_fail_closed(self):
+        for previous in (-1, len(self.points), True, 1.5, '1', math.nan):
+            with self.subTest(previous=previous):
+                self.assertIsNone(self.planner.extract(self.points, 0, 0,
+                                                      previous_index=previous))
+        for window in (-1, True, 1.5, None, '10', math.inf):
+            for name in ('search_back', 'search_forward'):
+                with self.subTest(name=name, window=window):
+                    self.assertIsNone(self.planner.extract(self.points, 0, 0,
+                                                          **{name: window}))
+
+    def test_zero_window_holds_index_and_tie_does_not_retreat(self):
+        result = self.planner.extract(self.points, 60, 0, previous_index=3,
+                                      search_back=0, search_forward=0)
+        self.assertEqual(result['nearest_index'], 3)
+        result = self.planner.extract([[0, 0, 0], [0, 0, 0], [1, 0, 0]],
+                                      0, 0, previous_index=1)
+        self.assertEqual(result['nearest_index'], 1)
+
 
 if __name__ == '__main__':
     unittest.main()

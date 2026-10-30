@@ -132,9 +132,6 @@ class ControlNode(Node):
         self.ctrl_pub = self.create_publisher(
             CtrlCmd, self.get_parameter('ctrl_cmd_topic').value, 10)
 
-        self.ctrl_pub = self.create_publisher(
-            CtrlCmd, self.get_parameter('ctrl_cmd_topic').value, 10)
-
         self.path_error_pub = self.create_publisher(
             Float32, '/control/path_error', 10)
 
@@ -147,7 +144,6 @@ class ControlNode(Node):
         self.pure_pursuit_steering_pub = self.create_publisher(
             Float32, '/control/pure_pursuit_steering', 10)
 
-        rate = max(1.0, float(self.get_parameter('control_rate_hz').value))
         rate = max(1.0, float(self.get_parameter('control_rate_hz').value))
         self.create_timer(1.0 / rate, self.control_loop)
 

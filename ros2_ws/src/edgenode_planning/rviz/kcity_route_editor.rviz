@@ -1,0 +1,108 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Tool Properties
+    Name: Tool Properties
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ''
+  Global Options:
+    Background Color: 25; 28; 34
+    Fixed Frame: map
+    Frame Rate: 30
+  Displays:
+    - Class: rviz_default_plugins/MarkerArray
+      Name: MGeo Links
+      Enabled: true
+      Topic:
+        Value: /route_editor/mgeo_links
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Depth: 1
+    - Class: rviz_default_plugins/MarkerArray
+      Name: MGeo Nodes - click near blue dots
+      Enabled: true
+      Topic:
+        Value: /route_editor/mgeo_nodes
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Depth: 1
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Selected Waypoints
+      Enabled: true
+      Topic:
+        Value: /route_editor/waypoint_markers
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Depth: 1
+    - Class: rviz_default_plugins/Path
+      Name: Preview Path
+      Enabled: true
+      Color: 255; 70; 230
+      Line Style: Billboards
+      Line Width: 0.8
+      Buffer Length: 1
+      Topic:
+        Value: /route_editor/preview_path
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Depth: 1
+    - Class: rviz_default_plugins/Path
+      Name: Active Planning Global Path
+      Enabled: true
+      Color: 60; 240; 110
+      Line Style: Billboards
+      Line Width: 0.5
+      Buffer Length: 1
+      Topic:
+        Value: /planning/global_path
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 5
+    - Class: rviz_default_plugins/Path
+      Name: Planning Local Path
+      Enabled: true
+      Color: 255; 160; 30
+      Line Style: Billboards
+      Line Width: 1.0
+      Buffer Length: 1
+      Topic:
+        Value: /planning/local_path
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 5
+    - Class: rviz_default_plugins/Marker
+      Name: Vehicle
+      Enabled: true
+      Topic:
+        Value: /route_editor/vehicle_marker
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Depth: 1
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/PublishPoint
+      Topic: /clicked_point
+      Single click: false
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: K-City Overview
+      Target Frame: map
+      Angle: 0
+      Scale: 0.75
+      X: 77.53
+      Y: 1462.75
+Window Geometry:
+  Width: 1500
+  Height: 1000

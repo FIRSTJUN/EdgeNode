@@ -9,15 +9,15 @@ localization_node:
     odometry_topic: /localization/odometry
     status_topic: /localization/status
 
-    # WGS84 / UTM Zone 52N -> C-track local 좌표 (단위: m).
+    # WGS84 / UTM Zone 52N -> K-City local 좌표 (단위: m).
     utm_epsg: 32652
     gps_frame_id: map
     odom_frame_id: map
     base_frame_id: base_link
     # 메시지 offset 두 값이 모두 유한한 양수이면 메시지 값을 우선 사용.
     # 하나라도 유효하지 않으면 아래 설정값 쌍을 사용.
-    fallback_east_offset: 360825.8208815998
-    fallback_north_offset: 4065896.298577933
+    fallback_east_offset: 302459.942
+    fallback_north_offset: 4122635.537
 
     status_publish_period_sec: 1.0
     qos_depth: 10

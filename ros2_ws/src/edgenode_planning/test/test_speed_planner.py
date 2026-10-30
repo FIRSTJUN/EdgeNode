@@ -12,6 +12,30 @@ def circular_path(radius, step_rad=0.1, point_count=6):
             for index in range(point_count)]
 
 
+def curvature_profile_path(profile):
+    """Integrate exact circular/straight pieces: (curvature, length, spacing).
+
+    Physical lengths and curvature are specified independently of vertex
+    density, including dense short joints between sparsely sampled roads.
+    """
+    x, y, heading = 0.0, 0.0, 0.0
+    points = [[x, y, 0.0]]
+    for curvature, length, spacing in profile:
+        count = max(1, math.ceil(length / spacing))
+        step = length / count
+        for _ in range(count):
+            next_heading = heading + curvature * step
+            if curvature == 0:
+                x += step * math.cos(heading)
+                y += step * math.sin(heading)
+            else:
+                x += (math.sin(next_heading) - math.sin(heading)) / curvature
+                y += (math.cos(heading) - math.cos(next_heading)) / curvature
+            heading = next_heading
+            points.append([x, y, 0.0])
+    return points
+
+
 class SpeedPlannerTest(unittest.TestCase):
     def setUp(self):
         self.planner = SpeedPlanner()
@@ -113,7 +137,8 @@ class SpeedPlannerTest(unittest.TestCase):
 
     def test_invalid_parameter_types_and_nonfinite_values_fail_closed(self):
         fields = ('cruise_speed_kmh', 'curve_speed_kmh', 'sharp_curve_speed_kmh',
-                  'preview_distance_m', 'curve_curvature_threshold', 'sharp_curvature_threshold')
+                  'preview_distance_m', 'curve_curvature_threshold', 'sharp_curvature_threshold',
+                  'curvature_smoothing_window_m', 'curvature_persistence_m', 'curvature_hysteresis')
         for field in fields:
             for value in (None, [], 'bad', True, math.nan, math.inf, -math.inf, 10 ** 400):
                 with self.subTest(field=field, value=value):
@@ -184,6 +209,154 @@ class SpeedPlannerTest(unittest.TestCase):
         self.assertIsNone(self.planner.plan([[-1e308, 0, 0], [1e308, 0, 0], [1e308, 1, 0]]))
         planner = SpeedPlanner(preview_distance_m=1e201)
         self.assertIsNone(planner.plan([[0, 0, 0], [1e200, 0, 0], [1e200, 1e200, 0]]))
+
+
+class StableCurvatureSpeedPlannerTest(unittest.TestCase):
+    def setUp(self):
+        self.planner = SpeedPlanner(cruise_speed_kmh=10.0, curve_speed_kmh=5.0,
+                                    sharp_curve_speed_kmh=3.5)
+
+    def test_nearly_straight_curvature_stays_at_ten_kmh(self):
+        result = self.planner.plan(curvature_profile_path([(0.0005, 12, 0.5)]))
+        self.assertEqual(result['speed_mode'], 'CRUISE')
+        self.assertEqual(result['target_speed_kmh'], 10.0)
+        self.assertAlmostEqual(result['representative_curvature'], 0.0005, places=6)
+
+    def test_isolated_spike_keeps_raw_diagnostic_but_not_slow_mode(self):
+        points = curvature_profile_path([(0.001, 4, 0.5), (0.125, 0.05, 0.01), (0.001, 6, 0.5)])
+        result = self.planner.plan(points)
+        self.assertAlmostEqual(result['max_curvature'], 0.125, places=6)
+        self.assertLess(result['filtered_max_curvature'], 0.04)
+        self.assertEqual(result['speed_mode'], 'CRUISE')
+        self.assertEqual(result['target_speed_kmh'], 10.0)
+
+    def test_short_dense_spikes_do_not_dominate_by_point_count(self):
+        for curvature in (0.07, 0.10, 0.12):
+            for length in (0.2, 0.5):
+                with self.subTest(curvature=curvature, length=length):
+                    points = curvature_profile_path([
+                        (0.001, 4, 0.5), (curvature, length, 0.01), (0.001, 6, 0.5),
+                    ])
+                    result = self.planner.plan(points)
+                    # Reproduce the old sample-count p80 failure, then verify
+                    # the distance-based decision rejects the same geometry.
+                    self.assertGreater(result['raw_representative_curvature'], 0.04)
+                    self.assertLess(result['representative_curvature'], 0.04)
+                    self.assertEqual(result['speed_mode'], 'CRUISE')
+
+    def test_short_joint_decision_is_independent_of_vertex_density(self):
+        for spacing in (0.01, 0.05, 0.1, 0.2):
+            with self.subTest(spacing=spacing):
+                points = curvature_profile_path([(0.001, 4, 0.5), (0.12, 0.4, spacing), (0.001, 6, 0.5)])
+                result = self.planner.plan(points)
+                self.assertEqual(result['speed_mode'], 'CRUISE')
+                self.assertEqual(result['target_speed_kmh'], 10.0)
+
+    def test_sustained_variable_curve_is_five_kmh(self):
+        profile = [(0.001, 3, 0.5)]
+        profile += [(k, 0.5, 0.1) for k in (0.055, 0.061, 0.073, 0.080, 0.076, 0.068)]
+        profile += [(0.001, 5, 0.5)]
+        result = self.planner.plan(curvature_profile_path(profile))
+        self.assertEqual(result['speed_mode'], 'CURVE')
+        self.assertEqual(result['target_speed_kmh'], 5.0)
+        self.assertGreater(result['representative_curvature'], 0.04)
+        self.assertLess(result['representative_curvature'], 0.10)
+
+    def test_sustained_sharp_curve_is_three_point_five_kmh(self):
+        result = self.planner.plan(curvature_profile_path([(0.001, 3, 0.5), (0.12, 4, 0.1), (0.001, 4, 0.5)]))
+        self.assertEqual(result['speed_mode'], 'SHARP_CURVE')
+        self.assertEqual(result['target_speed_kmh'], 3.5)
+        self.assertAlmostEqual(result['representative_curvature'], 0.12, places=6)
+
+    def test_sustained_curve_detection_is_independent_of_vertex_density(self):
+        for spacing in (0.02, 0.1, 0.5):
+            with self.subTest(spacing=spacing):
+                result = self.planner.plan(curvature_profile_path([
+                    (0.001, 3, 0.5), (0.06, 4, spacing), (0.001, 4, 0.5),
+                ]))
+                self.assertEqual(result['speed_mode'], 'CURVE')
+                self.assertEqual(result['target_speed_kmh'], 5.0)
+
+    def test_disconnected_short_spikes_cannot_accumulate_persistence(self):
+        planner = SpeedPlanner(curvature_smoothing_window_m=0.1, curvature_persistence_m=2.0)
+        profile = [(0.001, 1, 0.1)]
+        for _ in range(4):
+            profile += [(0.12, 0.5, 0.05), (0.001, 1, 0.1)]
+        result = planner.plan(curvature_profile_path(profile))
+        self.assertGreater(result['filtered_max_curvature'], 0.10)
+        self.assertLess(result['representative_curvature'], 0.04)
+        self.assertEqual(result['speed_mode'], 'CRUISE')
+
+    def test_persistence_distance_is_configurable_and_not_a_sample_count(self):
+        points = curvature_profile_path([(0.001, 3, 0.5), (0.12, 1, 0.05), (0.001, 6, 0.5)])
+        for distance, mode in ((2.0, 'CRUISE'), (0.5, 'SHARP_CURVE')):
+            with self.subTest(distance=distance):
+                planner = SpeedPlanner(curvature_smoothing_window_m=0.1, curvature_persistence_m=distance)
+                self.assertEqual(planner.plan(points)['speed_mode'], mode)
+
+    def test_curve_hysteresis_prevents_repeated_boundary_switching(self):
+        previous = None
+        modes = []
+        for curvature in (0.0395, 0.0405, 0.0395, 0.0405, 0.0395, 0.034):
+            result = self.planner.plan(curvature_profile_path([(curvature, 12, 0.5)]), previous_speed_mode=previous)
+            previous = result['speed_mode']
+            modes.append(previous)
+        self.assertEqual(modes, ['CRUISE', 'CURVE', 'CURVE', 'CURVE', 'CURVE', 'CRUISE'])
+
+    def test_sharp_hysteresis_retains_then_releases_sharp_and_curve_modes(self):
+        previous = None
+        modes = []
+        for curvature in (0.101, 0.099, 0.1005, 0.096, 0.094, 0.039, 0.034):
+            result = self.planner.plan(curvature_profile_path([(curvature, 12, 0.5)]), previous_speed_mode=previous)
+            previous = result['speed_mode']
+            modes.append(previous)
+        self.assertEqual(modes, ['SHARP_CURVE'] * 4 + ['CURVE', 'CURVE', 'CRUISE'])
+
+    def test_hysteresis_can_be_disabled_and_planner_has_no_hidden_state(self):
+        points = curvature_profile_path([(0.039, 12, 0.5)])
+        self.assertEqual(self.planner.plan(points, previous_speed_mode='CURVE')['speed_mode'], 'CURVE')
+        self.assertEqual(self.planner.plan(points)['speed_mode'], 'CRUISE')
+        no_hysteresis = SpeedPlanner(curvature_hysteresis=0.0)
+        self.assertEqual(no_hysteresis.plan(points, previous_speed_mode='CURVE')['speed_mode'], 'CRUISE')
+
+    def test_short_preview_uses_all_remaining_distance_without_division_errors(self):
+        for curvature, mode in ((0.0005, 'CRUISE'), (0.06, 'CURVE'), (0.12, 'SHARP_CURVE')):
+            with self.subTest(curvature=curvature):
+                result = self.planner.plan(curvature_profile_path([(curvature, 0.8, 0.1)]))
+                self.assertEqual(result['speed_mode'], mode)
+                self.assertLess(result['evaluated_path_length_m'], 2.0)
+                self.assertTrue(math.isfinite(result['representative_curvature']))
+
+    def test_duplicate_and_tiny_segments_do_not_corrupt_the_decision(self):
+        points = [[0, 0, 0], [0, 0, 1], [1e-8, 1e-8, 0], [2e-8, 0, 0]]
+        points += [[i * 0.5, 0, 0] for i in range(1, 25)]
+        original = [point.copy() for point in points]
+        result = self.planner.plan(points)
+        self.assertTrue(math.isfinite(result['max_curvature']))
+        self.assertEqual(result['speed_mode'], 'CRUISE')
+        self.assertEqual(result['target_speed_kmh'], 10.0)
+        self.assertEqual(result['representative_curvature'], 0.0)
+        self.assertEqual(points, original)
+
+    def test_signed_smoothing_has_symmetric_left_and_right_decisions(self):
+        points = curvature_profile_path([(0.001, 3, 0.5), (0.06, 4, 0.1), (0.001, 4, 0.5)])
+        left = self.planner.plan(points)
+        right = self.planner.plan([[x, -y, z] for x, y, z in points])
+        self.assertEqual(left['speed_mode'], right['speed_mode'])
+        self.assertEqual(left['target_speed_kmh'], right['target_speed_kmh'])
+        self.assertAlmostEqual(left['representative_curvature'], right['representative_curvature'])
+        self.assertEqual(left['max_curvature'], right['max_curvature'])
+
+    def test_invalid_spatial_parameters_and_previous_modes_fail_closed(self):
+        points = curvature_profile_path([(0.06, 4, 0.5)])
+        for field in ('curvature_smoothing_window_m', 'curvature_persistence_m'):
+            for value in (0.0, -0.1):
+                with self.subTest(field=field, value=value):
+                    self.assertIsNone(SpeedPlanner(**{field: value}).plan(points))
+        self.assertIsNone(SpeedPlanner(curvature_hysteresis=-0.1).plan(points))
+        for previous in ('INVALID', True, 1, [], {}):
+            with self.subTest(previous=previous):
+                self.assertIsNone(self.planner.plan(points, previous_speed_mode=previous))
 
 
 if __name__ == '__main__':

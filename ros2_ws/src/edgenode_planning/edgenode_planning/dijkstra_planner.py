@@ -116,13 +116,62 @@ class DijkstraPlanner:
         Consecutive identical points, including shared link endpoints, appear
         once. ``total_cost_m`` includes the current link's complete cost.
         """
-        if not isinstance(start_link_id, str) or not isinstance(goal_node_id, str):
+        return self.plan_route(start_link_id, [goal_node_id])
+
+    def plan_route(self, start_link_id, route_node_ids):
+        """Visit every waypoint in order, or fail the entire route with None.
+
+        Include the full matched link once, then use directed Dijkstra from
+        its to-node to the first waypoint and between subsequent waypoints.
+        Shared boundary nodes/XYZ points appear once; intentional revisits
+        later in the route remain. Costs include each traversed link, even
+        when a later leg intentionally traverses that link again.
+        """
+        if not isinstance(start_link_id, str):
             return None
-        if start_link_id not in self._link_costs or goal_node_id not in self.nodes_by_id:
+        if start_link_id not in self._link_costs:
+            return None
+        if not isinstance(route_node_ids, (list, tuple)) or not route_node_ids:
+            return None
+        if any(not isinstance(node_id, str) or node_id not in self.nodes_by_id
+               for node_id in route_node_ids):
             return None
 
         start_link = self.links_by_id[start_link_id]
         start_node_id = start_link['to_node_idx']
+        node_ids = [start_link['from_node_idx'], start_node_id]
+        link_ids = [start_link_id]
+        leg_start = start_node_id
+        for goal_node_id in route_node_ids:
+            leg = self._shortest_path(leg_start, goal_node_id)
+            if leg is None:
+                return None
+            leg_nodes, leg_links = leg
+            node_ids.extend(leg_nodes[1:])
+            link_ids.extend(leg_links)
+            leg_start = goal_node_id
+
+        total_cost = sum(self._link_costs[link_id] for link_id in link_ids)
+        if not math.isfinite(total_cost):
+            return None
+        points = []
+        for link_id in link_ids:
+            for point in self.links_by_id[link_id]['points']:
+                if not points or points[-1] != point:
+                    points.append(point.copy())
+
+        return {
+            'start_link_id': start_link_id,
+            'start_node_id': start_node_id,
+            'goal_node_id': route_node_ids[-1],
+            'node_ids': node_ids,
+            'link_ids': link_ids,
+            'points': points,
+            'total_cost_m': total_cost,
+        }
+
+    def _shortest_path(self, start_node_id, goal_node_id):
+        """Return ordered nodes/links between two nodes, without a start link."""
         distances = {start_node_id: 0.0}
         predecessors = {}
         queue = [(0.0, start_node_id)]
@@ -155,24 +204,4 @@ class DijkstraPlanner:
             node_id = previous_node
         node_ids.reverse()
         link_ids.reverse()
-        node_ids.insert(0, start_link['from_node_idx'])
-        link_ids.insert(0, start_link_id)
-
-        total_cost = sum(self._link_costs[link_id] for link_id in link_ids)
-        if not math.isfinite(total_cost):
-            return None
-        points = []
-        for link_id in link_ids:
-            for point in self.links_by_id[link_id]['points']:
-                if not points or points[-1] != point:
-                    points.append(point.copy())
-
-        return {
-            'start_link_id': start_link_id,
-            'start_node_id': start_node_id,
-            'goal_node_id': goal_node_id,
-            'node_ids': node_ids,
-            'link_ids': link_ids,
-            'points': points,
-            'total_cost_m': total_cost,
-        }
+        return node_ids, link_ids

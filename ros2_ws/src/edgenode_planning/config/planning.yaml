@@ -7,6 +7,8 @@ planning_node:
     recommended_speed_topic: /planning/recommended_speed
     speed_mode_topic: /planning/speed_mode
     speed_curvature_topic: /planning/speed_curvature
+    # speed_curvature is the smoothed, distance-persistent decision value.
+    # speed_max_curvature remains the raw absolute triplet maximum (1/m).
     speed_max_curvature_topic: /planning/speed_max_curvature
     drive_status_topic: /planning/drive_status
 
@@ -19,10 +21,20 @@ planning_node:
     global_path_topic: /planning/global_path
     local_path_topic: /planning/local_path
     local_path_length_m: 20.0
-    goal_node_id: A122CC001096
+    # Inclusive point-index window; progress never retreats and advances by
+    # at most search_forward points per 20 Hz planning cycle after initialization.
+    local_path_search_back: 3
+    local_path_search_forward: 10
+    local_path_index_topic: /planning/local_path_index
+    goal_node_id: A119BS010245
+    # Empty: use goal_node_id. Nonempty: visit these nodes in order; the last
+    # entry is the final goal (goal_node_id is ignored). Set before driving.
+    route_node_ids: []
+    # Example using the currently verified destination:
+    # route_node_ids: [A119BS010245]
     global_path_frame_id: map
 
-    mgeo_dir: /workspace/local_data/c_track_mgeo
+    mgeo_dir: /workspace/local_data/kcity_mgeo
     map_match_search_radius_m: 6.0
     map_match_max_distance_m: 4.0
     map_match_max_heading_diff_deg: 80.0
@@ -33,11 +45,17 @@ planning_node:
 
     # Driving is opt-in, bounded by an independent speed cap and session lease.
     enable_drive: false
-    max_drive_speed_kmh: 10.0
+    max_drive_speed_kmh: 50.0
     drive_duration_sec: 15.0
-    cruise_speed_kmh: 10.0
-    curve_speed_kmh: 5.0
+    cruise_speed_kmh: 50.0
+    curve_speed_kmh: 25.0
     sharp_curve_speed_kmh: 3.5
     speed_preview_distance_m: 10.0
     curve_curvature_threshold: 0.04
     sharp_curvature_threshold: 0.10
+    # Spatial weighted median and contiguous curvature support, in metres.
+    speed_curvature_smoothing_window_m: 2.0
+    speed_curvature_persistence_m: 2.0
+    # Release margin in 1/m; entry thresholds above are unchanged.
+    # Default release thresholds: CURVE 0.035, SHARP_CURVE 0.095.
+    speed_curvature_hysteresis: 0.005

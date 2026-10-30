@@ -1,0 +1,17 @@
+route_editor_node:
+  ros__parameters:
+    mgeo_dir: /workspace/local_data/kcity_mgeo
+    clicked_point_topic: /clicked_point
+    current_link_topic: /planning/current_link
+    localization_topic: /localization/odometry
+    preview_path_topic: /route_editor/preview_path
+    status_topic: /route_editor/status
+    waypoint_snap_max_distance_m: 5.0
+    route_name: kcity_demo_route
+    route_save_dir: /workspace/local_data/kcity_routes
+    planning_node_name: /planning_node
+    # Optional offline preview. Live valid current_link always takes priority.
+    start_link_id: ''
+    show_mgeo_nodes: true
+    show_waypoint_node_ids: false
+    parameter_timeout_sec: 3.0

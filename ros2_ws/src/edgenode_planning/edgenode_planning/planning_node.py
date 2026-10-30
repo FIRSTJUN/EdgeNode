@@ -5,7 +5,8 @@ from rclpy.node import Node
 
 from geometry_msgs.msg import PoseArray, PoseStamped
 from nav_msgs.msg import Odometry, Path
-from std_msgs.msg import Float32, String
+from rcl_interfaces.msg import ParameterDescriptor
+from std_msgs.msg import Float32, Int32, String
 
 from edgenode_planning.dijkstra_planner import DijkstraPlanner
 from edgenode_planning.local_path_planner import LocalPathPlanner
@@ -34,8 +35,8 @@ class PlanningNode(Node):
     Current stage:
       - Perception is intentionally disconnected.
       - Localization odometry is the only pose input.
-      - Global routes are recalculated only when the matched link or goal changes.
-      - Local paths are extracted from the current pose every planning cycle.
+      - Global routes are fixed until the active waypoint list or goal changes.
+      - Local paths use a bounded, forward-only global progress index.
       - Local geometry supplies speed recommendations for preview diagnostics.
       - Driving requires explicit enablement, valid geometry and a finite lease.
       - Default target speed remains 0 km/h with enable_drive=false.
@@ -95,6 +96,9 @@ class PlanningNode(Node):
                 ('global_path_topic', '/planning/global_path'),
                 ('local_path_topic', '/planning/local_path'),
                 ('local_path_length_m', 20.0),
+                ('local_path_search_back', 3),
+                ('local_path_search_forward', 10),
+                ('local_path_index_topic', '/planning/local_path_index'),
                 ('enable_drive', False),
                 ('max_drive_speed_kmh', 1.0),
                 ('drive_duration_sec', 15.0),
@@ -110,13 +114,19 @@ class PlanningNode(Node):
                 ('speed_preview_distance_m', 10.0),
                 ('curve_curvature_threshold', 0.04),
                 ('sharp_curvature_threshold', 0.10),
+                ('speed_curvature_smoothing_window_m', 2.0),
+                ('speed_curvature_persistence_m', 2.0),
+                ('speed_curvature_hysteresis', 0.005),
                 ('recommended_speed_topic', '/planning/recommended_speed'),
                 ('speed_mode_topic', '/planning/speed_mode'),
                 ('speed_curvature_topic', '/planning/speed_curvature'),
                 ('speed_max_curvature_topic', '/planning/speed_max_curvature'),
-                ('goal_node_id', 'A122CC001096'),
+                ('goal_node_id', 'A119BS010245'),
+                # Humble infers Python [] as BYTE_ARRAY and YAML [] as NOT_SET.
+                # Allow both and STRING_ARRAY; plan_route validates nonempty values.
+                ('route_node_ids', [], ParameterDescriptor(dynamic_typing=True)),
                 ('global_path_frame_id', 'map'),
-                ('mgeo_dir', '/workspace/local_data/c_track_mgeo'),
+                ('mgeo_dir', '/workspace/local_data/kcity_mgeo'),
                 ('map_match_search_radius_m', 6.0),
                 ('map_match_max_distance_m', 4.0),
                 ('map_match_max_heading_diff_deg', 80.0),
@@ -147,9 +157,14 @@ class PlanningNode(Node):
             preview_distance_m=self.get_parameter('speed_preview_distance_m').value,
             curve_curvature_threshold=self.get_parameter('curve_curvature_threshold').value,
             sharp_curvature_threshold=self.get_parameter('sharp_curvature_threshold').value,
+            curvature_smoothing_window_m=self.get_parameter('speed_curvature_smoothing_window_m').value,
+            curvature_persistence_m=self.get_parameter('speed_curvature_persistence_m').value,
+            curvature_hysteresis=self.get_parameter('speed_curvature_hysteresis').value,
         )
+        self._previous_speed_mode = None
         self._route_key = None
         self._route_result = None
+        self._progress_index = None
         self.latest_pose = None
         self._drive_was_enabled = False
         self._drive_session_start_ns = None
@@ -208,6 +223,11 @@ class PlanningNode(Node):
         self.local_path_pub = self.create_publisher(
             Path,
             self.get_parameter('local_path_topic').value,
+            10,
+        )
+        self.local_path_index_pub = self.create_publisher(
+            Int32,
+            self.get_parameter('local_path_index_topic').value,
             10,
         )
         self.recommended_speed_pub = self.create_publisher(
@@ -305,9 +325,9 @@ class PlanningNode(Node):
     def plan(self):
         """Publish routes, recommendations and guarded, time-limited commands.
 
-        Cache failures too, so an unreachable goal does not trigger a search
-        every tick. During match loss retain the cache but publish no Path;
-        a recovered match must validate the link/goal key before reuse.
+        Cache failures too, so an unreachable route does not trigger a search
+        every tick. Match loss retains progress/cache but publishes no Path.
+        An active route configuration change invalidates both immediately.
         """
         state_value = 'WAIT_FOR_LOCALIZATION'
         status_value = 'WAIT_FOR_LOCALIZATION'
@@ -326,6 +346,23 @@ class PlanningNode(Node):
         lattice_clearance = float('nan')
         lattice_blocked = False
         obstacle_avoid_requested = False
+
+        route_node_ids = self.get_parameter('route_node_ids').value
+        use_waypoints = (route_node_ids is not None
+                         and not (isinstance(route_node_ids, (list, tuple))
+                                  and len(route_node_ids) == 0))
+        if use_waypoints:
+            route_key = ('waypoints', tuple(route_node_ids)
+                         if isinstance(route_node_ids, (list, tuple))
+                         else repr(route_node_ids))
+        else:
+            goal_node_id = self.get_parameter('goal_node_id').value
+            route_key = ('goal', goal_node_id)
+        if route_key != self._route_key:
+            self._route_key = None
+            self._route_result = None
+            self._progress_index = None
+            self._previous_speed_mode = None
 
         now_ns = self.get_clock().now().nanoseconds
         enable_drive = self.get_parameter('enable_drive').value is True
@@ -358,13 +395,19 @@ class PlanningNode(Node):
                 distance = result['distance']
                 heading_diff = result['heading_diff']
 
-                goal_node_id = self.get_parameter('goal_node_id').value
-                route_key = (current_link, goal_node_id)
+                # Match fluctuations never change a fixed route. Only the
+                # active waypoint list (or legacy goal) can invalidate it.
                 if route_key != self._route_key:
-                    self._route_result = self.dijkstra_planner.plan(
-                        current_link, goal_node_id,
-                    )
+                    if use_waypoints:
+                        self._route_result = self.dijkstra_planner.plan_route(
+                            current_link, route_node_ids,
+                        )
+                    else:
+                        self._route_result = self.dijkstra_planner.plan(
+                            current_link, goal_node_id,
+                        )
                     self._route_key = route_key
+                    self._progress_index = None
 
                 if self._route_result is None:
                     state_value = 'GLOBAL_PATH_NOT_FOUND'
@@ -387,8 +430,12 @@ class PlanningNode(Node):
                     local_result = self.local_path_planner.extract(
                         self._route_result['points'], x, y,
                         horizon_m=self.get_parameter('local_path_length_m').value,
+                        previous_index=self._progress_index,
+                        search_back=self.get_parameter('local_path_search_back').value,
+                        search_forward=self.get_parameter('local_path_search_forward').value,
                     )
                     if local_result is not None:
+                        self._progress_index = local_result['nearest_index']
                         active_local_points = local_result['points']
 
                         lattice_result = self.lattice_planner.plan(
@@ -424,7 +471,7 @@ class PlanningNode(Node):
                         self.local_path_pub.publish(local_path)
 
                         speed_result = self.speed_planner.plan(
-                            active_local_points
+                            active_local_points, previous_speed_mode=self._previous_speed_mode,
                         )
                         if (speed_result is not None
                                 and _finite_number(speed_result['target_speed_kmh'])
@@ -434,6 +481,10 @@ class PlanningNode(Node):
                             speed_mode = speed_result['speed_mode']
                             speed_curvature = speed_result['representative_curvature']
                             speed_max_curvature = speed_result['max_curvature']
+
+        # Hysteresis belongs to speed classification only. Invalid planning
+        # input or a route change must not carry a stale mode into recovery.
+        self._previous_speed_mode = speed_mode if speed_valid else None
 
         target_error = Float32()
         target_error.data = 0.0
@@ -504,6 +555,9 @@ class PlanningNode(Node):
         self.target_error_pub.publish(target_error)
         self.target_speed_pub.publish(target_speed)
         self.state_pub.publish(state)
+        self.local_path_index_pub.publish(Int32(
+            data=self._progress_index if local_result is not None else -1,
+        ))
         self.fsm_state_pub.publish(String(data=fsm_state_value))
         self.current_link_pub.publish(String(data=current_link))
         self.map_match_status_pub.publish(String(data=status_value))

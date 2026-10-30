@@ -5,6 +5,12 @@ import os
 
 
 def generate_launch_description():
+    localization_cfg = os.path.join(
+        get_package_share_directory('edgenode_localization'),
+        'config',
+        'localization.yaml',
+    )
+
     planning_cfg = os.path.join(
         get_package_share_directory('edgenode_planning'),
         'config',
@@ -23,6 +29,13 @@ def generate_launch_description():
             executable='localization_node',
             name='localization_node',
             output='screen',
+            parameters=[localization_cfg],
+            additional_env={
+                'OPENBLAS_NUM_THREADS': '1',
+                'OMP_NUM_THREADS': '1',
+                'MKL_NUM_THREADS': '1',
+                'NUMEXPR_NUM_THREADS': '1',
+            },
         ),
 
         Node(

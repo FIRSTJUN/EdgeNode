@@ -45,8 +45,8 @@ class LocalizationNode(Node):
             ('initial_yaw_std_deg', 5.0),
             ('initial_velocity_std_mps', 2.0),
             ('max_predict_dt_sec', 0.2),
-            ('fallback_east_offset', 360825.8208815998),
-            ('fallback_north_offset', 4065896.298577933),
+            ('fallback_east_offset', 302459.942),
+            ('fallback_north_offset', 4122635.537),
             ('status_publish_period_sec', 1.0),
             ('qos_depth', 10),
             ('sensor_qos_reliability', 'best_effort'),
@@ -165,7 +165,7 @@ class LocalizationNode(Node):
             self.get_logger().warning('유효하지 않은 UTM 좌표: GPS Odometry 발행 생략')
             return
 
-        # C-track 원점은 UTM 52N의 유한한 양수 쌍이다.
+        # K-City 원점은 UTM 52N의 유한한 양수 쌍이다.
         # 0/음수/NaN/Inf가 있으면 두 축 모두 설정값으로 대체한다.
         east_offset, north_offset = msg.east_offset, msg.north_offset
         if not all(math.isfinite(value) and value > 0.0 for value in (

@@ -12,8 +12,12 @@ setup(
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
+        (os.path.join('share', package_name, 'rviz'), glob('rviz/*.rviz')),
+        (os.path.join('share', package_name, 'docs'), glob('docs/*.md')),
     ],
     install_requires=['setuptools'],
+    tests_require=['pytest'],
     zip_safe=True,
     maintainer='EdgeNode Team',
     maintainer_email='poj285895@gmail.com',
@@ -22,6 +26,7 @@ setup(
     entry_points={
         'console_scripts': [
             'planning_node = edgenode_planning.planning_node:main',
+            'route_editor_node = edgenode_planning.route_editor_node:main',
         ],
     },
 )
