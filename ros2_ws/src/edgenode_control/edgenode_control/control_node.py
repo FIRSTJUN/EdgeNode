@@ -50,11 +50,11 @@ class PID:
 
 class ControlNode(Node):
     """
-    Pure Pursuit steering and PID throttle/brake for MORAI ERP42.
+    Pure Pursuit steering and PID throttle/brake for MORAI 2020 Hyundai Sonata.
 
     longl_cmd_type = 1 -> throttle/brake mode.
     front_steer is normalized [-1, 1] for MoraiCmdController in 26.R1.
-    rear_steer stays at 0 for ERP42 baseline.
+    rear_steer stays at 0 for the Sonata baseline.
     """
 
     def __init__(self):
@@ -76,8 +76,8 @@ class ControlNode(Node):
             ('status_timeout_sec', 0.6),
             ('local_path_timeout_sec', 0.6),
             ('localization_timeout_sec', 0.6),
-            ('wheelbase_m', 1.04),
-            ('max_wheel_angle_rad', 0.49),
+            ('wheelbase_m', 2.84),
+            ('max_wheel_angle_rad', 0.610865),
             ('lookahead_distance_m', 2.5),
             ('steering_sign', -1.0),
             ('max_front_steer_normalized', 0.70),
@@ -251,11 +251,12 @@ class ControlNode(Node):
             self.speed_pid.reset()
             return
 
-        # Explicit stop clears PID history and bypasses its update entirely.
+        # Explicit stop clears PID history and overrides path-tracking steering.
         if self.target_speed_kmh <= 0.05:
             self.speed_pid.reset()
             accel = 0.0
             brake = 0.65
+            front_steer = 0.0
         else:
             # Longitudinal PID in km/h -> normalized pedal command.
             speed_error = self.target_speed_kmh - self.current_speed_kmh

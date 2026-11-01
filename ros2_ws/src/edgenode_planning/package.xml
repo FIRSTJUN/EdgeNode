@@ -20,6 +20,7 @@
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>rviz2</exec_depend>
   <test_depend>python3-pytest</test_depend>
+  <test_depend>edgenode_control</test_depend>
 
   <export>
     <build_type>ament_python</build_type>

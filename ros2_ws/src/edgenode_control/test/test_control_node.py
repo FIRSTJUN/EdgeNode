@@ -108,47 +108,83 @@ class ControlNodeTest(unittest.TestCase):
         )
         self.timer.assert_called_once_with(1.0 / 30.0, self.node.control_loop)
         self.assertEqual(self.initial_stamps, (None, None, None, None))
-        self.assertEqual(self.parameters['wheelbase_m'], 1.04)
-        self.assertEqual(self.parameters['max_wheel_angle_rad'], 0.49)
+        self.assertEqual(self.parameters['wheelbase_m'], 2.84)
+        self.assertEqual(self.parameters['max_wheel_angle_rad'], 0.610865)
         self.assertEqual(self.parameters['lookahead_distance_m'], 2.5)
         self.assertEqual(self.parameters['steering_sign'], -1.0)
         self.assertEqual(self.parameters['max_front_steer_normalized'], 0.70)
         self.assertFalse(hasattr(self.node, 'steer_pid'))
 
     def test_left_target_produces_negative_morai_steering(self):
+        self.node.target_speed_cb(Float32(data=1.0))
+        # Keep the sign-conversion case below the Sonata steering limit;
+        # saturated commands are checked separately for both turn directions.
+        self.set_path([[0, 0.25, 2], [10, 0.25, 3]])
         command = self.command()
         # Inspect the actual sign through an independent real computation.
         expected = PurePursuit().compute(self.node.local_path_points, 0, 0, 0)
         self.assertGreater(expected['steering_normalized'], 0)
+        self.assertLess(expected['steering_normalized'], 0.70)
         self.assertAlmostEqual(command.front_steer, -expected['steering_normalized'])
         self.node.pure_pursuit.compute.assert_called_once_with(
             self.node.local_path_points, 0.0, 0.0, 0.0, lookahead_distance_m=2.5,
         )
 
     def test_right_target_produces_positive_morai_steering(self):
+        self.node.target_speed_cb(Float32(data=1.0))
         self.set_path([[0, -1, 2], [10, -1, 3]])
         command = self.command()
         self.assertGreater(command.front_steer, 0.0)
 
-    def test_front_steer_clamps_to_develop_safe_limit(self):
+    def test_front_steer_clamps_to_configured_limit_while_driving(self):
+        self.node.target_speed_cb(Float32(data=50.0))
         for side in (-1, 1):
             with self.subTest(side=side):
                 self.set_path([[0, 0, 0], [0.2, side, 0]])
                 command = self.command()
                 self.assertEqual(command.front_steer, -side * 0.70)
-                self.assertEqual(command.accel, 0.0)
-                self.assertGreaterEqual(command.brake, 0.65)
+                self.assertEqual(command.accel, 0.60)
+                self.assertEqual(command.brake, 0.0)
 
-    def test_zero_target_speed_keeps_brakes_with_nonzero_steering(self):
+    def test_zero_target_speed_clears_steering_while_braking(self):
         status = EgoVehicleStatus()
         status.velocity.x = 1.0
         self.node.status_cb(status)
         command = self.command()
         self.assertEqual(self.node.target_speed_kmh, 0.0)
         self.assertEqual(command.accel, 0.0)
-        self.assertGreaterEqual(command.brake, 0.65)
-        self.assertNotEqual(command.front_steer, 0.0)
+        self.assertEqual(command.brake, 0.65)
+        self.assertEqual(command.front_steer, 0.0)
         self.node.pure_pursuit.compute.assert_called_once()
+
+    def test_explicit_stop_overrides_saturated_steering_on_first_cycle(self):
+        # Reproduce the short endpoint target while the vehicle is still moving.
+        for side in (-1, 1):
+            for target in (0.0, 0.05):
+                with self.subTest(side=side, target=target):
+                    self.feed_inputs()
+                    self.set_path([[0, 0, 0], [0.26, side * 0.02, 0]])
+                    status = EgoVehicleStatus()
+                    status.velocity.x = 20.5 / 3.6
+                    self.node.status_cb(status)
+                    self.node.target_speed_cb(Float32(data=50.0))
+                    moving = self.command()
+                    self.assertEqual(moving.front_steer, -side * 0.70)
+                    self.assertEqual(moving.accel, 0.60)
+                    self.assertEqual(moving.brake, 0.0)
+
+                    self.node.target_speed_cb(Float32(data=target))
+                    self.node.speed_pid.integral = 12.0
+                    self.node.speed_pid.prev_error = 29.5
+                    with patch.object(self.node.speed_pid, 'update',
+                                      wraps=self.node.speed_pid.update) as update:
+                        stopped = self.command()
+                        update.assert_not_called()
+                    self.assertEqual(stopped.accel, 0.0)
+                    self.assertEqual(stopped.brake, 0.65)
+                    self.assertEqual(stopped.front_steer, 0.0)
+                    self.assertEqual(self.node.speed_pid.integral, 0.0)
+                    self.assertIsNone(self.node.speed_pid.prev_error)
 
     def test_repeated_explicit_stop_never_updates_pid_and_clears_old_state(self):
         self.node.speed_pid.integral = -12.0
@@ -162,7 +198,8 @@ class ControlNodeTest(unittest.TestCase):
                 self.node.status_cb(status)
                 command = self.command()
                 self.assertEqual(command.accel, 0.0)
-                self.assertGreaterEqual(command.brake, 0.65)
+                self.assertEqual(command.brake, 0.65)
+                self.assertEqual(command.front_steer, 0.0)
                 self.assertEqual(self.node.speed_pid.integral, 0.0)
                 self.assertIsNone(self.node.speed_pid.prev_error)
             update.assert_not_called()
@@ -205,7 +242,8 @@ class ControlNodeTest(unittest.TestCase):
                 self.node.speed_pid.prev_error = -1.0
                 command = self.command()
                 self.assertEqual(command.accel, 0.0)
-                self.assertGreaterEqual(command.brake, 0.65)
+                self.assertEqual(command.brake, 0.65)
+                self.assertEqual(command.front_steer, 0.0)
                 self.assertEqual(self.node.speed_pid.integral, 0.0)
                 self.assertIsNone(self.node.speed_pid.prev_error)
             update.assert_not_called()
@@ -215,6 +253,7 @@ class ControlNodeTest(unittest.TestCase):
             command = self.command()
             update.assert_called_once()
             self.assertGreater(command.accel, 0.0)
+            self.assertNotEqual(command.front_steer, 0.0)
 
     def test_stale_local_path_safe_stops(self):
         self.node.local_path_stamp_ns = self.now - 600_000_001
@@ -246,6 +285,7 @@ class ControlNodeTest(unittest.TestCase):
     def test_timeout_boundary_and_receive_time_zero_are_valid(self):
         self.now = 0
         self.feed_inputs()
+        self.node.target_speed_cb(Float32(data=1.0))
         self.assertEqual(self.stamps(), (0, 0, 0, 0))
         self.node.last_control_ns = 0
         self.now = 600_000_000
@@ -276,7 +316,9 @@ class ControlNodeTest(unittest.TestCase):
                 self.assert_safe_stop()
 
     def test_target_error_never_affects_steering_or_any_watchdog(self):
+        self.node.target_speed_cb(Float32(data=1.0))
         expected = self.command().front_steer
+        self.assertNotEqual(expected, 0.0)
         for error in (-100.0, 100.0, math.nan):
             with self.subTest(error=error):
                 before = self.stamps()

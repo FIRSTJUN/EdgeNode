@@ -21,11 +21,15 @@ planning_node:
     global_path_topic: /planning/global_path
     local_path_topic: /planning/local_path
     local_path_length_m: 20.0
-    # Inclusive point-index window; progress never retreats and advances by
-    # at most search_forward points per 20 Hz planning cycle after initialization.
+    # Maximum output spacing; keep original corners and dense MGeo points.
+    # Progress refers to original global segments, never to resampled points.
+    local_path_resample_spacing_m: 2.0
+    # Inclusive raw-segment window around previous progress. Arc never retreats;
+    # unpassed intermediate segments cannot be skipped to a nearby future leg.
     local_path_search_back: 3
     local_path_search_forward: 10
     local_path_index_topic: /planning/local_path_index
+    local_path_progress_topic: /planning/local_path_progress_m
     goal_node_id: A119BS010245
     # Empty: use goal_node_id. Nonempty: visit these nodes in order; the last
     # entry is the final goal (goal_node_id is ignored). Set before driving.
@@ -46,7 +50,7 @@ planning_node:
     # Driving is opt-in, bounded by an independent speed cap and session lease.
     enable_drive: false
     max_drive_speed_kmh: 50.0
-    drive_duration_sec: 15.0
+    drive_duration_sec: 60.0
     cruise_speed_kmh: 50.0
     curve_speed_kmh: 25.0
     sharp_curve_speed_kmh: 3.5

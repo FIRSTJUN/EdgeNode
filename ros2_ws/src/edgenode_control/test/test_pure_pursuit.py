@@ -22,18 +22,18 @@ class PurePursuitTest(unittest.TestCase):
         self.assertAlmostEqual(result['curvature'], 0.0)
         self.assertAlmostEqual(result['steering_angle_rad'], 0.0)
         self.assertAlmostEqual(result['steering_normalized'], 0.0)
-        self.assertEqual(self.planner.wheelbase_m, 1.04)
-        self.assertEqual(self.planner.max_wheel_angle_rad, 0.49)
+        self.assertEqual(self.planner.wheelbase_m, 2.84)
+        self.assertEqual(self.planner.max_wheel_angle_rad, 0.610865)
 
     def test_left_curve_has_positive_steering_and_expected_formula(self):
         result = self.compute([[0, 0, 0], [2, 0, 0], [4, 2, 0]])
         dx, dy = 2 + 0.5 / math.sqrt(2), 0.5 / math.sqrt(2)
         curvature = 2 * dy / (dx * dx + dy * dy)
-        angle = math.atan(1.04 * curvature)
+        angle = math.atan(2.84 * curvature)
         self.assertGreater(result['steering_angle_rad'], 0)
         self.assertAlmostEqual(result['curvature'], curvature)
         self.assertAlmostEqual(result['steering_angle_rad'], angle)
-        self.assertAlmostEqual(result['steering_normalized'], angle / 0.49)
+        self.assertAlmostEqual(result['steering_normalized'], angle / 0.610865)
 
     def test_right_curve_has_negative_steering(self):
         left = self.compute([[0, 0, 0], [2, 0, 0], [4, 2, 0]])
@@ -104,7 +104,7 @@ class PurePursuitTest(unittest.TestCase):
         for direction in (-1, 1):
             with self.subTest(direction=direction):
                 result = self.compute([[0, 0, 0], [0.2, direction, 0]])
-                self.assertEqual(result['steering_angle_rad'], direction * 0.49)
+                self.assertEqual(result['steering_angle_rad'], direction * 0.610865)
                 self.assertEqual(result['steering_normalized'], direction)
 
     def test_normalized_steering_stays_in_unit_interval(self):

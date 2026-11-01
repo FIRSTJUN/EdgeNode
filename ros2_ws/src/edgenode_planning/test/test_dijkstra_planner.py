@@ -128,6 +128,65 @@ class DijkstraPlannerTest(unittest.TestCase):
                 ])
                 self.assertIsNone(planner.plan('AB', 'D'))
 
+    def test_lazy_lane_change_chord_does_not_beat_drivable_centerline(self):
+        curve = [[1, 0, 0], [2, 1, 0], [3, 1, 0], [4, 0, 0]]
+        planner = self.planner([
+            make_link('SA', 'S', 'A', 1.0, [[0, 0, 0], [1, 0, 0]]),
+            make_link('curve', 'A', 'D', None, curve, lazy_init=False,
+                      lane_ch_link_path=[]),
+            make_link('shortcut', 'A', 'D', 0.01, [[1, 0, 0], [4, 0, 0]],
+                      lazy_init=True, lane_ch_link_path=['left', 'right']),
+        ])
+        result = planner.plan('SA', 'D')
+        self.assertEqual(result['link_ids'], ['SA', 'curve'])
+        self.assertEqual(result['points'], [[0, 0, 0]] + curve)
+        self.assertAlmostEqual(result['total_cost_m'], 2.0 + 2.0 * math.sqrt(2))
+        self.assertNotIn('shortcut', planner._link_costs)
+        self.assertIn('shortcut', planner.links_by_id)
+
+    def test_explicit_lane_change_markers_each_exclude_the_edge(self):
+        for metadata in ({'lazy_init': True},
+                         {'lane_ch_link_path': ['AB', 'BC']},
+                         {'lazy_init': False, 'lane_ch_link_path': ['AB', 'BC']}):
+            with self.subTest(metadata=metadata):
+                planner = self.planner([
+                    make_link('SA', 'S', 'A'),
+                    make_link('abstract', 'A', 'D', **metadata),
+                ])
+                self.assertIsNone(planner.plan('SA', 'D'))
+                self.assertEqual(planner.graph['A'], [])
+
+    def test_lazy_current_link_is_rejected_instead_of_published_as_geometry(self):
+        planner = self.planner([
+            make_link('lazy_start', 'S', 'A', lazy_init=True),
+            make_link('AB', 'A', 'B'),
+        ])
+        self.assertIsNone(planner.plan('lazy_start', 'B'))
+
+    def test_normal_sparse_link_and_lane_neighbors_remain_drivable(self):
+        planner = self.planner([
+            make_link('SA', 'S', 'A'),
+            make_link('physical-connector', 'A', 'D', None,
+                      [[0, 0, 0], [85, 0, 0]], lazy_init=False, lane_ch_link_path=[],
+                      left_lane_change_dst_link_idx='another_lane', link_type=None,
+                      road_id=None, can_move_left_lane=True),
+        ])
+        result = planner.plan('SA', 'D')
+        self.assertEqual(result['link_ids'], ['SA', 'physical-connector'])
+        self.assertEqual(planner._link_costs['physical-connector'], 85.0)
+
+    def test_missing_lazy_flag_does_not_reject_ordinary_geometry(self):
+        planner = self.planner([make_link('SA', 'S', 'A'), make_link('AD', 'A', 'D')])
+        self.assertEqual(planner.plan('SA', 'D')['link_ids'], ['SA', 'AD'])
+
+    def test_many_points_do_not_make_an_abstract_lane_change_drivable(self):
+        planner = self.planner([
+            make_link('SA', 'S', 'A'),
+            make_link('lazy_dense', 'A', 'D', points=[[x, 0, 0] for x in range(10)],
+                      lazy_init=True),
+        ])
+        self.assertIsNone(planner.plan('SA', 'D'))
+
     def test_invalid_length_falls_back_to_xy_polyline_for_all_route_links(self):
         for length in (None, math.nan, math.inf, -math.inf, 0, -1, 'bad', True):
             with self.subTest(length=length):

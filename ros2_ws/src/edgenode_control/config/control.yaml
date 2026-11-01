@@ -13,11 +13,12 @@ control_node:
     local_path_timeout_sec: 0.6
     localization_timeout_sec: 0.6
 
-    wheelbase_m: 1.04
-    max_wheel_angle_rad: 0.49
+    # 2020 Hyundai Sonata geometry; maximum wheel angle is approximately 35 deg.
+    wheelbase_m: 2.84
+    max_wheel_angle_rad: 0.610865
     lookahead_distance_m: 2.5
 
-    # Pure Pursuit is LEFT-positive; MORAI ERP42 commands are RIGHT-positive.
+    # Pure Pursuit is LEFT-positive; MORAI commands are RIGHT-positive.
     steering_sign: -1.0
     max_front_steer_normalized: 0.70
 

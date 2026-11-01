@@ -21,13 +21,13 @@ def _finite_number(value):
 
 
 class PurePursuit:
-    """Stateless steering calculation using ERP42 initial dimensions.
+    """Stateless steering calculation defaulting to 2020 Hyundai Sonata geometry.
 
     Invalid dimensions are handled by ``compute`` returning None, so neither
     malformed configuration nor path/pose data raises a validation exception.
     """
 
-    def __init__(self, wheelbase_m=1.04, max_wheel_angle_rad=0.49):
+    def __init__(self, wheelbase_m=2.84, max_wheel_angle_rad=0.610865):
         self.wheelbase_m = wheelbase_m
         self.max_wheel_angle_rad = max_wheel_angle_rad
 

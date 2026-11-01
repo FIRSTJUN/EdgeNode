@@ -6,7 +6,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import PoseArray, PoseStamped
 from nav_msgs.msg import Odometry, Path
 from rcl_interfaces.msg import ParameterDescriptor
-from std_msgs.msg import Float32, Int32, String
+from std_msgs.msg import Float32, Float64, Int32, String
 
 from edgenode_planning.dijkstra_planner import DijkstraPlanner
 from edgenode_planning.local_path_planner import LocalPathPlanner
@@ -36,7 +36,7 @@ class PlanningNode(Node):
       - Perception is intentionally disconnected.
       - Localization odometry is the only pose input.
       - Global routes are fixed until the active waypoint list or goal changes.
-      - Local paths use a bounded, forward-only global progress index.
+      - Local paths start at a bounded, forward-only global-segment projection.
       - Local geometry supplies speed recommendations for preview diagnostics.
       - Driving requires explicit enablement, valid geometry and a finite lease.
       - Default target speed remains 0 km/h with enable_drive=false.
@@ -96,9 +96,11 @@ class PlanningNode(Node):
                 ('global_path_topic', '/planning/global_path'),
                 ('local_path_topic', '/planning/local_path'),
                 ('local_path_length_m', 20.0),
+                ('local_path_resample_spacing_m', 2.0),
                 ('local_path_search_back', 3),
                 ('local_path_search_forward', 10),
                 ('local_path_index_topic', '/planning/local_path_index'),
+                ('local_path_progress_topic', '/planning/local_path_progress_m'),
                 ('enable_drive', False),
                 ('max_drive_speed_kmh', 1.0),
                 ('drive_duration_sec', 15.0),
@@ -165,6 +167,7 @@ class PlanningNode(Node):
         self._route_key = None
         self._route_result = None
         self._progress_index = None
+        self._progress_arc_m = None
         self.latest_pose = None
         self._drive_was_enabled = False
         self._drive_session_start_ns = None
@@ -228,6 +231,11 @@ class PlanningNode(Node):
         self.local_path_index_pub = self.create_publisher(
             Int32,
             self.get_parameter('local_path_index_topic').value,
+            10,
+        )
+        self.local_path_progress_pub = self.create_publisher(
+            Float64,
+            self.get_parameter('local_path_progress_topic').value,
             10,
         )
         self.recommended_speed_pub = self.create_publisher(
@@ -362,6 +370,7 @@ class PlanningNode(Node):
             self._route_key = None
             self._route_result = None
             self._progress_index = None
+            self._progress_arc_m = None
             self._previous_speed_mode = None
 
         now_ns = self.get_clock().now().nanoseconds
@@ -408,6 +417,7 @@ class PlanningNode(Node):
                         )
                     self._route_key = route_key
                     self._progress_index = None
+                    self._progress_arc_m = None
 
                 if self._route_result is None:
                     state_value = 'GLOBAL_PATH_NOT_FOUND'
@@ -433,9 +443,12 @@ class PlanningNode(Node):
                         previous_index=self._progress_index,
                         search_back=self.get_parameter('local_path_search_back').value,
                         search_forward=self.get_parameter('local_path_search_forward').value,
+                        resample_spacing_m=self.get_parameter('local_path_resample_spacing_m').value,
+                        previous_arc_m=self._progress_arc_m,
                     )
                     if local_result is not None:
                         self._progress_index = local_result['nearest_index']
+                        self._progress_arc_m = local_result['progress_arc_m']
                         active_local_points = local_result['points']
 
                         lattice_result = self.lattice_planner.plan(
@@ -557,6 +570,9 @@ class PlanningNode(Node):
         self.state_pub.publish(state)
         self.local_path_index_pub.publish(Int32(
             data=self._progress_index if local_result is not None else -1,
+        ))
+        self.local_path_progress_pub.publish(Float64(
+            data=self._progress_arc_m if local_result is not None else float('nan'),
         ))
         self.fsm_state_pub.publish(String(data=fsm_state_value))
         self.current_link_pub.publish(String(data=current_link))

@@ -11,7 +11,7 @@ from unittest.mock import Mock, call, patch
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry, Path
 from rclpy.time import Time
-from std_msgs.msg import Float32, String
+from std_msgs.msg import Float32, Float64, String
 
 from edgenode_planning.dijkstra_planner import DijkstraPlanner
 from edgenode_planning.local_path_planner import LocalPathPlanner
@@ -29,6 +29,7 @@ class PlanningNodeTest(unittest.TestCase):
             'route_node_ids': [],
             'global_path_frame_id': 'map',
             'local_path_length_m': 20.0,
+            'local_path_resample_spacing_m': 2.0,
             'local_path_search_back': 3,
             'local_path_search_forward': 10,
             'cruise_speed_kmh': 1.0,
@@ -47,6 +48,7 @@ class PlanningNodeTest(unittest.TestCase):
             _route_key=None,
             _route_result=None,
             _progress_index=None,
+            _progress_arc_m=None,
             _previous_speed_mode=None,
             fsm=PlanningFSM(),
             lattice_planner=Mock(wraps=LatticePlanner()),
@@ -72,7 +74,7 @@ class PlanningNodeTest(unittest.TestCase):
             'global_path', 'local_path',
             'recommended_speed', 'speed_mode', 'speed_curvature', 'speed_max_curvature',
             'drive_status', 'fsm_state', 'lattice_status', 'lattice_offset',
-            'lattice_clearance', 'local_path_index',
+            'lattice_clearance', 'local_path_index', 'local_path_progress',
         ):
             setattr(self.node, name + '_pub', Mock())
 
@@ -268,6 +270,24 @@ class PlanningNodeTest(unittest.TestCase):
         self.node.global_path_pub.publish.assert_not_called()
         self.node.local_path_pub.publish.assert_not_called()
 
+    def assert_local_subdivision(self, vertices, length, frame_id='map', stamp=None):
+        path = self.node.local_path_pub.publish.call_args.args[0]
+        self.assertEqual(path.header.frame_id, frame_id)
+        self.assertEqual(path.header.stamp, stamp or self.stamp)
+        points = [[p.pose.position.x, p.pose.position.y, p.pose.position.z]
+                  for p in path.poses]
+        for actual, expected in zip(points[0], vertices[0]):
+            self.assertAlmostEqual(actual, expected)
+        for actual, expected in zip(points[-1], vertices[-1]):
+            self.assertAlmostEqual(actual, expected)
+        for vertex in vertices[1:-1]:
+            self.assertIn(vertex, points)
+        distances = [math.dist(a[:2], b[:2]) for a, b in zip(points, points[1:])]
+        self.assertTrue(all(0 < distance <= 2.0 + 1e-9 for distance in distances))
+        self.assertAlmostEqual(sum(distances), length)
+        for pose in path.poses:
+            self.assertEqual(pose.header, path.header)
+
     def test_pose_changes_refresh_local_path_without_replanning_global_route(self):
         points = [[x, 0, x / 10.0] for x in range(0, 61, 5)]
         self.node.dijkstra_planner.plan.return_value = {'points': points}
@@ -275,14 +295,15 @@ class PlanningNodeTest(unittest.TestCase):
             self.node.latest_pose = (x, 0.0, 0.0)
             PlanningNode.plan(self.node)
             self.assert_path(points)
-            self.assert_path(expected, topic='local_path')
+            self.assert_local_subdivision(expected, expected[-1][0] - expected[0][0])
             self.assertEqual(self.output('state'), 'GLOBAL_PATH_READY')
             self.assert_stopped()
         self.node.dijkstra_planner.plan.assert_called_once_with('link_42', 'goal_default')
         self.assertEqual(self.node.local_path_planner.extract.call_args_list, [
             call(points, x, 0.0, horizon_m=20.0, previous_index=previous,
-                 search_back=3, search_forward=10)
-            for x, previous in ((10.0, None), (20.0, 2), (50.0, 4))
+                 search_back=3, search_forward=10, resample_spacing_m=2.0,
+                 previous_arc_m=arc)
+            for x, previous, arc in ((10.0, None, None), (20.0, 2, 10.0), (50.0, 4, 20.0))
         ])
         self.assertEqual(self.node.local_path_pub.publish.call_count, 3)
 
@@ -291,10 +312,10 @@ class PlanningNodeTest(unittest.TestCase):
         self.node.dijkstra_planner.plan.return_value = {'points': points}
         self.node.latest_pose = (10.0, 0.0, 0.0)
         PlanningNode.plan(self.node)
-        self.assert_path(points[2:7], topic='local_path')
+        self.assert_local_subdivision(points[2:7], 20.0)
         self.parameters['local_path_length_m'] = 8.0
         PlanningNode.plan(self.node)
-        self.assert_path(points[2:5], topic='local_path')
+        self.assert_local_subdivision([points[2], points[3], [18, 0, 1]], 8.0)
         self.node.dijkstra_planner.plan.assert_called_once()
         self.assert_stopped()
 
@@ -353,13 +374,80 @@ class PlanningNodeTest(unittest.TestCase):
         self.node.dijkstra_planner.plan.assert_called_once()
 
     def test_too_short_local_path_produces_invalid_speed_preview(self):
-        self.set_speed_route([[0, 0, 1], [5, 0, 2]])
+        self.set_speed_route([[0, 0, 1], [0.1, 0, 2]])
         PlanningNode.plan(self.node)
         self.assert_invalid_speed_preview()
         self.assertEqual(self.output('state'), 'GLOBAL_PATH_READY')
         self.node.global_path_pub.publish.assert_called_once()
         self.node.local_path_pub.publish.assert_called_once()
         self.node.speed_planner.plan.assert_called_once()
+
+    def test_two_original_points_with_sufficient_length_have_valid_speed_preview(self):
+        self.set_speed_route([[0, 0, 1], [5, 0, 2]])
+        PlanningNode.plan(self.node)
+        self.assert_speed_preview(1.0, 'CRUISE', 0.0)
+        self.assert_local_subdivision([[0, 0, 1], [5, 0, 2]], 5.0)
+
+    def test_sparse_segment_at_global_index_527_keeps_driving_ready(self):
+        points = [[i * 0.5, 0, 0] for i in range(528)] + [[300, 0, 0], [350, 0, 0]]
+        self.set_speed_route(points)
+        self.node.latest_pose = (263.5, 0, 0)
+        self.node.speed_planner = Mock(wraps=SpeedPlanner(cruise_speed_kmh=50.0))
+        self.parameters.update(enable_drive=True, max_drive_speed_kmh=50.0)
+        PlanningNode.plan(self.node)
+        self.assertEqual(self.output('state'), 'GLOBAL_PATH_READY')
+        self.assertEqual(self.output('fsm_state'), PlanningFSM.NORMAL_DRIVE)
+        self.assertEqual(self.output('local_path_index'), 527)
+        self.assertEqual(self.node._progress_index, 527)
+        self.assert_drive('ACTIVE', 50.0)
+        self.assertEqual(self.output('recommended_speed'), 50.0)
+        self.assertEqual(self.output('speed_mode'), 'CRUISE')
+        self.assertAlmostEqual(self.output('speed_curvature'), 0.0)
+        self.assert_path(points)
+        self.assert_local_subdivision([[263.5, 0, 0], [283.5, 0, 0]], 20.0)
+        self.assertEqual(len(self.node.local_path_pub.publish.call_args.args[0].poses), 11)
+
+    def test_invalid_resample_spacing_suppresses_local_path_and_stops(self):
+        self.set_speed_route([[0, 0, 0], [30, 0, 0]])
+        self.parameters['local_path_resample_spacing_m'] = 0.0
+        PlanningNode.plan(self.node)
+        self.node.global_path_pub.publish.assert_called_once()
+        self.node.local_path_pub.publish.assert_not_called()
+        self.assert_invalid_speed_preview()
+        self.assert_stopped()
+
+    def test_resample_spacing_change_applies_without_global_replanning(self):
+        self.set_speed_route([[0, 0, 0], [30, 0, 0]])
+        PlanningNode.plan(self.node)
+        self.assertEqual(len(self.node.local_path_pub.publish.call_args.args[0].poses), 11)
+        self.parameters['local_path_resample_spacing_m'] = 0.5
+        PlanningNode.plan(self.node)
+        self.assertEqual(len(self.node.local_path_pub.publish.call_args.args[0].poses), 41)
+        self.assertEqual(self.output('local_path_index'), 0)
+        self.node.dijkstra_planner.plan.assert_called_once()
+
+    def test_arc_progress_moves_inside_sparse_segment_without_index_change(self):
+        points = [[0, 0, 0], [85, 0, 0], [120, 0, 0]]
+        self.set_speed_route(points)
+        for x in (5.0, 25.0, 30.0):
+            self.node.latest_pose = (x, 0.0, 0.0)
+            PlanningNode.plan(self.node)
+            self.assertEqual(self.output('local_path_index'), 0)
+            self.assertAlmostEqual(self.node._progress_arc_m, x)
+            self.assertAlmostEqual(self.output('local_path_progress'), x)
+            self.assertIsInstance(self.node.local_path_progress_pub.publish.call_args.args[0], Float64)
+            self.assert_local_subdivision([[x, 0, 0], [x + 20, 0, 0]], 20.0)
+            self.assertEqual(self.output('speed_mode'), 'CRUISE')
+        self.node.dijkstra_planner.plan.assert_called_once()
+
+    def test_arc_progress_does_not_retreat_inside_sparse_segment_on_next_cycle(self):
+        self.set_speed_route([[0, 0, 0], [85, 0, 0]])
+        for x in (25.0, 24.8):
+            self.node.latest_pose = (x, 0.0, 0.0)
+            PlanningNode.plan(self.node)
+            self.assertAlmostEqual(self.node._progress_arc_m, 25.0)
+            self.assert_local_subdivision([[25, 0, 0], [45, 0, 0]], 20.0)
+        self.assertEqual(self.node.local_path_planner.extract.call_args.kwargs['previous_arc_m'], 25.0)
 
     def test_preview_refreshes_each_pose_cycle_using_cached_global_route(self):
         points = [[x, 0, 0] for x in range(31)]
@@ -415,7 +503,7 @@ class PlanningNodeTest(unittest.TestCase):
         local_points = points[5:10]
         self.set_speed_route(points)
         self.node.local_path_planner.extract.return_value = {
-            'points': local_points, 'nearest_index': 5,
+            'points': local_points, 'nearest_index': 5, 'progress_arc_m': 5.0,
         }
         self.node.lattice_planner.plan.return_value = None
         PlanningNode.plan(self.node)
@@ -760,8 +848,9 @@ class PlanningNodeTest(unittest.TestCase):
         self.node.get_clock.return_value.now.return_value.to_msg.return_value = next_stamp
         PlanningNode.plan(self.node)
         self.assert_path(self.route['points'], frame_id='mgeo_map', stamp=next_stamp)
-        self.assert_path(self.route['points'][1:], frame_id='mgeo_map',
-                         stamp=next_stamp, topic='local_path')
+        self.assert_local_subdivision([[4, 5, 6], self.route['points'][2]],
+                                      math.hypot(2, 2),
+                                      frame_id='mgeo_map', stamp=next_stamp)
         self.assertEqual(previous_path.header.frame_id, 'map')
         self.assertEqual(previous_path.header.stamp, self.stamp)
         self.node.dijkstra_planner.plan.assert_called_once()
@@ -796,7 +885,7 @@ class PlanningNodeTest(unittest.TestCase):
             PlanningNode.plan(self.node)
             self.assertEqual(self.output('current_link'), 'BC')
             self.assert_path([[0, 0, 1], [10, 0, 2], [20, 0, 3]])
-            self.assert_path([[10, 0, 2], [20, 0, 3]], topic='local_path')
+            self.assert_local_subdivision([[15, 0, 2.5], [20, 0, 3]], 5.0)
             self.assertEqual(self.node.dijkstra_planner.plan.call_args_list, [
                 call('AB', 'C'),
             ])
@@ -863,16 +952,19 @@ class PlanningNodeTest(unittest.TestCase):
                     publisher.assert_any_call(Float32, '/custom/speed_curvature', 10)
                     publisher.assert_any_call(Float32, '/custom/speed_max_curvature', 10)
                     publisher.assert_any_call(String, '/custom/drive_status', 10)
+                    publisher.assert_any_call(Float64, '/planning/local_path_progress_m', 10)
                     timer.assert_called_once_with(0.05, node.plan)
                     self.assertEqual(declared['goal_node_id'], 'A119BS010245')
                     self.assertEqual(declared['route_node_ids'], [])
                     self.assertEqual(declared['local_path_search_back'], 3)
                     self.assertEqual(declared['local_path_search_forward'], 10)
                     self.assertIsNone(node._progress_index)
+                    self.assertIsNone(node._progress_arc_m)
                     self.assertEqual(declared['global_path_topic'], '/planning/global_path')
                     self.assertEqual(declared['global_path_frame_id'], 'map')
                     self.assertEqual(declared['local_path_topic'], '/planning/local_path')
                     self.assertEqual(declared['local_path_length_m'], 20.0)
+                    self.assertEqual(declared['local_path_resample_spacing_m'], 2.0)
                     self.assertIsInstance(node.local_path_planner, LocalPathPlanner)
                     self.assertIsInstance(node.speed_planner, SpeedPlanner)
                     self.assertFalse(declared['enable_drive'])
@@ -953,6 +1045,8 @@ class PlanningNodeTest(unittest.TestCase):
         self.assertEqual(self.output('local_path_index'), 5)
         self.assertEqual(self.node._route_result['goal_node_id'], 'C')
         self.assertIsNone(self.node.local_path_planner.extract.call_args.kwargs['previous_index'])
+        self.assertIsNone(self.node.local_path_planner.extract.call_args.kwargs['previous_arc_m'])
+        self.assertAlmostEqual(self.node._progress_arc_m, 5.0)
         PlanningNode.plan(self.node)
         self.assertEqual(self.node.dijkstra_planner.plan_route.call_count, 2)
 
@@ -966,6 +1060,8 @@ class PlanningNodeTest(unittest.TestCase):
         self.node.latest_pose = (12.0, 0.0, 0.0)
         PlanningNode.plan(self.node)
         self.assertEqual(self.node._progress_index, 12)
+        self.assertAlmostEqual(self.node._progress_arc_m, 12.0)
+        self.assertIsNone(self.node.local_path_planner.extract.call_args.kwargs['previous_arc_m'])
 
     def test_progress_survives_match_loss_and_noise_without_full_reacquisition(self):
         self.set_speed_route([[x, 0, 0] for x in range(100)])
@@ -976,6 +1072,8 @@ class PlanningNodeTest(unittest.TestCase):
         PlanningNode.plan(self.node)
         self.assertEqual(self.node._progress_index, 20)
         self.assertEqual(self.output('local_path_index'), -1)
+        self.assertAlmostEqual(self.node._progress_arc_m, 20.0)
+        self.assertTrue(math.isnan(self.output('local_path_progress')))
         self.node.map_matcher.match.return_value = match
         self.node.latest_pose = (19.2, 0.0, 0.0)
         PlanningNode.plan(self.node)
@@ -994,6 +1092,7 @@ class PlanningNodeTest(unittest.TestCase):
         PlanningNode.plan(self.node)
         self.assertIsNone(self.node._route_result)
         self.assertIsNone(self.node._progress_index)
+        self.assertIsNone(self.node._progress_arc_m)
         self.node.map_matcher.match.return_value = match
         PlanningNode.plan(self.node)
         self.assertEqual(self.node.dijkstra_planner.plan_route.call_count, 2)
@@ -1056,7 +1155,9 @@ class PlanningNodeTest(unittest.TestCase):
                    radius * (1.0 - math.cos(curvature * i * 0.5)), 0]
                   for i in range(26)]
         self.node.latest_pose = (0.0, 0.0, 0.0)
-        self.node.local_path_planner.extract.return_value = {'points': points, 'nearest_index': 0}
+        self.node.local_path_planner.extract.return_value = {
+            'points': points, 'nearest_index': 0, 'progress_arc_m': 0.0,
+        }
         self.node.lattice_planner.plan.return_value = None
 
     def test_speed_mode_hysteresis_is_carried_between_planning_cycles(self):
@@ -1105,7 +1206,9 @@ class PlanningNodeTest(unittest.TestCase):
     def test_invalid_speed_geometry_resets_hysteresis_before_recovery(self):
         self.set_local_curvature(0.041)
         PlanningNode.plan(self.node)
-        self.node.local_path_planner.extract.return_value = {'points': [[0, 0, 0]], 'nearest_index': 0}
+        self.node.local_path_planner.extract.return_value = {
+            'points': [[0, 0, 0]], 'nearest_index': 0, 'progress_arc_m': 0.0,
+        }
         PlanningNode.plan(self.node)
         self.assertIsNone(self.node._previous_speed_mode)
         self.assert_invalid_speed_preview()

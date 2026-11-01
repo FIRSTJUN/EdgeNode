@@ -62,9 +62,12 @@ class DijkstraPlanner:
     """Load MGeo once and plan using only actual from-node/to-node edges.
 
     ``graph[node_id]`` holds outgoing edges with ``to_node_idx``, ``link_id``
-    and ``cost_m``. Lane-change metadata never contributes edges. Invalid
-    links are excluded; unreadable or malformed map files leave an empty
-    planner whose ``plan`` method returns None.
+    and ``cost_m``. Lazy lane-change links are abstract connections whose
+    points need not describe a drivable trajectory; exclude links marked
+    by ``lazy_init`` or a nonempty ``lane_ch_link_path``. Neighbor metadata
+    on ordinary links never creates edges. Invalid links are also excluded;
+    unreadable or malformed map files leave an empty planner whose ``plan``
+    method returns None.
 
     The search starts at the current link's to-node. Returned link IDs,
     node IDs, XYZ points and cost cover the entire current link as well as
@@ -93,6 +96,8 @@ class DijkstraPlanner:
         self.graph = {node_id: [] for node_id in self.nodes_by_id}
 
         for link_id, link in self.links_by_id.items():
+            if link.get('lazy_init') is True or link.get('lane_ch_link_path'):
+                continue
             from_node = link.get('from_node_idx')
             to_node = link.get('to_node_idx')
             if not isinstance(from_node, str) or not isinstance(to_node, str):
