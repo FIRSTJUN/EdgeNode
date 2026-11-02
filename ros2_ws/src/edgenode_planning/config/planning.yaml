@@ -63,3 +63,13 @@ planning_node:
     # Release margin in 1/m; entry thresholds above are unchanged.
     # Default release thresholds: CURVE 0.035, SHARP_CURVE 0.095.
     speed_curvature_hysteresis: 0.005
+
+    # S4 MORAI test baseline; 0.95 m is a provisional half-width, not a spec.
+    ego_half_width_m: 0.95
+    obstacle_safety_margin_m: 0.25
+    # Compatibility floor: required=max(this, half_width+safety_margin)=1.20 m.
+    lattice_clearance_m: 0.55
+    lattice_candidate_offsets_m: [0.0, 0.6, -0.6, 0.8, -0.8, 1.2, -1.2, 1.5, -1.5, 1.8, -1.8, 2.1, -2.1, 2.4, -2.4]
+    # Return length: offline 2.4m-offset peak curvature 0.343 -> 0.132 1/m.
+    # 10m stays below the existing 0.70-steer geometric limit on straight baseline.
+    lattice_transition_after_m: 10.0

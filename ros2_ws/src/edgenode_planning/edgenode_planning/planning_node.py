@@ -25,7 +25,7 @@ def _finite_number(value):
 
 
 from .planning_fsm import PlanningFSM
-from .lattice_planner import LatticePlanner
+from .lattice_planner import DEFAULT_CANDIDATE_OFFSETS_M, LatticePlanner
 
 
 class PlanningNode(Node):
@@ -33,7 +33,7 @@ class PlanningNode(Node):
     Match localization and publish global and local paths at 20 Hz.
 
     Current stage:
-      - Perception is intentionally disconnected.
+      - Perception supplies world-frame obstacle footprint samples.
       - Localization odometry is the only pose input.
       - Global routes are fixed until the active waypoint list or goal changes.
       - Local paths start at a bounded, forward-only global-segment projection.
@@ -109,7 +109,12 @@ class PlanningNode(Node):
                 ('lattice_status_topic', '/planning/lattice_status'),
                 ('lattice_offset_topic', '/planning/lattice_offset'),
                 ('lattice_clearance_topic', '/planning/lattice_clearance'),
+                # Legacy clearance is a floor, never smaller than width+margin.
                 ('lattice_clearance_m', 0.55),
+                ('ego_half_width_m', 0.95),
+                ('obstacle_safety_margin_m', 0.25),
+                ('lattice_candidate_offsets_m', list(DEFAULT_CANDIDATE_OFFSETS_M)),
+                ('lattice_transition_after_m', 10.0),
                 ('fsm_state_topic', '/planning/fsm_state'),
                 ('curve_speed_kmh', 0.7),
                 ('sharp_curve_speed_kmh', 0.5),
@@ -177,6 +182,10 @@ class PlanningNode(Node):
         self.fsm = PlanningFSM()
         self.lattice_planner = LatticePlanner(
             obstacle_clearance_m=self.get_parameter('lattice_clearance_m').value,
+            ego_half_width_m=self.get_parameter('ego_half_width_m').value,
+            obstacle_safety_margin_m=self.get_parameter('obstacle_safety_margin_m').value,
+            candidate_offsets_m=self.get_parameter('lattice_candidate_offsets_m').value,
+            transition_after_m=self.get_parameter('lattice_transition_after_m').value,
         )
         self.latest_obstacles = []
 

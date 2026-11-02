@@ -1,0 +1,29 @@
+lidar_obstacle_node:
+  ros__parameters:
+    lidar_topic: /lidar/points
+    localization_topic: /localization/odometry
+    obstacles_topic: /planning/obstacles
+    obstacle_count_topic: /perception/lidar_obstacle_count
+    nearest_distance_topic: /perception/nearest_obstacle_distance
+    cluster_centers_topic: /perception/lidar_obstacle_centers
+    localization_timeout_sec: 0.6
+
+    # Initial MORAI Sonata baseline, not final S4 tuning.
+    # XYZ is sensor-local even though the incoming frame_id is /map.
+    roi_min_x: 1.0
+    roi_max_x: 20.0
+    roi_min_y: -4.0
+    roi_max_y: 4.0
+    ground_z_threshold: -1.0
+    near_origin_radius_m: 0.3
+    # NPC-free Ego returns: x=0.301..1.934, abs(y)<=0.690 m.
+    # Keep the self mask within that measured body region plus a small margin.
+    self_mask_max_x: 2.0
+    self_mask_half_width_y: 0.8
+    cluster_distance_m: 0.8
+    min_cluster_points: 5
+
+    # Sensor translation relative to the vehicle reference point.
+    # Mount z=1.11 m does not enter the planar world-center output (z=0).
+    lidar_offset_x_m: 1.19
+    lidar_offset_y_m: 0.0

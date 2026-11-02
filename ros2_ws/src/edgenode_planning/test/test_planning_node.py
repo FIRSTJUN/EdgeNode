@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, call, patch
 
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import Pose, PoseArray, PoseStamped
 from nav_msgs.msg import Odometry, Path
 from rclpy.time import Time
 from std_msgs.msg import Float32, Float64, String
@@ -137,6 +137,29 @@ class PlanningNodeTest(unittest.TestCase):
             self.assertEqual([p.x, p.y, p.z], point)
             q = pose.pose.orientation
             self.assertEqual([q.x, q.y, q.z, q.w], [0.0, 0.0, 0.0, 1.0])
+
+    def test_footprint_pose_array_reaches_lattice_without_changing_fsm_motion_gate(self):
+        self.set_speed_route([[float(x), 0.0, 0.0] for x in range(31)])
+        msg = PoseArray()
+        msg.header.frame_id = 'map'
+        for x, y in ((14.98, -0.597), (15.5555, -0.597), (16.131, -0.597),
+                     (16.131, 0.2515), (16.131, 1.1), (15.5555, 1.1),
+                     (14.98, 1.1), (14.98, 0.2515)):
+            pose = Pose()
+            pose.position.x, pose.position.y = x, y
+            msg.poses.append(pose)
+        PlanningNode.obstacle_callback(self.node, msg)
+        self.assertEqual(len(self.node.latest_obstacles), 8)
+        PlanningNode.plan(self.node)
+        self.assertEqual(self.output('lattice_status'), 'AVOIDING')
+        self.assertLessEqual(self.output('lattice_offset'), -1.8)
+        self.assertGreaterEqual(self.output('lattice_clearance'), 1.2)
+        self.assertEqual(self.output('fsm_state'), 'READY')
+        self.assert_stopped()
+        self.parameters['enable_drive'] = True
+        PlanningNode.plan(self.node)
+        self.assertEqual(self.output('fsm_state'), 'OBSTACLE_AVOID')
+        self.assertGreater(self.output('target_speed'), 0.0)
 
     def test_wait_for_localization(self):
         PlanningNode.plan(self.node)
@@ -915,6 +938,11 @@ class PlanningNodeTest(unittest.TestCase):
             'speed_curvature_topic': '/custom/speed_curvature',
             'speed_max_curvature_topic': '/custom/speed_max_curvature',
             'drive_status_topic': '/custom/drive_status',
+            'ego_half_width_m': 1.0,
+            'obstacle_safety_margin_m': 0.3,
+            'lattice_clearance_m': 1.1,
+            'lattice_candidate_offsets_m': [0.0, 1.5, -1.5, 2.4, -2.4],
+            'lattice_transition_after_m': 8.0,
         }
         declared = {}
 
@@ -965,6 +993,13 @@ class PlanningNodeTest(unittest.TestCase):
                     self.assertEqual(declared['local_path_topic'], '/planning/local_path')
                     self.assertEqual(declared['local_path_length_m'], 20.0)
                     self.assertEqual(declared['local_path_resample_spacing_m'], 2.0)
+                    self.assertEqual(declared['ego_half_width_m'], 0.95)
+                    self.assertEqual(declared['obstacle_safety_margin_m'], 0.25)
+                    self.assertEqual(declared['lattice_transition_after_m'], 10.0)
+                    self.assertEqual(node.lattice_planner.required_clearance_m, 1.3)
+                    self.assertEqual(node.lattice_planner.transition_after_m, 8.0)
+                    self.assertEqual(node.lattice_planner.candidate_offsets_m,
+                                     (0.0, 1.5, -1.5, 2.4, -2.4))
                     self.assertIsInstance(node.local_path_planner, LocalPathPlanner)
                     self.assertIsInstance(node.speed_planner, SpeedPlanner)
                     self.assertFalse(declared['enable_drive'])

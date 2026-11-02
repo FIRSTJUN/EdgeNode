@@ -26,6 +26,10 @@ setup(
             os.path.join('share', package_name, 'config'),
             glob('config/*.yaml'),
         ),
+        (
+            os.path.join('share', package_name, 'launch'),
+            glob('launch/*.launch.py'),
+        ),
     ],
 
     install_requires=[
@@ -38,7 +42,7 @@ setup(
     maintainer_email='poj285895@gmail.com',
 
     description=(
-        'Minimal ROS2 camera perception development package for EdgeNode.'
+        'ROS2 camera development and local LiDAR obstacle detection for EdgeNode.'
     ),
 
     license='MIT',
@@ -47,6 +51,8 @@ setup(
         'console_scripts': [
             'perception_node = '
             'edgenode_perception.perception_node:main',
+            'lidar_obstacle_node = '
+            'edgenode_perception.lidar_obstacle_node:main',
         ],
     },
 )

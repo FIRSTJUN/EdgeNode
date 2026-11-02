@@ -1,6 +1,12 @@
 import math
 
 
+DEFAULT_CANDIDATE_OFFSETS_M = (
+    0.0, 0.6, -0.6, 0.8, -0.8, 1.2, -1.2, 1.5, -1.5,
+    1.8, -1.8, 2.1, -2.1, 2.4, -2.4,
+)
+
+
 def _smoothstep5(t):
     """Quintic smoothstep from 0 to 1."""
     t = max(0.0, min(1.0, float(t)))
@@ -11,38 +17,58 @@ class LatticePlanner:
     """Generate smooth lateral avoidance paths around a reference path.
 
     Positive offset = left side of reference path.
-    Negative offset = right side.
+    Negative offset = right side. Clearance inflates observed obstacle samples
+    by ego half-width plus a margin; it is not a full oriented-body sweep or
+    a check of drivable lane boundaries. Width defaults are MORAI test values.
     """
 
     def __init__(
         self,
         candidate_offsets_m=None,
-        obstacle_clearance_m=0.55,
+        obstacle_clearance_m=None,
         obstacle_influence_m=2.5,
         transition_before_m=5.0,
-        transition_after_m=6.0,
+        transition_after_m=10.0,
         hold_half_length_m=1.0,
         recovery_threshold_m=0.15,
+        *,
+        ego_half_width_m=0.95,
+        obstacle_safety_margin_m=0.25,
     ):
         if candidate_offsets_m is None:
-            candidate_offsets_m = (
-                0.0,
-                0.6,
-                -0.6,
-                0.8,
-                -0.8,
-            )
-
-        self.candidate_offsets_m = tuple(
-            float(x) for x in candidate_offsets_m
-        )
-
-        self.obstacle_clearance_m = float(obstacle_clearance_m)
+            candidate_offsets_m = DEFAULT_CANDIDATE_OFFSETS_M
+        self.candidate_offsets_m = tuple(float(x) for x in candidate_offsets_m)
+        if not self.candidate_offsets_m or not all(
+                math.isfinite(x) for x in self.candidate_offsets_m):
+            raise ValueError('candidate_offsets_m must contain finite offsets')
+        self.ego_half_width_m = float(ego_half_width_m)
+        self.obstacle_safety_margin_m = float(obstacle_safety_margin_m)
+        for name in ('ego_half_width_m', 'obstacle_safety_margin_m'):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(f'{name} must be finite and nonnegative')
+        legacy_floor = 0.0 if obstacle_clearance_m is None else float(obstacle_clearance_m)
+        if not math.isfinite(legacy_floor) or legacy_floor < 0.0:
+            raise ValueError('obstacle_clearance_m must be finite and nonnegative')
+        # Keep old callers/configs as a minimum floor; they cannot silently
+        # reduce the ego half-width plus margin used for footprint points.
+        self.required_clearance_m = max(
+            legacy_floor, self.ego_half_width_m + self.obstacle_safety_margin_m)
+        if self.required_clearance_m <= 0.0:
+            raise ValueError('required clearance must be positive')
+        self.obstacle_clearance_m = self.required_clearance_m
         self.obstacle_influence_m = float(obstacle_influence_m)
         self.transition_before_m = float(transition_before_m)
         self.transition_after_m = float(transition_after_m)
         self.hold_half_length_m = float(hold_half_length_m)
         self.recovery_threshold_m = float(recovery_threshold_m)
+        for name in ('obstacle_influence_m', 'transition_before_m', 'transition_after_m',
+                     'hold_half_length_m', 'recovery_threshold_m'):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value < 0.0 or (
+                    name != 'recovery_threshold_m' and value == 0.0):
+                raise ValueError(f'{name} must be finite and positive (recovery may be zero)')
+        self.obstacle_influence_m = max(self.obstacle_influence_m, self.required_clearance_m)
 
         # RECOVERING은 실제 장애물 회피 이후에만 허용한다.
         # 시작 위치가 기준 경로에서 약간 벗어나 있다는 이유만으로
@@ -339,28 +365,27 @@ class LatticePlanner:
         candidate,
         obstacles,
     ):
+        """Distance to the complete candidate polyline, including between samples.
+
+        Anonymous PoseArray points may be legacy centers or footprint samples;
+        neither their grouping nor rectangle interiors can be inferred here.
+        """
         if not obstacles:
             return float('inf')
-
         minimum = float('inf')
-
-        for point in candidate:
-            px = float(point[0])
-            py = float(point[1])
-
-            for obstacle in obstacles:
-                ox, oy = obstacle
-
-                distance = math.hypot(
-                    px - ox,
-                    py - oy,
-                )
-
-                minimum = min(
-                    minimum,
-                    distance,
-                )
-
+        # A one-point candidate is useful in direct diagnostics as well.
+        segments = zip(candidate, candidate[1:]) if len(candidate) > 1 else (
+            (point, point) for point in candidate)
+        for start, end in segments:
+            ax, ay = float(start[0]), float(start[1])
+            dx, dy = float(end[0]) - ax, float(end[1]) - ay
+            length2 = dx * dx + dy * dy
+            for ox, oy in obstacles:
+                fraction = (((ox - ax) * dx + (oy - ay) * dy) / length2
+                            if length2 > 0.0 else 0.0)
+                fraction = max(0.0, min(1.0, fraction))
+                minimum = min(minimum, math.hypot(
+                    ox - ax - fraction * dx, oy - ay - fraction * dy))
         return minimum
 
     def plan(
@@ -369,7 +394,7 @@ class LatticePlanner:
         obstacles,
         current_position=None,
     ):
-        """Return a continuous collision-free local avoidance path."""
+        """Return an avoidance candidate meeting sample clearance, or BLOCKED."""
 
         if reference_points is None or len(reference_points) < 3:
             return None
@@ -449,11 +474,6 @@ class LatticePlanner:
             first_obstacle['index']
         ]
 
-        relevant_points = [
-            item['point']
-            for item in relevant
-        ]
-
         candidates = []
 
         for target_offset in self.candidate_offsets_m:
@@ -468,7 +488,7 @@ class LatticePlanner:
 
             clearance = self._minimum_obstacle_distance(
                 candidate_points,
-                relevant_points,
+                obstacle_points,
             )
 
             collision = (
