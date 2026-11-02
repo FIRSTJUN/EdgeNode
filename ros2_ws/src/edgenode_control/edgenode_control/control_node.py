@@ -7,6 +7,7 @@ from std_msgs.msg import Float32
 from nav_msgs.msg import Odometry, Path
 from morai_ros2_msgs.msg import CtrlCmd, EgoVehicleStatus
 
+from edgenode_control.dynamic_lookahead import calculate_lookahead_distance
 from edgenode_control.pure_pursuit import PurePursuit
 from edgenode_control.steering_command import to_morai_front_steer
 
@@ -79,6 +80,8 @@ class ControlNode(Node):
             ('wheelbase_m', 2.84),
             ('max_wheel_angle_rad', 0.610865),
             ('lookahead_distance_m', 2.5),
+            ('lookahead_max_m', 10.0),
+            ('lookahead_preview_time_sec', 0.45),
             ('steering_sign', -1.0),
             ('max_front_steer_normalized', 0.70),
             ('speed_kp', 0.14),
@@ -89,6 +92,11 @@ class ControlNode(Node):
             ('max_brake_cmd', 0.80),
         ]:
             self.declare_parameter(name, default)
+
+        # Legacy configs supply the minimum at startup; an explicit new minimum
+        # takes precedence. The legacy parameter no longer fixes the lookahead.
+        self.declare_parameter(
+            'lookahead_min_m', self.get_parameter('lookahead_distance_m').value)
 
         self.target_error = 0.0
         self.target_speed_kmh = 0.0
@@ -143,6 +151,9 @@ class ControlNode(Node):
 
         self.pure_pursuit_steering_pub = self.create_publisher(
             Float32, '/control/pure_pursuit_steering', 10)
+
+        self.lookahead_distance_pub = self.create_publisher(
+            Float32, '/control/lookahead_distance', 10)
 
         rate = max(1.0, float(self.get_parameter('control_rate_hz').value))
         self.create_timer(1.0 / rate, self.control_loop)
@@ -217,15 +228,31 @@ class ControlNode(Node):
             self.speed_pid.reset()
             return
 
+        lookahead_distance_m = calculate_lookahead_distance(
+            self.current_speed_kmh,
+            lookahead_min_m=self.get_parameter('lookahead_min_m').value,
+            lookahead_max_m=self.get_parameter('lookahead_max_m').value,
+            lookahead_preview_time_sec=self.get_parameter('lookahead_preview_time_sec').value,
+        )
+        if lookahead_distance_m is None:
+            self.publish_safe_stop()
+            self.speed_pid.reset()
+            return
+
         # Pure Pursuit is LEFT-positive; MORAI sign conversion happens here.
         result = self.pure_pursuit.compute(
             self.local_path_points, *self.latest_pose,
-            lookahead_distance_m=self.get_parameter('lookahead_distance_m').value,
+            lookahead_distance_m=lookahead_distance_m,
         )
         if result is None:
             self.publish_safe_stop()
             self.speed_pid.reset()
             return
+        # Record the arc lookahead passed to Pure Pursuit, not target XY range.
+        lookahead_msg = Float32()
+        lookahead_msg.data = float(lookahead_distance_m)
+        self.lookahead_distance_pub.publish(lookahead_msg)
+
         path_error_msg = Float32()
         path_error_msg.data = float(result['nearest_distance_m'])
         self.path_error_pub.publish(path_error_msg)

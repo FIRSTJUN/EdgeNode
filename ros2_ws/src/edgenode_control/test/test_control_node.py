@@ -19,12 +19,16 @@ class ControlNodeTest(unittest.TestCase):
     def setUp(self):
         self.now = 10_000_000_000
         self.parameters = {}
+        self.parameter_overrides = {}
         self.publisher = Mock()
+        self.publishers = {'/ctrl_cmd': self.publisher}
+        self.publisher_factory = Mock(side_effect=lambda msg_type, topic, depth:
+                                      self.publishers.setdefault(topic, Mock()))
         self.clock = Mock()
         self.clock.now.side_effect = lambda: Time(nanoseconds=self.now)
 
         def declare_parameter(name, value):
-            self.parameters[name] = value
+            self.parameters[name] = self.parameter_overrides.get(name, value)
 
         self.subscriptions = Mock()
         self.timer = Mock()
@@ -36,7 +40,7 @@ class ControlNodeTest(unittest.TestCase):
             )),
             'get_clock': Mock(return_value=self.clock),
             'create_subscription': self.subscriptions,
-            'create_publisher': Mock(return_value=self.publisher),
+            'create_publisher': self.publisher_factory,
             'create_timer': self.timer,
             'get_logger': Mock(),
         }
@@ -111,9 +115,150 @@ class ControlNodeTest(unittest.TestCase):
         self.assertEqual(self.parameters['wheelbase_m'], 2.84)
         self.assertEqual(self.parameters['max_wheel_angle_rad'], 0.610865)
         self.assertEqual(self.parameters['lookahead_distance_m'], 2.5)
+        self.assertEqual(self.parameters['lookahead_min_m'], 2.5)
+        self.assertEqual(self.parameters['lookahead_max_m'], 10.0)
+        self.assertEqual(self.parameters['lookahead_preview_time_sec'], 0.45)
+        self.publisher_factory.assert_any_call(
+            Float32, '/control/lookahead_distance', 10,
+        )
         self.assertEqual(self.parameters['steering_sign'], -1.0)
         self.assertEqual(self.parameters['max_front_steer_normalized'], 0.70)
         self.assertFalse(hasattr(self.node, 'steer_pid'))
+
+    def test_legacy_lookahead_parameter_supplies_minimum_at_startup(self):
+        self.parameter_overrides['lookahead_distance_m'] = 3.0
+        self.node = ControlNode()
+        self.assertEqual(self.parameters['lookahead_min_m'], 3.0)
+        self.feed_inputs()
+        self.command()
+        diagnostic = self.publishers['/control/lookahead_distance'].publish.call_args.args[0]
+        self.assertEqual(diagnostic.data, 3.0)
+
+    def test_explicit_minimum_overrides_legacy_lookahead_parameter(self):
+        self.parameter_overrides.update(lookahead_distance_m=3.0, lookahead_min_m=2.5)
+        self.node = ControlNode()
+        self.assertEqual(self.parameters['lookahead_min_m'], 2.5)
+        self.feed_inputs()
+        self.command()
+        diagnostic = self.publishers['/control/lookahead_distance'].publish.call_args.args[0]
+        self.assertEqual(diagnostic.data, 2.5)
+
+    def test_measured_speed_selects_and_publishes_actual_lookahead(self):
+        # A constant target cannot account for the measured-speed sweep.
+        self.node.target_speed_cb(Float32(data=50.0))
+        self.set_path([[0, 0.25, 0], [20, 0.25, 0]])
+        publisher = self.publishers['/control/lookahead_distance']
+        for speed_kmh, expected_m in (
+            (0.0, 2.5), (20.0, 2.5), (25.0, 3.125), (30.0, 3.75),
+            (40.0, 5.0), (50.0, 6.25), (1000.0, 10.0),
+        ):
+            with self.subTest(speed_kmh=speed_kmh):
+                status = EgoVehicleStatus()
+                status.velocity.x = speed_kmh / 3.6
+                self.node.status_cb(status)
+                self.node.pure_pursuit.compute.reset_mock()
+                publisher.reset_mock()
+                self.command()
+                self.node.pure_pursuit.compute.assert_called_once()
+                call = self.node.pure_pursuit.compute.call_args
+                self.assertEqual(call.args, (self.node.local_path_points, 0.0, 0.0, 0.0))
+                self.assertAlmostEqual(
+                    call.kwargs['lookahead_distance_m'], expected_m,
+                )
+                publisher.publish.assert_called_once()
+                diagnostic = publisher.publish.call_args.args[0]
+                self.assertIsInstance(diagnostic, Float32)
+                self.assertAlmostEqual(diagnostic.data, expected_m)
+                self.assertEqual(diagnostic.data, call.kwargs['lookahead_distance_m'])
+                target = self.publishers['/control/target_forward'].publish.call_args.args[0]
+                self.assertAlmostEqual(target.data, expected_m)
+
+    def test_target_speed_changes_do_not_change_measured_speed_lookahead(self):
+        status = EgoVehicleStatus()
+        status.velocity.x = 50.0 / 3.6
+        self.node.status_cb(status)
+        for target_speed in (0.0, 20.0, 25.0, 50.0):
+            with self.subTest(target_speed=target_speed):
+                self.node.target_speed_cb(Float32(data=target_speed))
+                self.command()
+                self.assertEqual(
+                    self.node.pure_pursuit.compute.call_args.kwargs['lookahead_distance_m'],
+                    6.25,
+                )
+
+    def test_dynamic_lookahead_preserves_curve_target_formula_and_steering_sign(self):
+        status = EgoVehicleStatus()
+        status.velocity.x = 50.0 / 3.6
+        self.node.status_cb(status)
+        self.node.target_speed_cb(Float32(data=50.0))
+        for side in (-1, 1):
+            with self.subTest(side=side):
+                self.set_path([[0, 0, 0], [2, 0, 0], [14, side * 5, 13]])
+                command = self.command()
+                # The second segment is 13 m in XY; advance 4.25 m along it.
+                forward = 2.0 + 4.25 * 12.0 / 13.0
+                left = side * 4.25 * 5.0 / 13.0
+                curvature = 2.0 * left / (forward ** 2 + left ** 2)
+                normalized = math.atan(2.84 * curvature) / 0.610865
+                self.assertAlmostEqual(command.front_steer, -normalized)
+                self.assertLess(abs(command.front_steer), 0.70)
+                for topic, expected in (('target_left', left),
+                                        ('target_forward', forward),
+                                        ('pure_pursuit_steering', normalized)):
+                    actual = self.publishers['/control/' + topic].publish.call_args.args[0].data
+                    self.assertAlmostEqual(actual, expected)
+
+    def test_diagnostic_retains_requested_arc_distance_near_path_end(self):
+        status = EgoVehicleStatus()
+        status.velocity.x = 50.0 / 3.6
+        self.node.status_cb(status)
+        self.node.target_speed_cb(Float32(data=50.0))
+        self.set_path([[0, 0, 0], [1, 0, 0]])
+        self.command()
+        lookahead = self.publishers['/control/lookahead_distance'].publish.call_args.args[0]
+        forward = self.publishers['/control/target_forward'].publish.call_args.args[0]
+        self.assertEqual(lookahead.data, 6.25)
+        self.assertEqual(forward.data, 1.0)
+
+    def test_invalid_measured_speed_safe_stops_without_lookahead_publication(self):
+        for speed_kmh in (-1.0, math.nan, math.inf, -math.inf):
+            with self.subTest(speed_kmh=speed_kmh):
+                self.node.current_speed_kmh = speed_kmh
+                self.assert_safe_stop()
+        self.node.pure_pursuit.compute.assert_not_called()
+        self.publishers['/control/lookahead_distance'].publish.assert_not_called()
+
+    def test_invalid_lookahead_configuration_uses_existing_safe_stop(self):
+        defaults = self.parameters.copy()
+        for parameter, value in (
+            ('lookahead_min_m', 0.0), ('lookahead_min_m', math.nan),
+            ('lookahead_max_m', 2.0), ('lookahead_max_m', math.inf),
+            ('lookahead_preview_time_sec', -0.45),
+            ('lookahead_preview_time_sec', math.nan),
+        ):
+            with self.subTest(parameter=parameter, value=value):
+                self.parameters.update(defaults)
+                self.parameters[parameter] = value
+                self.assert_safe_stop()
+        self.node.pure_pursuit.compute.assert_not_called()
+        self.publishers['/control/lookahead_distance'].publish.assert_not_called()
+
+    def test_explicit_stop_at_high_measured_speed_preserves_command_and_pid_reset(self):
+        status = EgoVehicleStatus()
+        status.velocity.x = 50.0 / 3.6
+        self.node.status_cb(status)
+        self.node.speed_pid.integral = 12.0
+        self.node.speed_pid.prev_error = 20.0
+        with patch.object(self.node.speed_pid, 'update', wraps=self.node.speed_pid.update) as update:
+            command = self.command()
+            update.assert_not_called()
+        self.assertEqual(command.accel, 0.0)
+        self.assertEqual(command.brake, 0.65)
+        self.assertEqual(command.front_steer, 0.0)
+        self.assertEqual(self.node.speed_pid.integral, 0.0)
+        self.assertIsNone(self.node.speed_pid.prev_error)
+        diagnostic = self.publishers['/control/lookahead_distance'].publish.call_args.args[0]
+        self.assertEqual(diagnostic.data, 6.25)
 
     def test_left_target_produces_negative_morai_steering(self):
         self.node.target_speed_cb(Float32(data=1.0))
@@ -259,6 +404,7 @@ class ControlNodeTest(unittest.TestCase):
         self.node.local_path_stamp_ns = self.now - 600_000_001
         self.assert_safe_stop()
         self.node.pure_pursuit.compute.assert_not_called()
+        self.publishers['/control/lookahead_distance'].publish.assert_not_called()
 
     def test_stale_localization_safe_stops(self):
         self.node.localization_stamp_ns = self.now - 600_000_001
@@ -308,6 +454,7 @@ class ControlNodeTest(unittest.TestCase):
         self.set_path([[0, 0, 0], [-10, 0, 0]])
         self.assert_safe_stop()
         self.node.pure_pursuit.compute.assert_called_once()
+        self.publishers['/control/lookahead_distance'].publish.assert_not_called()
 
     def test_empty_short_and_invalid_path_safe_stop(self):
         for points in ([], [[0, 0, 0]], [[0, 0, 0], [10, 0, math.nan]]):
