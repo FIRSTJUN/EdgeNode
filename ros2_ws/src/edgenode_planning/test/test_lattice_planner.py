@@ -71,7 +71,7 @@ def test_blocked_when_all_candidates_collide():
     assert result['blocked'] is True
 
 
-def test_avoidance_returns_to_reference_path():
+def test_avoidance_holds_offset_until_actual_obstacle_passage():
     planner = LatticePlanner()
 
     result = planner.plan(
@@ -82,4 +82,4 @@ def test_avoidance_returns_to_reference_path():
     points = result['points']
 
     assert abs(points[0][1]) < 1e-6
-    assert abs(points[-1][1]) < 1e-6
+    assert points[-1][1] == result['selected_offset_m']

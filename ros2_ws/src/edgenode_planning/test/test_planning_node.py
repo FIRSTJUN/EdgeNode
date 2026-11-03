@@ -20,6 +20,14 @@ from edgenode_planning.map_matcher import MapMatcher
 from edgenode_planning.planning_fsm import PlanningFSM
 from edgenode_planning.planning_node import PlanningNode
 from edgenode_planning.speed_planner import SpeedPlanner
+from edgenode_planning.adjacent_lane_planner import AdjacentLanePlanner
+from edgenode_planning.lane_geometry import LaneNetwork
+
+
+def speed_spy(**kwargs):
+    planner = SpeedPlanner(**kwargs)
+    planner.plan = Mock(wraps=planner.plan)
+    return planner
 
 
 class PlanningNodeTest(unittest.TestCase):
@@ -33,9 +41,13 @@ class PlanningNodeTest(unittest.TestCase):
             'local_path_search_back': 3,
             'local_path_search_forward': 10,
             'cruise_speed_kmh': 1.0,
+            'curve_speed_kmh': 0.7,
+            'sharp_curve_speed_kmh': 0.5,
+            'obstacle_points_per_cluster': 1,
             'enable_drive': False,
             'max_drive_speed_kmh': 1.0,
             'drive_duration_sec': 15.0,
+            'obstacle_avoid_speed_cap_kmh': 3.0,
         }
         self.route = {'points': [[0, 1, 2], [3.5, 4.5, 5.5], [6, 7, 8]]}
         self.stamp = Time(seconds=123, nanoseconds=456).to_msg()
@@ -44,7 +56,7 @@ class PlanningNodeTest(unittest.TestCase):
             map_matcher=Mock(),
             dijkstra_planner=Mock(),
             local_path_planner=Mock(wraps=LocalPathPlanner()),
-            speed_planner=Mock(wraps=SpeedPlanner()),
+            speed_planner=speed_spy(),
             _route_key=None,
             _route_result=None,
             _progress_index=None,
@@ -62,6 +74,7 @@ class PlanningNodeTest(unittest.TestCase):
             get_clock=Mock(),
             get_logger=Mock(),
         )
+        self.node.lattice_planner.usable_curvature_limit = LatticePlanner().usable_curvature_limit
         self.node.get_clock.return_value.now.return_value.to_msg.return_value = self.stamp
         self.node.get_clock.return_value.now.return_value.nanoseconds = 123_000_000_456
         self.node.dijkstra_planner.plan.return_value = self.route
@@ -75,6 +88,15 @@ class PlanningNodeTest(unittest.TestCase):
             'recommended_speed', 'speed_mode', 'speed_curvature', 'speed_max_curvature',
             'drive_status', 'fsm_state', 'lattice_status', 'lattice_offset',
             'lattice_clearance', 'local_path_index', 'local_path_progress',
+            'obstacle_avoid_speed_cap_kmh', 'applied_speed_cap_kmh',
+            'lattice_max_curvature', 'lattice_curvature_limit',
+            'lattice_obstacle_front_s', 'lattice_obstacle_rear_s', 'lattice_blocked_reason',
+            'lattice_entry_length', 'lattice_full_offset_start_s', 'lattice_recovery_length',
+            'runtime_cruise_speed', 'runtime_curve_speed', 'runtime_sharp_curve_speed',
+            'runtime_max_drive_speed', 'actual_lateral_offset', 'last_approved_offset',
+            'evaluated_candidate_offset', 'evaluated_candidate_clearance',
+            'evaluated_candidate_profile_curvature', 'evaluated_candidate_polyline_curvature',
+            'evaluated_candidate_reject_reason',
         ):
             setattr(self.node, name + '_pub', Mock())
 
@@ -138,6 +160,180 @@ class PlanningNodeTest(unittest.TestCase):
             q = pose.pose.orientation
             self.assertEqual([q.x, q.y, q.z, q.w], [0.0, 0.0, 0.0, 1.0])
 
+    def test_runtime_readback_20_replaces_cached_3_5_in_every_speed_mode(self):
+        for curvature, expected_mode, parameter in (
+                (0.0, 'CRUISE', 'cruise_speed_kmh'),
+                (0.07, 'CURVE', 'curve_speed_kmh'),
+                (0.15, 'SHARP_CURVE', 'sharp_curve_speed_kmh')):
+            with self.subTest(mode=expected_mode):
+                self.setUp()
+                self.node.speed_planner = SpeedPlanner(
+                    cruise_speed_kmh=3.5, curve_speed_kmh=3.5, sharp_curve_speed_kmh=3.5)
+                self.parameters.update(cruise_speed_kmh=3.5, curve_speed_kmh=3.5,
+                                       sharp_curve_speed_kmh=3.5, enable_drive=True,
+                                       max_drive_speed_kmh=20.0, obstacle_avoid_speed_cap_kmh=20.0)
+                self.set_local_curvature(curvature or 1e-9)
+                PlanningNode.plan(self.node)
+                self.assertEqual(self.output('recommended_speed'), 3.5)
+                self.assertEqual(self.output('target_speed'), 3.5)
+                points = self.node.local_path_planner.extract.return_value['points']
+                self.parameters.update(cruise_speed_kmh=20.0, curve_speed_kmh=20.0,
+                                       sharp_curve_speed_kmh=20.0)
+                # Reproduce the old failure before the next Planning cycle:
+                # ROS readback is 20, while the cached planner still emits 3.5.
+                self.assertEqual(self.node.get_parameter(parameter).value, 20.0)
+                self.assertEqual(self.node.speed_planner.plan(points)['target_speed_kmh'], 3.5)
+                PlanningNode.plan(self.node)
+                self.assertEqual(getattr(self.node.speed_planner, parameter), 20.0)
+                self.assertEqual(self.output('speed_mode'), expected_mode)
+                self.assertEqual(self.output('recommended_speed'), 20.0)
+                self.assertEqual(self.output('target_speed'), 20.0)
+                for topic in ('runtime_cruise_speed', 'runtime_curve_speed',
+                              'runtime_sharp_curve_speed', 'runtime_max_drive_speed'):
+                    self.assertEqual(self.output(topic), 20.0)
+
+    def test_grouped_footprints_preserve_cluster_boundary_and_all_collision_points(self):
+        self.node._obstacle_points_per_cluster = 8
+        msg = PoseArray()
+        for x, y in [(14., 0.)]*8 + [(30., 7.)]*8:
+            pose = Pose()
+            pose.position.x, pose.position.y = x, y
+            msg.poses.append(pose)
+        PlanningNode.obstacle_callback(self.node, msg)
+        self.assertEqual(len(self.node.latest_obstacles), 16)
+        self.assertEqual([len(g) for g in self.node.latest_obstacle_groups], [8, 8])
+        msg.poses[0].position.x = math.nan
+        PlanningNode.obstacle_callback(self.node, msg)
+        self.assertEqual(len(self.node.latest_obstacles), 15)
+        self.assertIsNone(self.node.latest_obstacle_groups)
+
+    def test_blocked_diagnostics_separate_actual_approved_and_failed_candidate(self):
+        self.configure_s4_drive()
+        PlanningNode.plan(self.node)
+        approved = self.output('last_approved_offset')
+        self.node.latest_pose = (0., -0.4, 0.)
+        self.node.latest_obstacles = [(4., y*.25) for y in range(-20, 21)]
+        PlanningNode.plan(self.node)
+        self.assertEqual(self.output('lattice_status'), 'BLOCKED')
+        self.assertEqual(self.output('actual_lateral_offset'), -0.4)
+        self.assertEqual(self.output('last_approved_offset'), approved)
+        self.assertNotEqual(self.output('evaluated_candidate_offset'), -0.4)
+        self.assertTrue(self.output('evaluated_candidate_reject_reason'))
+        self.assertEqual(self.output('fsm_state'), 'EMERGENCY_STOP')
+        self.assertEqual(self.output('target_speed'), 0.)
+        self.assertEqual(self.output('applied_speed_cap_kmh'), 0.)
+
+    def test_recorded_first_final_blocked_fixtures_keep_fsm_emergency_and_zero_target(self):
+        fixture = json.loads((FilePath(__file__).parent / 'fixtures/s4_20kph_blocked_scenes.json').read_text())
+        for case in fixture['cases']:
+            with self.subTest(scene=case['name']):
+                self.setUp()
+                self.node.lattice_planner = LatticePlanner()
+                self.set_speed_route(case['reference'])
+                self.node.latest_pose = (*case['position'], case['yaw'])
+                self.node.local_path_planner.extract.return_value = {
+                    'points': case['reference'], 'nearest_index': 0, 'progress_arc_m': 100.}
+                PlanningNode.plan(self.node)  # establish route key before maneuver history
+                self.node.lattice_planner._avoidance_active = True
+                self.node.lattice_planner._selected_offset = -2.4
+                self.node.latest_obstacles = case['obstacles']
+                self.node.latest_obstacle_groups = case['groups']
+                self.parameters.update(enable_drive=True, max_drive_speed_kmh=20.,
+                                       obstacle_avoid_speed_cap_kmh=20., cruise_speed_kmh=20.,
+                                       curve_speed_kmh=20., sharp_curve_speed_kmh=20.)
+                PlanningNode.plan(self.node)
+                self.assertEqual(self.output('lattice_status'), 'BLOCKED')
+                self.assertEqual(self.output('last_approved_offset'), -2.4)
+                self.assertEqual(self.output('fsm_state'), 'EMERGENCY_STOP')
+                self.assertEqual(self.output('target_speed'), 0.)
+                self.assertEqual(self.output('applied_speed_cap_kmh'), 0.)
+
+    def test_safe_hold_without_current_near_cluster_keeps_target_20_then_stops_if_unsafe(self):
+        self.configure_s4_drive()
+        self.node.lattice_planner = LatticePlanner()
+        self.parameters.update(cruise_speed_kmh=20., curve_speed_kmh=20.,
+                               sharp_curve_speed_kmh=20., max_drive_speed_kmh=20.,
+                               obstacle_avoid_speed_cap_kmh=20.)
+        near = [(14., -.5), (18., -.5), (18., .5), (14., .5)]
+        self.node.latest_pose = (0., -.1, 0.)
+        self.node.latest_obstacles = near
+        self.node.latest_obstacle_groups = [near]
+        PlanningNode.plan(self.node)
+        self.assertEqual(self.output('last_approved_offset'), -1.8)
+        far = [(28., 7.), (30., 7.), (30., 8.), (28., 8.)]
+        self.node.latest_pose = (0., -1.75, 0.)
+        self.node.latest_obstacles = far
+        self.node.latest_obstacle_groups = [far]
+        PlanningNode.plan(self.node)
+        self.assertEqual(self.output('lattice_status'), 'AVOIDING')
+        self.assertEqual(self.output('fsm_state'), 'OBSTACLE_AVOID')
+        self.assertEqual(self.output('target_speed'), 20.)
+        self.assertNotEqual(self.output('evaluated_candidate_reject_reason'), 'NOT_EVALUATED')
+        self.assertTrue(math.isfinite(self.output('lattice_max_curvature')))
+        barrier = [(4., i*.25) for i in range(-20, 21)]
+        self.node.latest_obstacles = barrier
+        self.node.latest_obstacle_groups = [barrier]
+        PlanningNode.plan(self.node)
+        self.assertEqual(self.output('lattice_status'), 'BLOCKED')
+        self.assertEqual(self.output('fsm_state'), 'EMERGENCY_STOP')
+        self.assertEqual(self.output('target_speed'), 0.)
+        self.assertEqual(self.output('applied_speed_cap_kmh'), 0.)
+        self.assertNotEqual(self.output('evaluated_candidate_reject_reason'), 'NOT_EVALUATED')
+
+    def configure_adjacent_drive(self, has_neighbor=True):
+        self.parameters.update(enable_drive=True, cruise_speed_kmh=20., curve_speed_kmh=20.,
+                               sharp_curve_speed_kmh=20., max_drive_speed_kmh=20.,
+                               obstacle_avoid_speed_cap_kmh=20.)
+        links={}
+        for name,y in [('O',0.),('L',3.5)]:
+            links[name]=dict(idx=name,from_node_idx=name+'0',to_node_idx=name+'1',max_speed=30,
+                points=[[i*.5,y,0.] for i in range(161)],
+                left_lane_change_dst_link_idx='L' if name=='O' and has_neighbor else None,
+                right_lane_change_dst_link_idx='O' if name=='L' else None)
+        geometry=SimpleNamespace(links_by_id=links,graph={'x':[{'link_id':i} for i in links]})
+        self.node.lattice_planner=AdjacentLanePlanner(LaneNetwork(geometry))
+        self.node.dijkstra_planner.plan.return_value={'points':links['O']['points'],'link_ids':['O']}
+        self.node.map_matcher.match.return_value.update(link_id='O')
+        self.node.latest_pose=(0.,0.,0.)
+        self.node.latest_obstacles=[(18.,-.5),(22.,-.5),(22.,.5),(18.,.5)]
+        for name in ('lane_change_state','lane_change_side','selected_adjacent_link',
+                     'lane_change_obstacle_safe','lane_change_steering_feasible','lane_change_corridor_safe',
+                     'adjacent_lane_separation','original_lane_center','adjacent_lane_center',
+                     'lane_change_entry_path','adjacent_lane_hold_path','lane_change_recovery_path','lane_change_recovery_gate'):
+            setattr(self.node,name+'_pub',Mock())
+
+    def test_adjacent_lane_mode_keeps_dijkstra_global_exact_and_local_is_final_control_path(self):
+        self.configure_adjacent_drive()
+        PlanningNode.plan(self.node)
+        global_before=self.node.global_path_pub.publish.call_args.args[0]
+        self.assertTrue(all(p.pose.position.y==0. for p in global_before.poses))
+        local=self.node.local_path_pub.publish.call_args.args[0]
+        self.assertAlmostEqual(local.poses[-1].pose.position.y,3.5)
+        self.assertEqual(self.output('lane_change_state'),'ENTRY')
+        self.assertTrue(self.output('lane_change_obstacle_safe'))
+        self.assertTrue(self.output('lane_change_steering_feasible'))
+        self.assertTrue(self.output('lane_change_corridor_safe'))
+        self.assertEqual(self.output('target_speed'),20.)
+        self.node.latest_pose=(17.,3.5,0.)
+        self.node.map_matcher.match.return_value.update(link_id='L')
+        PlanningNode.plan(self.node)
+        global_after=self.node.global_path_pub.publish.call_args.args[0]
+        self.assertEqual([p.pose.position for p in global_before.poses],
+                         [p.pose.position for p in global_after.poses])
+        self.node.dijkstra_planner.plan.assert_called_once()
+        self.assertEqual(self.output('lane_change_state'),'ADJACENT_LANE_HOLD')
+        self.assertTrue(all(p.pose.position.y==3.5 for p in self.node.local_path_pub.publish.call_args.args[0].poses))
+        self.assertEqual(self.output('runtime_cruise_speed'),20.)
+
+    def test_adjacent_lane_missing_neighbor_blocks_and_publishes_no_unapproved_local_path(self):
+        self.configure_adjacent_drive(has_neighbor=False)
+        PlanningNode.plan(self.node)
+        self.assertEqual(self.output('lattice_status'),'BLOCKED')
+        self.assertEqual(self.output('target_speed'),0.)
+        self.assertEqual(self.output('fsm_state'),'EMERGENCY_STOP')
+        self.assertEqual(self.node.local_path_pub.publish.call_args.args[0].poses,[])
+        self.assertTrue(self.node.global_path_pub.publish.call_args.args[0].poses)
+
     def test_footprint_pose_array_reaches_lattice_without_changing_fsm_motion_gate(self):
         self.set_speed_route([[float(x), 0.0, 0.0] for x in range(31)])
         msg = PoseArray()
@@ -160,6 +356,107 @@ class PlanningNodeTest(unittest.TestCase):
         PlanningNode.plan(self.node)
         self.assertEqual(self.output('fsm_state'), 'OBSTACLE_AVOID')
         self.assertGreater(self.output('target_speed'), 0.0)
+
+    def configure_s4_drive(self):
+        self.set_speed_route([[float(x), 0.0, 0.0] for x in range(51)])
+        self.node.speed_planner = SpeedPlanner(
+            cruise_speed_kmh=50.0, curve_speed_kmh=25.0, sharp_curve_speed_kmh=3.5)
+        self.parameters.update(enable_drive=True, max_drive_speed_kmh=50.0,
+                               cruise_speed_kmh=50.0, curve_speed_kmh=25.0,
+                               sharp_curve_speed_kmh=3.5)
+        self.node.latest_obstacles = [(14.0, -0.8), (18.0, -0.8),
+                                      (18.0, 0.8), (14.0, 0.8)]
+
+    def test_s4_final_speed_cap_overrides_high_recommendation(self):
+        self.configure_s4_drive()
+        PlanningNode.plan(self.node)
+        self.assertEqual(self.output('fsm_state'), 'OBSTACLE_AVOID')
+        self.assertGreater(self.output('recommended_speed'), 3.0)
+        self.assertEqual(self.output('target_speed'), 3.0)
+        self.assertEqual(self.output('obstacle_avoid_speed_cap_kmh'), 3.0)
+        self.assertEqual(self.output('applied_speed_cap_kmh'), 3.0)
+        self.assertAlmostEqual(self.output('lattice_curvature_limit'),
+                               math.tan(.70 * .610865) / 2.84)
+
+    def test_normal_cruise_is_not_permanently_reduced(self):
+        self.configure_s4_drive()
+        self.node.latest_obstacles = []
+        PlanningNode.plan(self.node)
+        self.assertEqual(self.output('fsm_state'), 'NORMAL_DRIVE')
+        self.assertEqual(self.output('target_speed'), 50.0)
+        self.assertEqual(self.output('applied_speed_cap_kmh'), 50.0)
+
+    def test_s4_cap_runtime_change_and_independent_lower_drive_limit(self):
+        self.configure_s4_drive()
+        PlanningNode.plan(self.node)
+        self.parameters['obstacle_avoid_speed_cap_kmh'] = 2.0
+        PlanningNode.plan(self.node)
+        self.assertEqual(self.output('target_speed'), 2.0)
+        self.assertEqual(self.output('obstacle_avoid_speed_cap_kmh'), 2.0)
+        self.parameters['max_drive_speed_kmh'] = 1.5
+        PlanningNode.plan(self.node)
+        self.assertEqual(self.output('target_speed'), 1.5)
+        self.assertEqual(self.output('applied_speed_cap_kmh'), 1.5)
+
+    def test_s4_invalid_cap_stops_instead_of_falling_back_to_cruise(self):
+        self.configure_s4_drive()
+        for cap in [0.0, -1.0, float('nan'), float('inf'), True]:
+            self.parameters['obstacle_avoid_speed_cap_kmh'] = cap
+            PlanningNode.plan(self.node)
+            self.assertEqual(self.output('fsm_state'), 'ERROR')
+            self.assert_stopped()
+
+    def test_s4_blocked_and_release_pending_keep_zero_target(self):
+        self.configure_s4_drive()
+        self.node.latest_obstacles = [(14.0, i * .25) for i in range(-20, 21)]
+        PlanningNode.plan(self.node)
+        self.assertEqual(self.output('fsm_state'), 'EMERGENCY_STOP')
+        self.assert_stopped()
+        self.node.latest_obstacles = [(14.0, -0.8), (18.0, -0.8),
+                                      (18.0, 0.8), (14.0, 0.8)]
+        for _ in range(2):
+            PlanningNode.plan(self.node)
+            self.assertEqual(self.output('lattice_blocked_reason'), 'RELEASE_PENDING')
+            self.assert_stopped()
+        PlanningNode.plan(self.node)
+        self.assertEqual(self.output('fsm_state'), 'OBSTACLE_AVOID')
+        self.assertEqual(self.output('target_speed'), 3.0)
+
+    def test_s4_match_loss_breaks_blocked_release_confirmation(self):
+        self.configure_s4_drive()
+        self.node.latest_obstacles = [(14.0, i * .25) for i in range(-20, 21)]
+        PlanningNode.plan(self.node)
+        self.node.latest_obstacles = [(14.0, -.8), (18.0, -.8), (18.0, .8), (14.0, .8)]
+        PlanningNode.plan(self.node)
+        match = self.node.map_matcher.match.return_value
+        self.node.map_matcher.match.return_value = None
+        PlanningNode.plan(self.node)
+        self.node.map_matcher.match.return_value = match
+        for _ in range(2):
+            PlanningNode.plan(self.node)
+            self.assert_stopped()
+        PlanningNode.plan(self.node)
+        self.assertEqual(self.output('target_speed'), 3.0)
+
+    def test_s4_unavailable_lattice_result_cannot_bypass_cap_and_motion_gate(self):
+        self.configure_s4_drive()
+        self.node.lattice_planner.plan.return_value = None
+        PlanningNode.plan(self.node)
+        self.assertEqual(self.output('lattice_blocked_reason'), 'INVALID_AVOIDANCE_REFERENCE')
+        self.assertEqual(self.output('fsm_state'), 'EMERGENCY_STOP')
+        self.assertEqual(self.output('applied_speed_cap_kmh'), 0.0)
+        self.assert_stopped()
+
+    def test_s4_adaptive_transition_runtime_diagnostics(self):
+        self.configure_s4_drive()
+        PlanningNode.plan(self.node)
+        self.assertEqual(self.output('lattice_status'), 'AVOIDING')
+        self.assertGreater(self.output('lattice_entry_length'), 0.0)
+        self.assertLess(self.output('lattice_full_offset_start_s'),
+                        self.output('lattice_obstacle_front_s'))
+        self.assertLessEqual(self.output('lattice_max_curvature'),
+                             self.output('lattice_curvature_limit'))
+        self.assertEqual(self.output('target_speed'), 3.0)
 
     def test_wait_for_localization(self):
         PlanningNode.plan(self.node)
@@ -415,8 +712,10 @@ class PlanningNodeTest(unittest.TestCase):
         points = [[i * 0.5, 0, 0] for i in range(528)] + [[300, 0, 0], [350, 0, 0]]
         self.set_speed_route(points)
         self.node.latest_pose = (263.5, 0, 0)
-        self.node.speed_planner = Mock(wraps=SpeedPlanner(cruise_speed_kmh=50.0))
-        self.parameters.update(enable_drive=True, max_drive_speed_kmh=50.0)
+        self.node.speed_planner = speed_spy(cruise_speed_kmh=50.0)
+        self.parameters.update(enable_drive=True, max_drive_speed_kmh=50.0,
+                               cruise_speed_kmh=50.0, curve_speed_kmh=25.0,
+                               sharp_curve_speed_kmh=3.5)
         PlanningNode.plan(self.node)
         self.assertEqual(self.output('state'), 'GLOBAL_PATH_READY')
         self.assertEqual(self.output('fsm_state'), PlanningFSM.NORMAL_DRIVE)
@@ -514,6 +813,7 @@ class PlanningNodeTest(unittest.TestCase):
 
     def test_invalid_speed_parameters_fail_closed_with_paths_still_available(self):
         self.set_speed_route([[x, 0, 0] for x in range(21)])
+        self.parameters['cruise_speed_kmh'] = -1.0
         self.node.speed_planner = SpeedPlanner(cruise_speed_kmh=-1.0)
         PlanningNode.plan(self.node)
         self.assert_invalid_speed_preview()
@@ -571,6 +871,7 @@ class PlanningNodeTest(unittest.TestCase):
         self.assertEqual(self.output('speed_mode'), 'SHARP_CURVE')
 
     def test_drive_hard_cap_is_independent_of_recommended_speed(self):
+        self.parameters['cruise_speed_kmh'] = 3.0
         self.node.speed_planner = SpeedPlanner(cruise_speed_kmh=3.0)
         self.enable_straight_drive()
         for limit in (1.0, 0.4):
@@ -769,6 +1070,7 @@ class PlanningNodeTest(unittest.TestCase):
         self.assert_drive('EXPIRED')
 
     def test_valid_zero_recommendation_does_not_invent_positive_speed(self):
+        self.parameters['cruise_speed_kmh'] = 0.0
         self.node.speed_planner = SpeedPlanner(cruise_speed_kmh=0.0)
         self.enable_straight_drive()
         self.assert_drive('ACTIVE', 0.0)
@@ -917,6 +1219,7 @@ class PlanningNodeTest(unittest.TestCase):
     def test_constructor_shares_map_and_creates_configured_path_publisher(self):
         # Mock ROS node infrastructure only; exercise the actual constructor.
         overrides = {
+            'obstacle_avoidance_mode': 'legacy_offset',
             'mgeo_dir': '/synthetic/map',
             'goal_node_id': 'custom_goal',
             'global_path_topic': '/custom/global_path',
@@ -1196,11 +1499,11 @@ class PlanningNodeTest(unittest.TestCase):
         self.node.lattice_planner.plan.return_value = None
 
     def test_speed_mode_hysteresis_is_carried_between_planning_cycles(self):
-        self.node.speed_planner = Mock(wraps=SpeedPlanner(
-            cruise_speed_kmh=10.0, curve_speed_kmh=5.0, sharp_curve_speed_kmh=3.5,
-        ))
+        self.node.speed_planner = speed_spy(
+            cruise_speed_kmh=10.0, curve_speed_kmh=5.0, sharp_curve_speed_kmh=3.5)
         self.parameters['enable_drive'] = True
-        self.parameters['max_drive_speed_kmh'] = 10.0
+        self.parameters.update(max_drive_speed_kmh=10.0, cruise_speed_kmh=10.0,
+                               curve_speed_kmh=5.0, sharp_curve_speed_kmh=3.5)
         for curvature, mode, speed in (
                 (0.0395, 'CRUISE', 10.0), (0.0405, 'CURVE', 5.0),
                 (0.0395, 'CURVE', 5.0), (0.0405, 'CURVE', 5.0),

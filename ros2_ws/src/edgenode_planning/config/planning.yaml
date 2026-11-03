@@ -64,12 +64,37 @@ planning_node:
     # Default release thresholds: CURVE 0.035, SHARP_CURVE 0.095.
     speed_curvature_hysteresis: 0.005
 
+    # lidar_obstacle_node preserves ordered eight-point groups in PoseArray.
+    obstacle_points_per_cluster: 8
+    obstacle_avoidance_mode: adjacent_lane
+    # Minimum duration policy at the greater of measured/requested avoidance
+    # speed; geometric/corridor gates remain authoritative. Not a dynamics spec.
+    lane_change_min_duration_sec: 3.0
+
     # S4 MORAI test baseline; 0.95 m is a provisional half-width, not a spec.
     ego_half_width_m: 0.95
     obstacle_safety_margin_m: 0.25
     # Compatibility floor: required=max(this, half_width+safety_margin)=1.20 m.
     lattice_clearance_m: 0.55
+    # Legacy mode compatibility only; adjacent_lane uses actual MGeo centers.
     lattice_candidate_offsets_m: [0.0, 0.6, -0.6, 0.8, -0.8, 1.2, -1.2, 1.5, -1.5, 1.8, -1.8, 2.1, -2.1, 2.4, -2.4]
-    # Return length: offline 2.4m-offset peak curvature 0.343 -> 0.132 1/m.
+    # Preferred RECOVERING length; adaptive generation extends it if required.
     # 10m stays below the existing 0.70-steer geometric limit on straight baseline.
     lattice_transition_after_m: 10.0
+    # Preferred minimum only. Geometry may require more; front deadline is strict.
+    lattice_transition_before_m: 5.0
+
+    # S4 final-command limit, only while FSM=OBSTACLE_AVOID (includes recovery).
+    # General cruise/max_drive_speed above remain unchanged.
+    obstacle_avoid_speed_cap_kmh: 3.0
+    # Standalone defaults; autonomy.launch.py overrides the geometry from the
+    # exact control.yaml used for Control. Restart both after geometry changes.
+    lattice_wheelbase_m: 2.84
+    lattice_max_wheel_angle_rad: 0.610865
+    lattice_max_front_steer_normalized: 0.70
+    # 1.0 uses the actual command-limit geometry; never allow a factor > 1.
+    lattice_curvature_safety_factor: 1.0
+    # Reference-point clearance only; this is NOT an Ego rear overhang.
+    lattice_obstacle_rear_margin_m: 0.5
+    # Three consecutive safe Planning cycles; one safe frame cannot release.
+    lattice_blocked_release_cycles: 3

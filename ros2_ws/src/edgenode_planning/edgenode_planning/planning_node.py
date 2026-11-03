@@ -6,7 +6,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import PoseArray, PoseStamped
 from nav_msgs.msg import Odometry, Path
 from rcl_interfaces.msg import ParameterDescriptor
-from std_msgs.msg import Float32, Float64, Int32, String
+from std_msgs.msg import Bool, Float32, Float64, Int32, String
 
 from edgenode_planning.dijkstra_planner import DijkstraPlanner
 from edgenode_planning.local_path_planner import LocalPathPlanner
@@ -25,6 +25,8 @@ def _finite_number(value):
 
 
 from .planning_fsm import PlanningFSM
+from .adjacent_lane_planner import AdjacentLanePlanner
+from .lane_geometry import LaneNetwork
 from .lattice_planner import DEFAULT_CANDIDATE_OFFSETS_M, LatticePlanner
 
 
@@ -106,6 +108,11 @@ class PlanningNode(Node):
                 ('drive_duration_sec', 15.0),
                 ('drive_status_topic', '/planning/drive_status'),
                 ('obstacle_topic', '/planning/obstacles'),
+                # Perception publishes ordered eight-point footprints; legacy
+                # center publishers can retain the default ungrouped contract.
+                ('obstacle_points_per_cluster', 1, ParameterDescriptor(read_only=True)),
+                ('obstacle_avoidance_mode', 'adjacent_lane', ParameterDescriptor(read_only=True)),
+                ('lane_change_min_duration_sec', 3.0, ParameterDescriptor(read_only=True)),
                 ('lattice_status_topic', '/planning/lattice_status'),
                 ('lattice_offset_topic', '/planning/lattice_offset'),
                 ('lattice_clearance_topic', '/planning/lattice_clearance'),
@@ -115,6 +122,16 @@ class PlanningNode(Node):
                 ('obstacle_safety_margin_m', 0.25),
                 ('lattice_candidate_offsets_m', list(DEFAULT_CANDIDATE_OFFSETS_M)),
                 ('lattice_transition_after_m', 10.0),
+                ('lattice_transition_before_m', 5.0, ParameterDescriptor(read_only=True)),
+                ('obstacle_avoid_speed_cap_kmh', 3.0),
+                # Static planner geometry: the bringup launch takes these from
+                # the same control.yaml used to start Control.
+                ('lattice_wheelbase_m', 2.84, ParameterDescriptor(read_only=True)),
+                ('lattice_max_wheel_angle_rad', 0.610865, ParameterDescriptor(read_only=True)),
+                ('lattice_max_front_steer_normalized', 0.70, ParameterDescriptor(read_only=True)),
+                ('lattice_curvature_safety_factor', 1.0, ParameterDescriptor(read_only=True)),
+                ('lattice_obstacle_rear_margin_m', 0.5, ParameterDescriptor(read_only=True)),
+                ('lattice_blocked_release_cycles', 3, ParameterDescriptor(read_only=True)),
                 ('fsm_state_topic', '/planning/fsm_state'),
                 ('curve_speed_kmh', 0.7),
                 ('sharp_curve_speed_kmh', 0.5),
@@ -186,7 +203,34 @@ class PlanningNode(Node):
             obstacle_safety_margin_m=self.get_parameter('obstacle_safety_margin_m').value,
             candidate_offsets_m=self.get_parameter('lattice_candidate_offsets_m').value,
             transition_after_m=self.get_parameter('lattice_transition_after_m').value,
+            transition_before_m=self.get_parameter('lattice_transition_before_m').value,
+            wheelbase_m=self.get_parameter('lattice_wheelbase_m').value,
+            max_wheel_angle_rad=self.get_parameter('lattice_max_wheel_angle_rad').value,
+            max_front_steer_normalized=self.get_parameter(
+                'lattice_max_front_steer_normalized').value,
+            curvature_safety_factor=self.get_parameter('lattice_curvature_safety_factor').value,
+            obstacle_rear_margin_m=self.get_parameter('lattice_obstacle_rear_margin_m').value,
+            blocked_release_cycles=self.get_parameter('lattice_blocked_release_cycles').value,
         )
+        mode = self.get_parameter('obstacle_avoidance_mode').value
+        if mode not in ('legacy_offset', 'adjacent_lane'):
+            raise ValueError('obstacle_avoidance_mode must be legacy_offset or adjacent_lane')
+        if mode == 'adjacent_lane':
+            legacy = self.lattice_planner
+            self.lattice_planner = AdjacentLanePlanner(
+                LaneNetwork(self.dijkstra_planner),
+                min_transition_time_sec=self.get_parameter('lane_change_min_duration_sec').value,
+                obstacle_clearance_m=legacy.required_clearance_m,
+                ego_half_width_m=legacy.ego_half_width_m,
+                obstacle_safety_margin_m=legacy.obstacle_safety_margin_m,
+                transition_before_m=legacy.transition_before_m,
+                transition_after_m=legacy.transition_after_m,
+                wheelbase_m=legacy.wheelbase_m,max_wheel_angle_rad=legacy.max_wheel_angle_rad,
+                max_front_steer_normalized=legacy.max_front_steer_normalized,
+                curvature_safety_factor=legacy.curvature_safety_factor,
+                obstacle_rear_margin_m=legacy.obstacle_rear_margin_m,
+                blocked_release_cycles=legacy.blocked_release_cycles)
+        self.latest_speed_kmh = 0.0
         self.latest_obstacles = []
 
         self.target_error_pub = self.create_publisher(
@@ -292,6 +336,34 @@ class PlanningNode(Node):
             self.get_parameter('lattice_clearance_topic').value,
             10,
         )
+        for diagnostic in ('obstacle_avoid_speed_cap_kmh', 'applied_speed_cap_kmh',
+                           'lattice_max_curvature', 'lattice_curvature_limit',
+                           'lattice_obstacle_front_s', 'lattice_obstacle_rear_s',
+                           'lattice_entry_length', 'lattice_full_offset_start_s',
+                           'lattice_recovery_length', 'runtime_cruise_speed',
+                           'runtime_curve_speed', 'runtime_sharp_curve_speed',
+                           'runtime_max_drive_speed', 'actual_lateral_offset',
+                           'last_approved_offset', 'evaluated_candidate_offset',
+                           'evaluated_candidate_clearance',
+                           'evaluated_candidate_profile_curvature',
+                           'evaluated_candidate_polyline_curvature'):
+            setattr(self, diagnostic + '_pub', self.create_publisher(
+                Float32, '/planning/' + diagnostic, 10))
+        self.lattice_blocked_reason_pub = self.create_publisher(
+            String, '/planning/lattice_blocked_reason', 10)
+        self.evaluated_candidate_reject_reason_pub = self.create_publisher(
+            String, '/planning/evaluated_candidate_reject_reason', 10)
+        for diagnostic in ('lane_change_obstacle_safe', 'lane_change_steering_feasible', 'lane_change_corridor_safe'):
+            setattr(self, diagnostic+'_pub', self.create_publisher(Bool, '/planning/'+diagnostic, 10))
+        self.lane_change_state_pub = self.create_publisher(String, '/planning/lane_change_state', 10)
+        self.lane_change_side_pub = self.create_publisher(String, '/planning/lane_change_side', 10)
+        self.selected_adjacent_link_pub = self.create_publisher(String, '/planning/selected_adjacent_link', 10)
+        self.adjacent_lane_separation_pub = self.create_publisher(Float32, '/planning/adjacent_lane_separation', 10)
+        for diagnostic in ('original_lane_center', 'adjacent_lane_center', 'lane_change_entry_path',
+                           'adjacent_lane_hold_path', 'lane_change_recovery_path', 'lane_change_recovery_gate'):
+            setattr(self, diagnostic + '_pub', self.create_publisher(Path, '/planning/' + diagnostic, 10))
+        self.latest_obstacle_groups = None
+        self._obstacle_points_per_cluster = self.get_parameter('obstacle_points_per_cluster').value
         self.obstacle_sub = self.create_subscription(
             PoseArray,
             self.get_parameter('obstacle_topic').value,
@@ -328,6 +400,13 @@ class PlanningNode(Node):
                 obstacles.append((float(x), float(y)))
 
         self.latest_obstacles = obstacles
+        size = getattr(self, '_obstacle_points_per_cluster', 1)
+        # Never discard malformed or legacy samples. Grouping is metadata only;
+        # all finite input points remain in the collision set.
+        self.latest_obstacle_groups = (
+            [obstacles[i:i + size] for i in range(0, len(obstacles), size)]
+            if size == 8 and len(obstacles) == len(msg.poses) and len(obstacles) % size == 0
+            else None)
 
     def localization_callback(self, msg):
         """Store the latest pose; map matching runs only in the planning timer."""
@@ -338,6 +417,8 @@ class PlanningNode(Node):
             1.0 - 2.0 * (q.y * q.y + q.z * q.z),
         )
         self.latest_pose = (position.x, position.y, yaw)
+        speed = msg.twist.twist.linear.x
+        self.latest_speed_kmh = abs(float(speed))*3.6 if _finite_number(speed) else math.nan
 
     def plan(self):
         """Publish routes, recommendations and guarded, time-limited commands.
@@ -346,6 +427,11 @@ class PlanningNode(Node):
         every tick. Match loss retains progress/cache but publishes no Path.
         An active route configuration change invalidates both immediately.
         """
+        # Read on every cycle, before the recommendation. ROS parameter
+        # readback and the actual planner share the same runtime contract.
+        for name in ('cruise_speed_kmh', 'curve_speed_kmh', 'sharp_curve_speed_kmh'):
+            setattr(self.speed_planner, name, self.get_parameter(name).value)
+        lattice_result = None
         state_value = 'WAIT_FOR_LOCALIZATION'
         status_value = 'WAIT_FOR_LOCALIZATION'
         current_link = ''
@@ -361,6 +447,13 @@ class PlanningNode(Node):
         lattice_status = 'IDLE'
         lattice_offset = 0.0
         lattice_clearance = float('nan')
+        lattice_max_curvature = float('nan')
+        lattice_obstacle_front_s = float('nan')
+        lattice_obstacle_rear_s = float('nan')
+        lattice_blocked_reason = ''
+        lattice_entry_length = math.nan
+        lattice_full_offset_start_s = math.nan
+        lattice_recovery_length = math.nan
         lattice_blocked = False
         obstacle_avoid_requested = False
 
@@ -381,6 +474,7 @@ class PlanningNode(Node):
             self._progress_index = None
             self._progress_arc_m = None
             self._previous_speed_mode = None
+            self.lattice_planner.reset()
 
         now_ns = self.get_clock().now().nanoseconds
         enable_drive = self.get_parameter('enable_drive').value is True
@@ -460,16 +554,36 @@ class PlanningNode(Node):
                         self._progress_arc_m = local_result['progress_arc_m']
                         active_local_points = local_result['points']
 
+                        lane_options = {}
+                        if isinstance(self.lattice_planner, AdjacentLanePlanner):
+                            recommendation_bound = max(self.get_parameter(name).value for name in (
+                                'cruise_speed_kmh', 'curve_speed_kmh', 'sharp_curve_speed_kmh'))
+                            configured_speed = min(recommendation_bound,
+                                self.get_parameter('max_drive_speed_kmh').value,
+                                self.get_parameter('obstacle_avoid_speed_cap_kmh').value)
+                            planned_speed = max(getattr(self, 'latest_speed_kmh', 0.0), configured_speed)
+                            lane_options = dict(current_link_id=current_link,
+                                route_link_ids=self._route_result['link_ids'], speed_kmh=planned_speed)
                         lattice_result = self.lattice_planner.plan(
                             active_local_points,
                             self.latest_obstacles,
                             current_position=(x, y),
+                            current_heading=yaw,
+                            obstacle_groups=getattr(self, 'latest_obstacle_groups', None),
+                            road_progress_m=self._progress_arc_m, **lane_options,
                         )
 
                         if lattice_result is not None:
                             lattice_status = lattice_result['status']
                             lattice_offset = lattice_result['selected_offset_m']
                             lattice_clearance = lattice_result['minimum_clearance_m']
+                            lattice_max_curvature = lattice_result['maximum_curvature']
+                            lattice_obstacle_front_s = lattice_result['obstacle_front_s']
+                            lattice_obstacle_rear_s = lattice_result['obstacle_rear_s']
+                            lattice_blocked_reason = lattice_result['blocked_reason']
+                            lattice_entry_length = lattice_result['entry_length']
+                            lattice_full_offset_start_s = lattice_result['full_offset_start_s']
+                            lattice_recovery_length = lattice_result['recovery_length']
                             lattice_blocked = lattice_result['blocked']
                             obstacle_avoid_requested = lattice_result[
                                 'obstacle_avoid_requested'
@@ -477,6 +591,16 @@ class PlanningNode(Node):
 
                             if not lattice_blocked:
                                 active_local_points = lattice_result['points']
+                            elif isinstance(self.lattice_planner, AdjacentLanePlanner):
+                                # No approved local path exists. Publish an empty
+                                # path rather than an unapproved road-center fallback.
+                                active_local_points = []
+                        elif self.latest_obstacles or isinstance(self.lattice_planner, AdjacentLanePlanner):
+                            lattice_status = 'BLOCKED'
+                            lattice_blocked = True
+                            lattice_blocked_reason = 'INVALID_AVOIDANCE_REFERENCE'
+                            if isinstance(self.lattice_planner, AdjacentLanePlanner):
+                                active_local_points = []
 
                         local_path = Path()
                         local_path.header = path.header
@@ -504,7 +628,10 @@ class PlanningNode(Node):
                             speed_curvature = speed_result['representative_curvature']
                             speed_max_curvature = speed_result['max_curvature']
 
-        # Hysteresis belongs to speed classification only. Invalid planning
+        if local_result is None:
+            self.lattice_planner.break_release_confirmation()
+
+        # Speed classification keeps its own hysteresis. Invalid planning
         # input or a route change must not carry a stale mode into recovery.
         self._previous_speed_mode = speed_mode if speed_valid else None
 
@@ -540,6 +667,11 @@ class PlanningNode(Node):
                 else:
                     drive_status = 'NOT_READY'
 
+        avoid_cap = self.get_parameter('obstacle_avoid_speed_cap_kmh').value
+        avoid_cap_valid = _finite_number(avoid_cap) and avoid_cap > 0
+        if obstacle_avoid_requested and not avoid_cap_valid:
+            drive_status = 'INVALID_CONFIG'
+
         previous_fsm_state = self.fsm.state
 
         fsm_state_value = self.fsm.update(
@@ -563,13 +695,17 @@ class PlanningNode(Node):
                 f'FSM transition: {previous_fsm_state} -> {fsm_state_value}'
             )
 
-        # High-level FSM is the final motion gate.
-        # Speed Planning may recommend a speed, but motion is permitted
-        # only while the FSM is explicitly in DRIVING.
+        # The S4 cap is applied at the final command, after speed classification
+        # and FSM arbitration. NORMAL_DRIVE keeps its existing cruise/cap.
+        max_speed = self.get_parameter('max_drive_speed_kmh').value
+        applied_cap = float(max_speed) if _finite_number(max_speed) and max_speed > 0 else 0.0
+        if fsm_state_value == PlanningFSM.OBSTACLE_AVOID:
+            applied_cap = min(applied_cap, float(avoid_cap)) if avoid_cap_valid else 0.0
         if self.fsm.motion_allowed:
-            target_speed.data = requested_target_speed
+            target_speed.data = min(requested_target_speed, applied_cap)
         else:
             target_speed.data = 0.0
+            applied_cap = 0.0
 
         state = String()
         state.data = state_value
@@ -589,6 +725,23 @@ class PlanningNode(Node):
         self.map_match_distance_pub.publish(Float32(data=distance))
         self.map_match_heading_diff_pub.publish(Float32(data=heading_diff))
         self.recommended_speed_pub.publish(Float32(data=recommended_speed))
+        for diagnostic, parameter in (
+                ('runtime_cruise_speed', 'cruise_speed_kmh'),
+                ('runtime_curve_speed', 'curve_speed_kmh'),
+                ('runtime_sharp_curve_speed', 'sharp_curve_speed_kmh')):
+            getattr(self, diagnostic + '_pub').publish(Float32(
+                data=float(getattr(self.speed_planner, parameter))))
+        self.runtime_max_drive_speed_pub.publish(Float32(
+            data=float(max_speed) if _finite_number(max_speed) else math.nan))
+        for diagnostic in ('actual_lateral_offset', 'last_approved_offset',
+                           'evaluated_candidate_offset', 'evaluated_candidate_clearance',
+                           'evaluated_candidate_profile_curvature',
+                           'evaluated_candidate_polyline_curvature'):
+            getattr(self, diagnostic + '_pub').publish(Float32(
+                data=lattice_result[diagnostic] if lattice_result else math.nan))
+        self.evaluated_candidate_reject_reason_pub.publish(String(
+            data=lattice_result['evaluated_candidate_reject_reason']
+            if lattice_result else 'NOT_EVALUATED'))
         self.speed_mode_pub.publish(String(data=speed_mode))
         self.speed_curvature_pub.publish(Float32(data=speed_curvature))
         self.speed_max_curvature_pub.publish(Float32(data=speed_max_curvature))
@@ -596,6 +749,52 @@ class PlanningNode(Node):
         self.lattice_status_pub.publish(String(data=lattice_status))
         self.lattice_offset_pub.publish(Float32(data=lattice_offset))
         self.lattice_clearance_pub.publish(Float32(data=lattice_clearance))
+        self.obstacle_avoid_speed_cap_kmh_pub.publish(Float32(
+            data=float(avoid_cap) if avoid_cap_valid else 0.0))
+        self.applied_speed_cap_kmh_pub.publish(Float32(data=applied_cap))
+        self.lattice_max_curvature_pub.publish(Float32(data=lattice_max_curvature))
+        self.lattice_curvature_limit_pub.publish(Float32(
+            data=self.lattice_planner.usable_curvature_limit))
+        self.lattice_obstacle_front_s_pub.publish(Float32(data=lattice_obstacle_front_s))
+        self.lattice_obstacle_rear_s_pub.publish(Float32(data=lattice_obstacle_rear_s))
+        self.lattice_blocked_reason_pub.publish(String(data=lattice_blocked_reason))
+        self.lattice_entry_length_pub.publish(Float32(data=lattice_entry_length))
+        self.lattice_full_offset_start_s_pub.publish(Float32(data=lattice_full_offset_start_s))
+        self.lattice_recovery_length_pub.publish(Float32(data=lattice_recovery_length))
+        if hasattr(self, 'lane_change_state_pub'):
+            diagnostic = lattice_result or {}
+            phase = ('BLOCKED' if lattice_blocked else diagnostic.get('lane_change_phase',
+                     'LEGACY_OFFSET' if obstacle_avoid_requested else 'CLEAR'))
+            self.lane_change_state_pub.publish(String(data=phase))
+            self.lane_change_obstacle_safe_pub.publish(Bool(data=bool(
+                diagnostic.get('evaluated_candidate_clearance', math.nan)>=self.lattice_planner.required_clearance_m)))
+            self.lane_change_steering_feasible_pub.publish(Bool(data=bool(
+                diagnostic.get('maximum_curvature', math.inf)<=self.lattice_planner.usable_curvature_limit)))
+            self.lane_change_corridor_safe_pub.publish(Bool(data=bool(diagnostic.get('drivable_safe', False))))
+            self.lane_change_side_pub.publish(String(data=diagnostic.get('selected_side', '')))
+            self.selected_adjacent_link_pub.publish(String(data=diagnostic.get('adjacent_link_id', '')))
+            self.adjacent_lane_separation_pub.publish(Float32(data=diagnostic.get('adjacent_separation', math.nan)))
+            for topic, field in (
+                    ('original_lane_center', 'original_lane_points'),
+                    ('adjacent_lane_center', 'adjacent_lane_points'),
+                    ('lane_change_entry_path', 'entry_points'),
+                    ('adjacent_lane_hold_path', 'hold_points'),
+                    ('lane_change_recovery_path', 'recovery_points'),
+                    ('lane_change_recovery_gate', 'recovery_gate_points')):
+                msg = Path()
+                msg.header.frame_id = self.get_parameter('global_path_frame_id').value
+                msg.header.stamp = self.get_clock().now().to_msg()
+                points = diagnostic.get(field, [])
+                if field == 'original_lane_points' and not points and local_result is not None:
+                    points = local_result['points']
+                for point in points:
+                    pose = PoseStamped()
+                    pose.header = msg.header
+                    pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = map(float, point)
+                    pose.pose.orientation.w = 1.0
+                    msg.poses.append(pose)
+                getattr(self, topic + '_pub').publish(msg)
+
 
 
 def main(args=None):

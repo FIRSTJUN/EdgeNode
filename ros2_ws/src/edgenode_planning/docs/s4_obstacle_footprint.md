@@ -1,5 +1,10 @@
 # S4 footprint collision baseline
 
+This records the historical pre-feasibility baseline at `81a2add`. For the
+current steering gate, direction continuity, actual-rear recovery and S4 cap,
+see [S4 safe avoidance](s4_safe_avoidance.md). The legacy approach/return and
+immediate recovery descriptions below are superseded by that change.
+
 The first MORAI run detected the NPC but collided after selecting a path that was
 clear of a single cluster centroid. Centroid separation is not vehicle clearance.
 This revision keeps `/planning/obstacles` as `geometry_msgs/msg/PoseArray` and

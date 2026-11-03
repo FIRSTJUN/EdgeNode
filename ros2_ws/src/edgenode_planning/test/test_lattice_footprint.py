@@ -105,11 +105,14 @@ def test_all_blocked_retains_existing_result_contract():
 def test_obstacle_removed_recovers_then_clears():
     planner = LatticePlanner()
     assert planner.plan(straight_path(), footprint())['status'] == 'AVOIDING'
-    result = planner.plan(straight_path(), [], current_position=(0, -1.8))
+    # Missing detections alone cannot prove passage. Move Ego/reference beyond
+    # the previously observed far end before allowing recovery.
+    ahead = [[p[0] + 18.0, p[1], p[2]] for p in straight_path()]
+    result = planner.plan(ahead, [], current_position=(18.0, -1.8))
     assert result['status'] == 'RECOVERING'
     assert result['points'][0][1] == pytest.approx(-1.8)
     assert result['points'][-1][1] == 0.0
-    assert planner.plan(straight_path(), [], current_position=(0, 0))['status'] == 'CLEAR'
+    assert planner.plan(ahead, [], current_position=(18.0, 0))['status'] == 'CLEAR'
 
 
 def test_obstacle_between_sparse_path_points_is_not_missed():
@@ -146,8 +149,8 @@ def test_wide_offset_default_return_curve_respects_existing_steering_geometry():
     ref = [[float(x), 0.0, 0.0] for x in np.arange(0.0, 32.001, 0.02)]
     arc = planner._arc_lengths(ref)
     normals = planner._normals(ref)
-    xy = np.array(planner._generate_avoidance_candidate(
-        ref, arc, normals, 15.283, 0.0, 2.4))[:, :2]
+    xy = np.array(planner._generate_recovery_candidate(
+        ref, arc, normals, 2.4))[:, :2]
     s = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(xy, axis=0), axis=1))]
     dx, dy = np.gradient(xy[:, 0], s), np.gradient(xy[:, 1], s)
     k = np.abs(dx * np.gradient(dy, s) - dy * np.gradient(dx, s))
