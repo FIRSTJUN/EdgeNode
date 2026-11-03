@@ -40,5 +40,8 @@ def generate_launch_description():
                  {'mgeo_dir': ParameterValue(LaunchConfiguration('mgeo_dir'), value_type=str),
                   'start_link_id': ParameterValue(LaunchConfiguration('start_link_id'), value_type=str)},
              ]),
+        Node(package='edgenode_planning', executable='planning_visualization_node',
+             name='planning_visualization_node', output='screen', parameters=[
+                 {'mgeo_dir': ParameterValue(LaunchConfiguration('mgeo_dir'), value_type=str)}]),
         OpaqueFunction(function=start_rviz),
     ])

@@ -27,6 +27,7 @@ setup(
         'console_scripts': [
             'planning_node = edgenode_planning.planning_node:main',
             'route_editor_node = edgenode_planning.route_editor_node:main',
+            'planning_visualization_node = edgenode_planning.planning_visualization_node:main',
         ],
     },
 )

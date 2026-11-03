@@ -3,6 +3,8 @@ from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 import os
 
+import yaml
+
 
 def generate_launch_description():
     localization_cfg = os.path.join(
@@ -22,6 +24,14 @@ def generate_launch_description():
         'config',
         'control.yaml',
     )
+
+    # One startup source for planner feasibility and the unchanged Control.
+    with open(control_cfg, encoding='utf-8') as stream:
+        control_geometry = yaml.safe_load(stream)['control_node']['ros__parameters']
+    lattice_geometry = {
+        'lattice_' + name: control_geometry[name]
+        for name in ('wheelbase_m', 'max_wheel_angle_rad', 'max_front_steer_normalized')
+    }
 
     return LaunchDescription([
         Node(
@@ -43,7 +53,7 @@ def generate_launch_description():
             executable='planning_node',
             name='planning_node',
             output='screen',
-            parameters=[planning_cfg],
+            parameters=[planning_cfg, lattice_geometry],
         ),
 
         Node(

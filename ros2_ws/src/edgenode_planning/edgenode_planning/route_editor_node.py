@@ -177,7 +177,7 @@ class RouteEditorNode(Node):
         links.markers.append(clear)
         for index, link_id in enumerate(sorted(self.editor.valid_link_ids)):
             marker = self._marker('mgeo_links', index, Marker.LINE_STRIP,
-                                  (0.6, 0.7, 0.8, 1.0), (0.35, 0.0, 0.0))
+                                  (0.65, 0.72, 0.80, 0.90), (0.14, 0.0, 0.0))
             marker.points = [self._point(p) for p in self.editor.planner.links_by_id[link_id]['points']]
             links.markers.append(marker)
         self.map_pub.publish(links)
@@ -185,7 +185,7 @@ class RouteEditorNode(Node):
         nodes.markers.append(clear)
         if self._value('show_mgeo_nodes'):
             marker = self._marker('mgeo_nodes', 0, Marker.SPHERE_LIST,
-                                  (0.2, 0.65, 1.0, 0.9), (1.0, 1.0, 1.0))
+                                  (0.40, 0.80, 1.0, 1.0), (0.45, 0.45, 0.45))
             marker.points = [self._point(p, 0.3) for p in self.editor.node_points.values()]
             nodes.markers.append(marker)
         self.nodes_pub.publish(nodes)
