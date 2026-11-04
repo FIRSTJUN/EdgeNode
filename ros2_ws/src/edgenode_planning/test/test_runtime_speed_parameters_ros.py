@@ -1,21 +1,26 @@
 """Real ROS parameter storage with manual Planning cycles; all topics isolated."""
 
 import math
+import json
+from pathlib import Path
 import uuid
 from unittest.mock import Mock, patch
 
 import rclpy
 from rclpy.parameter import Parameter
+from std_srvs.srv import Trigger
 
 from edgenode_planning.planning_node import PlanningNode
+from edgenode_planning.corridor_scene import json_value, replay_scene
 
 
-def test_accepted_ros_parameter_change_reaches_actual_sharp_speed_next_cycle(route_editor_map):
+def test_accepted_ros_parameter_change_reaches_actual_sharp_speed_next_cycle(route_editor_map, tmp_path):
     prefix = '/runtime_speed_test_' + uuid.uuid4().hex[:8]
     args = ['--ros-args', '-r', '__ns:=' + prefix,
             '-p', f'mgeo_dir:={route_editor_map}', '-p', 'goal_node_id:=D',
             '-p', 'cruise_speed_kmh:=3.5', '-p', 'curve_speed_kmh:=3.5',
-            '-p', 'sharp_curve_speed_kmh:=3.5']
+            '-p', 'sharp_curve_speed_kmh:=3.5',
+            '-p', f'lane_change_corridor_dump_dir:={tmp_path}']
     # Absolute project topics must be remapped explicitly; no live input/output.
     topics = ('target_error', 'target_speed', 'state', 'current_link', 'map_match_status',
               'map_match_distance', 'map_match_heading_diff', 'global_path', 'local_path',
@@ -33,7 +38,10 @@ def test_accepted_ros_parameter_change_reaches_actual_sharp_speed_next_cycle(rou
               'selected_adjacent_link', 'adjacent_lane_separation', 'original_lane_center',
               'adjacent_lane_center', 'lane_change_entry_path', 'adjacent_lane_hold_path',
               'lane_change_recovery_path', 'lane_change_recovery_gate', 'lane_change_obstacle_safe',
-              'lane_change_steering_feasible', 'lane_change_corridor_safe')
+              'lane_change_steering_feasible', 'lane_change_corridor_safe',
+              'lane_change_corridor_violation_m', 'lane_change_corridor_failed_index',
+              'lane_change_corridor_failed_point_count', 'lane_change_corridor_debug',
+              'dump_lane_change_corridor_scene', 'lane_change_maneuver_debug')
     for topic in topics:
         args.extend(['-r', f'/planning/{topic}:={prefix}/{topic}'])
     args.extend(['-r', f'/localization/odometry:={prefix}/odometry'])
@@ -60,6 +68,16 @@ def test_accepted_ros_parameter_change_reaches_actual_sharp_speed_next_cycle(rou
         assert node.speed_planner.sharp_curve_speed_kmh == 20.
         assert node.speed_planner.plan(points)['target_speed_kmh'] == 20.
         assert node.get_parameter('enable_drive').value is False
+        client = node.create_client(Trigger, prefix+'/dump_lane_change_corridor_scene')
+        assert client.wait_for_service(timeout_sec=3.)
+        future = client.call_async(Trigger.Request())
+        rclpy.spin_until_future_complete(node, future, timeout_sec=5.)
+        assert future.done()
+        response = future.result()
+        assert response.success, response.message
+        scene = json.loads(Path(response.message).read_text())
+        assert scene['inputs']['current_position'] == [0., 0.]
+        assert json_value(replay_scene(scene)) == scene['result']
     finally:
         if node is not None:
             node.destroy_node()

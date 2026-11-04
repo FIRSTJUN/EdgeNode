@@ -1,3 +1,4 @@
+import json
 import math
 
 import rclpy
@@ -7,6 +8,7 @@ from geometry_msgs.msg import PoseArray, PoseStamped
 from nav_msgs.msg import Odometry, Path
 from rcl_interfaces.msg import ParameterDescriptor
 from std_msgs.msg import Bool, Float32, Float64, Int32, String
+from std_srvs.srv import Trigger
 
 from edgenode_planning.dijkstra_planner import DijkstraPlanner
 from edgenode_planning.local_path_planner import LocalPathPlanner
@@ -27,6 +29,8 @@ def _finite_number(value):
 from .planning_fsm import PlanningFSM
 from .adjacent_lane_planner import AdjacentLanePlanner
 from .lane_geometry import LaneNetwork
+from .maneuver_diagnostics import inspect_maneuver
+from .corridor_scene import capture_scene, json_value, planner_snapshot, write_scene
 from .lattice_planner import DEFAULT_CANDIDATE_OFFSETS_M, LatticePlanner
 
 
@@ -113,6 +117,8 @@ class PlanningNode(Node):
                 ('obstacle_points_per_cluster', 1, ParameterDescriptor(read_only=True)),
                 ('obstacle_avoidance_mode', 'adjacent_lane', ParameterDescriptor(read_only=True)),
                 ('lane_change_min_duration_sec', 3.0, ParameterDescriptor(read_only=True)),
+                ('lane_change_corridor_dump_dir', '/workspace/logs/kcity_s4_corridor_diagnostics',
+                 ParameterDescriptor(read_only=True)),
                 ('lattice_status_topic', '/planning/lattice_status'),
                 ('lattice_offset_topic', '/planning/lattice_offset'),
                 ('lattice_clearance_topic', '/planning/lattice_clearance'),
@@ -359,6 +365,17 @@ class PlanningNode(Node):
         self.lane_change_side_pub = self.create_publisher(String, '/planning/lane_change_side', 10)
         self.selected_adjacent_link_pub = self.create_publisher(String, '/planning/selected_adjacent_link', 10)
         self.adjacent_lane_separation_pub = self.create_publisher(Float32, '/planning/adjacent_lane_separation', 10)
+        self.lane_change_corridor_violation_m_pub = self.create_publisher(
+            Float32, '/planning/lane_change_corridor_violation_m', 10)
+        for diagnostic in ('lane_change_corridor_failed_index', 'lane_change_corridor_failed_point_count'):
+            setattr(self, diagnostic+'_pub', self.create_publisher(Int32, '/planning/'+diagnostic, 10))
+        self.lane_change_corridor_debug_pub = self.create_publisher(
+            String, '/planning/lane_change_corridor_debug', 10)
+        self.lane_change_maneuver_debug_pub = self.create_publisher(
+            String, '/planning/lane_change_maneuver_debug', 10)
+        self._corridor_scene = None
+        self.corridor_dump_service = self.create_service(
+            Trigger, '/planning/dump_lane_change_corridor_scene', self.dump_lane_change_corridor_scene)
         for diagnostic in ('original_lane_center', 'adjacent_lane_center', 'lane_change_entry_path',
                            'adjacent_lane_hold_path', 'lane_change_recovery_path', 'lane_change_recovery_gate'):
             setattr(self, diagnostic + '_pub', self.create_publisher(Path, '/planning/' + diagnostic, 10))
@@ -387,6 +404,17 @@ class PlanningNode(Node):
             f'Planning node ready - loaded {len(self.map_matcher.links)} MGeo links; '
             'waiting for localization (drive disabled by default)'
         )
+
+    def dump_lane_change_corridor_scene(self, request, response):
+        """Write one current input snapshot on explicit request; no control action."""
+        try:
+            response.message = write_scene(self._corridor_scene,
+                self.get_parameter('lane_change_corridor_dump_dir').value)
+            response.success = True
+        except (OSError, ValueError, TypeError) as error:
+            response.success = False
+            response.message = str(error)
+        return response
 
     def obstacle_callback(self, msg):
         """Store world-frame obstacle XY positions for Lattice planning."""
@@ -417,6 +445,8 @@ class PlanningNode(Node):
             1.0 - 2.0 * (q.y * q.y + q.z * q.z),
         )
         self.latest_pose = (position.x, position.y, yaw)
+        self.latest_pose_stamp_ns = msg.header.stamp.sec*10**9+msg.header.stamp.nanosec
+        self.latest_pose_receipt_ns = self.get_clock().now().nanoseconds
         speed = msg.twist.twist.linear.x
         self.latest_speed_kmh = abs(float(speed))*3.6 if _finite_number(speed) else math.nan
 
@@ -427,11 +457,17 @@ class PlanningNode(Node):
         every tick. Match loss retains progress/cache but publishes no Path.
         An active route configuration change invalidates both immediately.
         """
+        # A missing/invalid current cycle must not dump an older scene.
+        self._corridor_scene = None
         # Read on every cycle, before the recommendation. ROS parameter
         # readback and the actual planner share the same runtime contract.
         for name in ('cruise_speed_kmh', 'curve_speed_kmh', 'sharp_curve_speed_kmh'):
             setattr(self.speed_planner, name, self.get_parameter(name).value)
         lattice_result = None
+        corridor_before = None
+        input_odometry_stamp_ns = getattr(self, 'latest_pose_stamp_ns', None)
+        input_receipt_stamp_ns = getattr(self, 'latest_pose_receipt_ns', None)
+        planning_start_stamp_ns = self.get_clock().now().nanoseconds
         state_value = 'WAIT_FOR_LOCALIZATION'
         status_value = 'WAIT_FOR_LOCALIZATION'
         current_link = ''
@@ -555,7 +591,9 @@ class PlanningNode(Node):
                         active_local_points = local_result['points']
 
                         lane_options = {}
+                        corridor_before = None
                         if isinstance(self.lattice_planner, AdjacentLanePlanner):
+                            corridor_before = planner_snapshot(self.lattice_planner)
                             recommendation_bound = max(self.get_parameter(name).value for name in (
                                 'cruise_speed_kmh', 'curve_speed_kmh', 'sharp_curve_speed_kmh'))
                             configured_speed = min(recommendation_bound,
@@ -572,6 +610,13 @@ class PlanningNode(Node):
                             obstacle_groups=getattr(self, 'latest_obstacle_groups', None),
                             road_progress_m=self._progress_arc_m, **lane_options,
                         )
+                        if corridor_before is not None:
+                            self._corridor_scene = capture_scene(self.lattice_planner, corridor_before,
+                                dict(reference_points=local_result['points'], obstacles=self.latest_obstacles,
+                                     current_position=[x, y], current_heading=yaw,
+                                     obstacle_groups=getattr(self, 'latest_obstacle_groups', None),
+                                     road_progress_m=self._progress_arc_m, **lane_options),
+                                lattice_result, now_ns, self.get_parameter('global_path_frame_id').value)
 
                         if lattice_result is not None:
                             lattice_status = lattice_result['status']
@@ -771,6 +816,25 @@ class PlanningNode(Node):
             self.lane_change_steering_feasible_pub.publish(Bool(data=bool(
                 diagnostic.get('maximum_curvature', math.inf)<=self.lattice_planner.usable_curvature_limit)))
             self.lane_change_corridor_safe_pub.publish(Bool(data=bool(diagnostic.get('drivable_safe', False))))
+            corridor = diagnostic.get('corridor_diagnostics') or dict(
+                evaluated=False, reason='NOT_EVALUATED', max_violation_m=None,
+                failed_index=-1, failed_point_count=0)
+            self.lane_change_corridor_violation_m_pub.publish(Float32(
+                data=corridor['max_violation_m'] if corridor['max_violation_m'] is not None else math.nan))
+            self.lane_change_corridor_failed_index_pub.publish(Int32(data=corridor['failed_index']))
+            self.lane_change_corridor_failed_point_count_pub.publish(Int32(data=corridor['failed_point_count']))
+            self.lane_change_corridor_debug_pub.publish(String(
+                data=json.dumps(json_value(corridor), allow_nan=False, ensure_ascii=False)))
+            if isinstance(self.lattice_planner, AdjacentLanePlanner) and hasattr(self, 'lane_change_maneuver_debug_pub'):
+                maneuver=inspect_maneuver(self.lattice_planner,corridor_before,lattice_result,
+                    input_odometry_stamp_ns=input_odometry_stamp_ns,input_receipt_stamp_ns=input_receipt_stamp_ns,
+                    planning_start_stamp_ns=planning_start_stamp_ns,output_stamp_ns=self.get_clock().now().nanoseconds,
+                    current_position=self.latest_pose[:2] if self.latest_pose is not None else None,
+                    current_heading=self.latest_pose[2] if self.latest_pose is not None else None)
+                self.lane_change_maneuver_debug_pub.publish(String(
+                    data=json.dumps(maneuver,allow_nan=False,ensure_ascii=False)))
+                if self._corridor_scene is not None:
+                    self._corridor_scene['maneuver_diagnostics']=maneuver
             self.lane_change_side_pub.publish(String(data=diagnostic.get('selected_side', '')))
             self.selected_adjacent_link_pub.publish(String(data=diagnostic.get('adjacent_link_id', '')))
             self.adjacent_lane_separation_pub.publish(Float32(data=diagnostic.get('adjacent_separation', math.nan)))

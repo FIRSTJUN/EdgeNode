@@ -246,24 +246,81 @@ class LanePair:
             return None
         return dict(original=original,adjacent=adjacent,adjacent_s=adjacent_s,separation=separation)
 
+    def corridor_envelope(self,start,end):
+        """Triangulate the exact two piecewise-linear centerline boundaries.
+
+        Interior normal cross-sections are not geometry anchors: at a map
+        corner their adjacent intersections may run backwards. Every real
+        vertex stays in the boundary; supplemental half-metre rows are wholly
+        redundant for piecewise-linear geometry and are not generated.
+        The two horizon caps still use the same normal intersections as at().
+        """
+        result=dict(quads=[],stations=[],normalization=[],failure=None)
+        if not all(math.isfinite(s) for s in (start,end)) or end<=start:
+            result['failure']=dict(reason='INVALID_STATION_RANGE',station_range_m=[start,end])
+            return result
+        first,last=self.at(start),self.at(end)
+        if first is None or last is None:
+            result['failure']=dict(reason='NORMAL_INTERSECTION_UNAVAILABLE',station_range_m=[start,end])
+            return result
+        low,high=first['adjacent_s'],last['adjacent_s']
+        if high<=low:
+            result['failure']=dict(reason='NONMONOTONIC_CROSS_SECTION',station_range_m=[start,end],
+                                   adjacent_station_range_m=[low,high])
+            return result
+        original=[(start,first['original'][0][:2])]+[(s,p[:2]) for s,p in
+            zip(self.original_arc,self.original) if start<s<end]+[(end,last['original'][0][:2])]
+        adjacent=[(start,first['adjacent'][0][:2])]+[(max(start,min(end,s)),p[:2]) for a,s,p in
+            zip(self.adjacent_arc,self.adjacent_stations,self.adjacent) if low<a<high]+[(end,last['adjacent'][0][:2])]
+        if any(b[0]<a[0]-1e-9 for a,b in zip(adjacent,adjacent[1:])):
+            result['failure']=dict(reason='NONMONOTONIC_BOUNDARY',station_range_m=[start,end])
+            return result
+        anchors={start,end}|{s for s in self.original_arc+self.adjacent_stations if start<s<end}
+        result['stations']=sorted(anchors)
+        result['normalization']=[dict(removed_grid_station_m=start+i*.5,
+            reason='EXACT_PIECEWISE_LINEAR_BOUNDARY') for i in range(1,math.ceil((end-start)/.5))
+            if start+i*.5<end and start+i*.5 not in anchors]
+        polygon=[p for s,p in original]+[p for s,p in reversed(adjacent)]
+        # Reject real boundary crossings, including crossing end caps. This is
+        # separate from the obsolete normal-row ordering test.
+        edges=list(zip(polygon,polygon[1:]+polygon[:1]))
+        for i,(a,b) in enumerate(edges):
+            for j in range(i+2,len(edges)):
+                if i==0 and j==len(edges)-1:
+                    continue
+                c,d=edges[j]
+                if (max(a[0],b[0])<min(c[0],d[0]) or max(c[0],d[0])<min(a[0],b[0]) or
+                        max(a[1],b[1])<min(c[1],d[1]) or max(c[1],d[1])<min(a[1],b[1])):
+                    continue
+                ab=(b[0]-a[0],b[1]-a[1]);cd=(d[0]-c[0],d[1]-c[1])
+                turns=(cross(ab,(c[0]-a[0],c[1]-a[1])),cross(ab,(d[0]-a[0],d[1]-a[1])),
+                       cross(cd,(a[0]-c[0],a[1]-c[1])),cross(cd,(b[0]-c[0],b[1]-c[1])))
+                if turns[0]*turns[1]<=0. and turns[2]*turns[3]<=0.:
+                    result['failure']=dict(reason='CROSSING_BOUNDARIES',boundary_edge_indices=[i,j],
+                                           station_range_m=[start,end])
+                    return result
+        # Zipper the two ordered vertex chains. Each diagonal must have the
+        # declared orientation; an invalid/nonmonotone strip fails closed.
+        sign=1. if self.side=='left' else -1.
+        cells=[];i=j=0
+        while i<len(original)-1 or j<len(adjacent)-1:
+            if j==len(adjacent)-1 or (i<len(original)-1 and original[i+1][0]<=adjacent[j+1][0]):
+                triangle=[original[i][1],original[i+1][1],adjacent[j][1]];i+=1
+            else:
+                triangle=[original[i][1],adjacent[j+1][1],adjacent[j][1]];j+=1
+            a,b,c=triangle
+            area=cross((b[0]-a[0],b[1]-a[1]),(c[0]-a[0],c[1]-a[1]))
+            if sign*area<0.:
+                result['failure']=dict(reason='NONMONOTONIC_BOUNDARY',quad_index=len(cells),
+                                       quad=triangle,station_range_m=[original[i][0],adjacent[j][0]])
+                return result
+            if area:
+                cells.append(triangle)
+        result['quads']=cells
+        return result
+
     def quads(self,start,end):
-        # Include exact map vertices in addition to the half-metre stations.
-        stations = {start,end}
-        stations.update(s for s in self.original_arc if start<s<end)
-        stations.update(s for s in self.adjacent_stations if start<s<end)
-        stations.update(start+i*.5 for i in range(1,math.ceil((end-start)/.5)) if start+i*.5<end)
-        rows=[self.at(s) for s in sorted(stations)]
-        if any(row is None for row in rows):
-            return []
-        quads=[]
-        for a,b in zip(rows,rows[1:]):
-            quad=[a['original'][0][:2],b['original'][0][:2],b['adjacent'][0][:2],a['adjacent'][0][:2]]
-            turns=[cross((q[0]-p[0],q[1]-p[1]),(r[0]-q[0],r[1]-q[1]))
-                   for p,q,r in zip(quad,quad[1:]+quad[:1],quad[2:]+quad[:2])]
-            if not (all(v>=-EPS for v in turns) or all(v<=EPS for v in turns)):
-                return []
-            quads.append(quad)
-        return quads
+        return self.corridor_envelope(start,end)['quads']
 
     def suffix(self, lane, start, end):
         geometry=self.adjacent if lane=='adjacent' else self.original

@@ -123,6 +123,170 @@ def test_adjacent_hold_is_exact_map_center_and_does_not_recover_before_rear_marg
     assert recovering['drivable_safe']
 
 
+@pytest.mark.parametrize('side,target', [('left',3.5),('right',-3.5)])
+@pytest.mark.parametrize('error,yaw_error', [(0.,0.),(.001,0.),(.03,.005)])
+def test_terminal_tracking_error_acquires_hold_without_chasing_correction_endpoint(side,target,error,yaw_error):
+    p=AdjacentLanePlanner(network((side,)))
+    current='L' if side=='left' else 'R'
+    plan(p,speed=3.)
+    completion=p._entry_completion_progress
+    sign=math.copysign(1.,target)
+    phases=[]
+    for cycle in range(8):
+        progress=completion-.2+cycle*(3./3.6/20.)
+        result=plan(p,progress,target-sign*error,-sign*yaw_error,current=current,speed=3.)
+        assert result['status']=='AVOIDING'
+        assert result['drivable_safe']
+        assert result['minimum_clearance_m']>=p.required_clearance_m
+        assert result['maximum_curvature']<=p.usable_curvature_limit
+        assert p._entry_completion_progress==completion
+        phases.append(result['lane_change_phase'])
+        if error:
+            # The current correction still rebases; its endpoint is not the
+            # fixed maneuver completion criterion. No exact-center shortcut.
+            assert result['entry_length']>0.
+            assert p._transition_start_progress==progress
+            assert p._transition_end_progress==pytest.approx(progress+result['entry_length'])
+    if error:
+        assert phases[:5]==['ENTRY']*5
+        assert phases[5:]==['ADJACENT_LANE_HOLD']*3
+        assert p._transition_end_progress>completion
+    else:
+        assert phases==['ADJACENT_LANE_HOLD']*8
+
+
+@pytest.mark.parametrize('side,target', [('left',3.5),('right',-3.5)])
+@pytest.mark.parametrize('error', [.151,.20])
+def test_passing_entry_goal_outside_acquisition_tolerance_stays_in_entry(side,target,error):
+    p=AdjacentLanePlanner(network((side,)))
+    current='L' if side=='left' else 'R'
+    plan(p,speed=3.)
+    completion=p._entry_completion_progress
+    for cycle in range(12):
+        progress=completion+cycle*(3./3.6/20.)
+        result=plan(p,progress,target-math.copysign(error,target),current=current,speed=3.)
+        assert result['status']=='AVOIDING'
+        assert result['lane_change_phase']=='ENTRY'
+        assert p._entry_completion_progress==completion
+
+
+def test_terminal_correction_carries_world_boundary_when_acquiring_hold():
+    p=AdjacentLanePlanner(network(('right',)))
+    plan(p,speed=3.)
+    completion=p._entry_completion_progress
+    plan(p,completion-.1,-3.499,.005,current='R',speed=3.)
+    previous=p._world_transition
+    position=[completion+.01,-3.499]
+    _,velocity,acceleration=previous.state(previous.project_parameter(position))
+    speed=math.hypot(*velocity)
+    curvature=(velocity[0]*acceleration[1]-velocity[1]*acceleration[0])/speed**3
+    result=plan(p,position[0],position[1],.005,current='R',speed=3.)
+    assert result['lane_change_phase']=='ADJACENT_LANE_HOLD'
+    assert p._world_transition is not previous
+    start,first,second=p._world_transition.state(0.)
+    assert start==pytest.approx(position)
+    assert math.atan2(first[1],first[0])==pytest.approx(.005)
+    assert math.hypot(*first)==pytest.approx(speed)
+    assert (first[0]*second[1]-first[1]*second[0])/math.hypot(*first)**3==pytest.approx(curvature)
+    assert sum(a*b for a,b in zip(first,second))/math.hypot(*first)==pytest.approx(
+        sum(a*b for a,b in zip(velocity,acceleration))/speed)
+    assert p._transition_start_progress==position[0]
+    assert p._transition_end_station==pytest.approx(position[0]+result['entry_length'])
+    assert p._transition_last_parameter==0.
+    assert p._entry_completion_progress==completion
+
+
+@pytest.mark.parametrize('fault', ['clearance','corridor','reversed_heading'])
+def test_lane_acquisition_cannot_approve_an_unsafe_hold_correction(fault):
+    p=AdjacentLanePlanner(network(('right',)))
+    plan(p,speed=3.)
+    completion=p._entry_completion_progress
+    progress=completion+.01
+    y=-3.51 if fault=='corridor' else -3.499
+    yaw=math.pi if fault=='reversed_heading' else 0.
+    obstacles=obstacle()+[(progress,y)] if fault=='clearance' else obstacle()
+    result=plan(p,progress,y,yaw,obstacles=obstacles,current='R',speed=3.)
+    assert result['status']=='BLOCKED'
+    assert result['lane_change_phase']=='BLOCKED'
+    assert p._phase=='ENTRY'  # No unsafe phase approval or maneuver reset.
+    assert p._entry_completion_progress==completion
+    expected={'clearance':['CLEARANCE'],'corridor':['DRIVABLE_CORRIDOR'],
+              'reversed_heading':['CURVATURE','DIRECTION_CONTINUITY']}[fault]
+    assert all(reason in result['evaluated_candidate_reject_reason'] for reason in expected)
+
+
+@pytest.mark.parametrize('side,target', [('left',3.5),('right',-3.5)])
+def test_small_error_entry_hold_recovery_and_clear_keep_existing_rear_gate(side,target):
+    p=AdjacentLanePlanner(network((side,)))
+    current='L' if side=='left' else 'R'
+    plan(p,speed=3.)
+    completion=p._entry_completion_progress
+    y=target-math.copysign(.001,target)
+    for cycle in range(8):
+        result=plan(p,completion-.2+cycle*(3./3.6/20.),y,current=current,speed=3.)
+    assert result['lane_change_phase']=='ADJACENT_LANE_HOLD'
+    pair=p._lane_pair
+    # Follow the approved HOLD correction to its center before the rear gate.
+    assert plan(p,17.,target,current=current,speed=3.)['lane_change_phase']=='ADJACENT_LANE_HOLD'
+    assert plan(p,22.5,target,current=current,speed=3.)['lane_change_phase']=='ADJACENT_LANE_HOLD'
+    recovering=plan(p,22.6,target,current=current,speed=3.)
+    assert recovering['status']=='RECOVERING'
+    assert recovering['lane_change_phase']=='RECOVERING'
+    assert recovering['drivable_safe']
+    assert recovering['maximum_curvature']<=p.usable_curvature_limit
+    assert recovering['minimum_clearance_m']>=p.required_clearance_m
+    assert p._lane_pair is pair
+    endpoint=p._world_transition.end
+    tangent=p._world_transition.end_first
+    cleared=plan(p,endpoint[0],endpoint[1],math.atan2(tangent[1],tangent[0]),current='O',speed=3.)
+    assert cleared['status']=='CLEAR'
+    assert cleared['lane_change_phase']=='CLEAR'
+    assert p._lane_pair is None
+    assert p._world_transition is None
+    assert p._entry_completion_progress is None
+
+
+def test_unsafe_recovery_launch_defers_to_a_freshly_checked_hold_correction():
+    p=AdjacentLanePlanner(network(('right',)))
+    plan(p,speed=3.)
+    plan(p,17.,-3.5,current='R',speed=3.)
+    plan(p,17.1,-3.499,current='R',speed=3.)
+    plan(p,22.5,-3.499,current='R',speed=3.)
+    result=plan(p,22.6,-3.499,current='R',speed=3.)
+    assert result['status']=='AVOIDING'
+    assert result['lane_change_phase']=='ADJACENT_LANE_HOLD'
+    assert p._maneuver_context['recovery_deferred']
+    assert 'DRIVABLE_CORRIDOR' in p._maneuver_context['recovery_reject_reason']
+    assert result['maximum_curvature']<=p.usable_curvature_limit
+    assert result['minimum_clearance_m']>=p.required_clearance_m
+    assert result['drivable_safe']
+
+
+def test_new_obstacle_interrupting_recovery_does_not_reuse_the_old_entry_goal():
+    p=AdjacentLanePlanner(network(('right',)))
+    plan(p,speed=3.)
+    completion=p._entry_completion_progress
+    plan(p,17.,-3.5,current='R',speed=3.)
+    assert plan(p,22.6,-3.5,current='R',speed=3.)['status']=='RECOVERING'
+    result=plan(p,22.64,-3.499,current='R',speed=3.,obstacles=obstacle(28.,32.))
+    assert result['status']=='AVOIDING'
+    assert result['lane_change_phase']=='ENTRY'
+    assert p._entry_completion_progress>completion
+    assert p._entry_completion_progress==pytest.approx(22.64+result['entry_length'])
+
+
+def test_route_reset_forgets_the_entry_acquisition_goal():
+    p=AdjacentLanePlanner(network(('right',)))
+    plan(p,speed=3.)
+    completion=p._entry_completion_progress
+    p.reset()
+    assert p._entry_completion_progress is None
+    result=plan(p,10.,obstacles=obstacle(28.,32.),speed=3.)
+    assert result['lane_change_phase']=='ENTRY'
+    assert p._entry_completion_progress==pytest.approx(10.+result['entry_length'])
+    assert p._entry_completion_progress>completion
+
+
 def test_obstacle_in_adjacent_lane_cannot_be_ignored_as_far_metadata():
     p=AdjacentLanePlanner(network(('left',)))
     barrier=[(18.,3.+i*.1) for i in range(11)]

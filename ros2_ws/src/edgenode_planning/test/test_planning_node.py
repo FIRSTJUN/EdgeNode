@@ -12,6 +12,7 @@ from geometry_msgs.msg import Pose, PoseArray, PoseStamped
 from nav_msgs.msg import Odometry, Path
 from rclpy.time import Time
 from std_msgs.msg import Float32, Float64, String
+from std_srvs.srv import Trigger
 
 from edgenode_planning.dijkstra_planner import DijkstraPlanner
 from edgenode_planning.local_path_planner import LocalPathPlanner
@@ -22,6 +23,7 @@ from edgenode_planning.planning_node import PlanningNode
 from edgenode_planning.speed_planner import SpeedPlanner
 from edgenode_planning.adjacent_lane_planner import AdjacentLanePlanner
 from edgenode_planning.lane_geometry import LaneNetwork
+from edgenode_planning.corridor_scene import json_value, replay_scene
 
 
 def speed_spy(**kwargs):
@@ -298,6 +300,8 @@ class PlanningNodeTest(unittest.TestCase):
         self.node.latest_obstacles=[(18.,-.5),(22.,-.5),(22.,.5),(18.,.5)]
         for name in ('lane_change_state','lane_change_side','selected_adjacent_link',
                      'lane_change_obstacle_safe','lane_change_steering_feasible','lane_change_corridor_safe',
+                     'lane_change_corridor_violation_m','lane_change_corridor_failed_index',
+                     'lane_change_corridor_failed_point_count','lane_change_corridor_debug','lane_change_maneuver_debug',
                      'adjacent_lane_separation','original_lane_center','adjacent_lane_center',
                      'lane_change_entry_path','adjacent_lane_hold_path','lane_change_recovery_path','lane_change_recovery_gate'):
             setattr(self.node,name+'_pub',Mock())
@@ -313,6 +317,9 @@ class PlanningNodeTest(unittest.TestCase):
         self.assertTrue(self.output('lane_change_obstacle_safe'))
         self.assertTrue(self.output('lane_change_steering_feasible'))
         self.assertTrue(self.output('lane_change_corridor_safe'))
+        self.assertEqual(self.output('lane_change_corridor_failed_index'), -1)
+        self.assertEqual(self.output('lane_change_corridor_failed_point_count'), 0)
+        self.assertEqual(self.output('lane_change_corridor_violation_m'), 0.)
         self.assertEqual(self.output('target_speed'),20.)
         self.node.latest_pose=(17.,3.5,0.)
         self.node.map_matcher.match.return_value.update(link_id='L')
@@ -324,6 +331,45 @@ class PlanningNodeTest(unittest.TestCase):
         self.assertEqual(self.output('lane_change_state'),'ADJACENT_LANE_HOLD')
         self.assertTrue(all(p.pose.position.y==3.5 for p in self.node.local_path_pub.publish.call_args.args[0].poses))
         self.assertEqual(self.output('runtime_cruise_speed'),20.)
+
+    def test_corridor_failure_topics_dump_and_invalidation_use_the_same_cycle(self):
+        self.configure_adjacent_drive()
+        self.parameters['enable_drive'] = False
+        self.node.latest_pose = (0., 0., -.12)
+        PlanningNode.plan(self.node)
+        debug = json.loads(self.output('lane_change_corridor_debug'))
+        self.assertFalse(debug['safe'])
+        self.assertEqual(self.output('lane_change_corridor_failed_index'), debug['failed_index'])
+        self.assertEqual(self.output('lane_change_corridor_failed_point_count'), debug['failed_point_count'])
+        self.assertAlmostEqual(self.output('lane_change_corridor_violation_m'), debug['max_violation_m'])
+        self.assertEqual(self.output('target_speed'), 0.)
+        self.assertFalse(self.node.local_path_pub.publish.call_args.args[0].poses)
+        with tempfile.TemporaryDirectory() as directory:
+            self.parameters['lane_change_corridor_dump_dir'] = directory
+            response = PlanningNode.dump_lane_change_corridor_scene(self.node, Trigger.Request(), Trigger.Response())
+            self.assertTrue(response.success)
+            scene = json.loads(FilePath(response.message).read_text())
+            self.assertEqual(scene['result']['corridor_diagnostics'], debug)
+            self.assertEqual(json_value(replay_scene(scene)), scene['result'])
+            self.node.latest_pose = None
+            PlanningNode.plan(self.node)
+            self.assertEqual(self.output('lane_change_corridor_failed_index'), -1)
+            self.assertTrue(math.isnan(self.output('lane_change_corridor_violation_m')))
+            self.assertFalse(json.loads(self.output('lane_change_corridor_debug'))['evaluated'])
+            response = PlanningNode.dump_lane_change_corridor_scene(self.node, Trigger.Request(), Trigger.Response())
+            self.assertFalse(response.success)
+            self.assertEqual(len(list(FilePath(directory).glob('*.json'))), 1)
+
+    def test_corridor_dump_io_failure_returns_an_error_without_changing_control(self):
+        self.configure_adjacent_drive()
+        self.parameters['enable_drive'] = False
+        self.parameters['lane_change_corridor_dump_dir'] = '/synthetic/unwritable'
+        PlanningNode.plan(self.node)
+        with patch('edgenode_planning.corridor_scene.Path.mkdir', side_effect=PermissionError('denied')):
+            response = PlanningNode.dump_lane_change_corridor_scene(self.node, Trigger.Request(), Trigger.Response())
+        self.assertFalse(response.success)
+        self.assertIn('denied', response.message)
+        self.assertEqual(self.output('target_speed'), 0.)
 
     def test_adjacent_lane_missing_neighbor_blocks_and_publishes_no_unapproved_local_path(self):
         self.configure_adjacent_drive(has_neighbor=False)
@@ -1266,6 +1312,7 @@ class PlanningNodeTest(unittest.TestCase):
             )),
             'create_publisher': publisher,
             'create_subscription': Mock(),
+            'create_service': Mock(),
             'create_timer': timer,
             'get_logger': Mock(),
         }
