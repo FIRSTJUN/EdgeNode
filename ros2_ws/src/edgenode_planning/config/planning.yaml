@@ -67,6 +67,8 @@ planning_node:
     # lidar_obstacle_node preserves ordered eight-point groups in PoseArray.
     obstacle_points_per_cluster: 8
     obstacle_avoidance_mode: adjacent_lane
+    # Opt-in fixed primitive mode: lane_change_primitive. Legacy modes preserved.
+    lane_change_primitive_length_m: 20.0
     # Minimum duration policy at the greater of measured/requested avoidance
     # speed; geometric/corridor gates remain authoritative. Not a dynamics spec.
     lane_change_min_duration_sec: 3.0

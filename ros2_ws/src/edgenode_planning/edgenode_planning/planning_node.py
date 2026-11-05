@@ -28,6 +28,7 @@ def _finite_number(value):
 
 from .planning_fsm import PlanningFSM
 from .adjacent_lane_planner import AdjacentLanePlanner
+from .static_obstacle_lane_change import StaticObstacleLaneChangeBehavior
 from .lane_geometry import LaneNetwork
 from .maneuver_diagnostics import inspect_maneuver
 from .corridor_scene import capture_scene, json_value, planner_snapshot, write_scene
@@ -116,6 +117,7 @@ class PlanningNode(Node):
                 # center publishers can retain the default ungrouped contract.
                 ('obstacle_points_per_cluster', 1, ParameterDescriptor(read_only=True)),
                 ('obstacle_avoidance_mode', 'adjacent_lane', ParameterDescriptor(read_only=True)),
+                ('lane_change_primitive_length_m', 20.0, ParameterDescriptor(read_only=True)),
                 ('lane_change_min_duration_sec', 3.0, ParameterDescriptor(read_only=True)),
                 ('lane_change_corridor_dump_dir', '/workspace/logs/kcity_s4_corridor_diagnostics',
                  ParameterDescriptor(read_only=True)),
@@ -219,11 +221,15 @@ class PlanningNode(Node):
             blocked_release_cycles=self.get_parameter('lattice_blocked_release_cycles').value,
         )
         mode = self.get_parameter('obstacle_avoidance_mode').value
-        if mode not in ('legacy_offset', 'adjacent_lane'):
-            raise ValueError('obstacle_avoidance_mode must be legacy_offset or adjacent_lane')
-        if mode == 'adjacent_lane':
+        if mode not in ('legacy_offset', 'adjacent_lane', 'lane_change_primitive'):
+            raise ValueError('unknown obstacle_avoidance_mode')
+        if mode in ('adjacent_lane', 'lane_change_primitive'):
             legacy = self.lattice_planner
-            self.lattice_planner = AdjacentLanePlanner(
+            planner_type = (StaticObstacleLaneChangeBehavior if mode == 'lane_change_primitive'
+                            else AdjacentLanePlanner)
+            extra = (dict(transition_length_m=self.get_parameter('lane_change_primitive_length_m').value)
+                     if mode == 'lane_change_primitive' else {})
+            self.lattice_planner = planner_type(
                 LaneNetwork(self.dijkstra_planner),
                 min_transition_time_sec=self.get_parameter('lane_change_min_duration_sec').value,
                 obstacle_clearance_m=legacy.required_clearance_m,
@@ -235,7 +241,7 @@ class PlanningNode(Node):
                 max_front_steer_normalized=legacy.max_front_steer_normalized,
                 curvature_safety_factor=legacy.curvature_safety_factor,
                 obstacle_rear_margin_m=legacy.obstacle_rear_margin_m,
-                blocked_release_cycles=legacy.blocked_release_cycles)
+                blocked_release_cycles=legacy.blocked_release_cycles, **extra)
         self.latest_speed_kmh = 0.0
         self.latest_obstacles = []
 
@@ -594,6 +600,7 @@ class PlanningNode(Node):
                         corridor_before = None
                         if isinstance(self.lattice_planner, AdjacentLanePlanner):
                             corridor_before = planner_snapshot(self.lattice_planner)
+                        if isinstance(self.lattice_planner, (AdjacentLanePlanner, StaticObstacleLaneChangeBehavior)):
                             recommendation_bound = max(self.get_parameter(name).value for name in (
                                 'cruise_speed_kmh', 'curve_speed_kmh', 'sharp_curve_speed_kmh'))
                             configured_speed = min(recommendation_bound,
@@ -636,15 +643,15 @@ class PlanningNode(Node):
 
                             if not lattice_blocked:
                                 active_local_points = lattice_result['points']
-                            elif isinstance(self.lattice_planner, AdjacentLanePlanner):
+                            elif isinstance(self.lattice_planner, (AdjacentLanePlanner, StaticObstacleLaneChangeBehavior)):
                                 # No approved local path exists. Publish an empty
                                 # path rather than an unapproved road-center fallback.
                                 active_local_points = []
-                        elif self.latest_obstacles or isinstance(self.lattice_planner, AdjacentLanePlanner):
+                        elif self.latest_obstacles or isinstance(self.lattice_planner, (AdjacentLanePlanner, StaticObstacleLaneChangeBehavior)):
                             lattice_status = 'BLOCKED'
                             lattice_blocked = True
                             lattice_blocked_reason = 'INVALID_AVOIDANCE_REFERENCE'
-                            if isinstance(self.lattice_planner, AdjacentLanePlanner):
+                            if isinstance(self.lattice_planner, (AdjacentLanePlanner, StaticObstacleLaneChangeBehavior)):
                                 active_local_points = []
 
                         local_path = Path()
