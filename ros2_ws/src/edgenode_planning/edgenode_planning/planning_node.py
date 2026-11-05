@@ -3,7 +3,7 @@ import math
 import rclpy
 from rclpy.node import Node
 
-from geometry_msgs.msg import PoseArray, PoseStamped
+from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry, Path
 from rcl_interfaces.msg import ParameterDescriptor
 from std_msgs.msg import Float32, Float64, Int32, String
@@ -25,7 +25,6 @@ def _finite_number(value):
 
 
 from .planning_fsm import PlanningFSM
-from .lattice_planner import LatticePlanner
 
 
 class PlanningNode(Node):
@@ -105,11 +104,6 @@ class PlanningNode(Node):
                 ('max_drive_speed_kmh', 1.0),
                 ('drive_duration_sec', 15.0),
                 ('drive_status_topic', '/planning/drive_status'),
-                ('obstacle_topic', '/planning/obstacles'),
-                ('lattice_status_topic', '/planning/lattice_status'),
-                ('lattice_offset_topic', '/planning/lattice_offset'),
-                ('lattice_clearance_topic', '/planning/lattice_clearance'),
-                ('lattice_clearance_m', 0.55),
                 ('fsm_state_topic', '/planning/fsm_state'),
                 ('curve_speed_kmh', 0.7),
                 ('sharp_curve_speed_kmh', 0.5),
@@ -175,11 +169,6 @@ class PlanningNode(Node):
         self._drive_session_duration_sec = None
         self._drive_last_time_ns = None
         self.fsm = PlanningFSM()
-        self.lattice_planner = LatticePlanner(
-            obstacle_clearance_m=self.get_parameter('lattice_clearance_m').value,
-        )
-        self.latest_obstacles = []
-
         self.target_error_pub = self.create_publisher(
             Float32,
             self.get_parameter('target_error_topic').value,
@@ -268,27 +257,6 @@ class PlanningNode(Node):
             self.get_parameter('fsm_state_topic').value,
             10,
         )
-        self.lattice_status_pub = self.create_publisher(
-            String,
-            self.get_parameter('lattice_status_topic').value,
-            10,
-        )
-        self.lattice_offset_pub = self.create_publisher(
-            Float32,
-            self.get_parameter('lattice_offset_topic').value,
-            10,
-        )
-        self.lattice_clearance_pub = self.create_publisher(
-            Float32,
-            self.get_parameter('lattice_clearance_topic').value,
-            10,
-        )
-        self.obstacle_sub = self.create_subscription(
-            PoseArray,
-            self.get_parameter('obstacle_topic').value,
-            self.obstacle_callback,
-            10,
-        )
         self.localization_sub = self.create_subscription(
             Odometry,
             self.get_parameter('localization_topic').value,
@@ -306,19 +274,6 @@ class PlanningNode(Node):
             f'Planning node ready - loaded {len(self.map_matcher.links)} MGeo links; '
             'waiting for localization (drive disabled by default)'
         )
-
-    def obstacle_callback(self, msg):
-        """Store world-frame obstacle XY positions for Lattice planning."""
-        obstacles = []
-
-        for pose in msg.poses:
-            x = pose.position.x
-            y = pose.position.y
-
-            if _finite_number(x) and _finite_number(y):
-                obstacles.append((float(x), float(y)))
-
-        self.latest_obstacles = obstacles
 
     def localization_callback(self, msg):
         """Store the latest pose; map matching runs only in the planning timer."""
@@ -349,12 +304,6 @@ class PlanningNode(Node):
         local_result = None
         speed_result = None
         speed_valid = False
-        lattice_status = 'IDLE'
-        lattice_offset = 0.0
-        lattice_clearance = float('nan')
-        lattice_blocked = False
-        obstacle_avoid_requested = False
-
         route_node_ids = self.get_parameter('route_node_ids').value
         use_waypoints = (route_node_ids is not None
                          and not (isinstance(route_node_ids, (list, tuple))
@@ -451,24 +400,6 @@ class PlanningNode(Node):
                         self._progress_arc_m = local_result['progress_arc_m']
                         active_local_points = local_result['points']
 
-                        lattice_result = self.lattice_planner.plan(
-                            active_local_points,
-                            self.latest_obstacles,
-                            current_position=(x, y),
-                        )
-
-                        if lattice_result is not None:
-                            lattice_status = lattice_result['status']
-                            lattice_offset = lattice_result['selected_offset_m']
-                            lattice_clearance = lattice_result['minimum_clearance_m']
-                            lattice_blocked = lattice_result['blocked']
-                            obstacle_avoid_requested = lattice_result[
-                                'obstacle_avoid_requested'
-                            ]
-
-                            if not lattice_blocked:
-                                active_local_points = lattice_result['points']
-
                         local_path = Path()
                         local_path.header = path.header
 
@@ -540,12 +471,10 @@ class PlanningNode(Node):
             local_path_ready=local_result is not None,
             speed_ready=speed_valid,
             drive_status=drive_status,
-            # Future behavior inputs.
-            # These remain False until Lattice / Perception / goal detection
-            # are connected to the planning layer.
-            obstacle_avoid_requested=obstacle_avoid_requested,
+            # Obstacle avoidance is intentionally disconnected.
+            obstacle_avoid_requested=False,
             traffic_stop_requested=False,
-            emergency_stop_requested=lattice_blocked,
+            emergency_stop_requested=False,
             goal_reached=False,
         )
 
@@ -584,9 +513,6 @@ class PlanningNode(Node):
         self.speed_curvature_pub.publish(Float32(data=speed_curvature))
         self.speed_max_curvature_pub.publish(Float32(data=speed_max_curvature))
         self.drive_status_pub.publish(String(data=drive_status))
-        self.lattice_status_pub.publish(String(data=lattice_status))
-        self.lattice_offset_pub.publish(Float32(data=lattice_offset))
-        self.lattice_clearance_pub.publish(Float32(data=lattice_clearance))
 
 
 def main(args=None):

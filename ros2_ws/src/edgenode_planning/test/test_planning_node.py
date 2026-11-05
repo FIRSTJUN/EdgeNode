@@ -15,7 +15,6 @@ from std_msgs.msg import Float32, Float64, String
 
 from edgenode_planning.dijkstra_planner import DijkstraPlanner
 from edgenode_planning.local_path_planner import LocalPathPlanner
-from edgenode_planning.lattice_planner import LatticePlanner
 from edgenode_planning.map_matcher import MapMatcher
 from edgenode_planning.planning_fsm import PlanningFSM
 from edgenode_planning.planning_node import PlanningNode
@@ -51,8 +50,6 @@ class PlanningNodeTest(unittest.TestCase):
             _progress_arc_m=None,
             _previous_speed_mode=None,
             fsm=PlanningFSM(),
-            lattice_planner=Mock(wraps=LatticePlanner()),
-            latest_obstacles=[],
             _drive_was_enabled=False,
             _drive_session_start_ns=None,
             _drive_session_expired=False,
@@ -73,8 +70,8 @@ class PlanningNodeTest(unittest.TestCase):
             'map_match_status', 'map_match_distance', 'map_match_heading_diff',
             'global_path', 'local_path',
             'recommended_speed', 'speed_mode', 'speed_curvature', 'speed_max_curvature',
-            'drive_status', 'fsm_state', 'lattice_status', 'lattice_offset',
-            'lattice_clearance', 'local_path_index', 'local_path_progress',
+            'drive_status', 'fsm_state',
+            'local_path_index', 'local_path_progress',
         ):
             setattr(self.node, name + '_pub', Mock())
 
@@ -505,7 +502,6 @@ class PlanningNodeTest(unittest.TestCase):
         self.node.local_path_planner.extract.return_value = {
             'points': local_points, 'nearest_index': 5, 'progress_arc_m': 5.0,
         }
-        self.node.lattice_planner.plan.return_value = None
         PlanningNode.plan(self.node)
         self.assertIs(self.node.speed_planner.plan.call_args.args[0], local_points)
         self.assert_speed_preview(1.0, 'CRUISE', 0.0)
@@ -1158,7 +1154,6 @@ class PlanningNodeTest(unittest.TestCase):
         self.node.local_path_planner.extract.return_value = {
             'points': points, 'nearest_index': 0, 'progress_arc_m': 0.0,
         }
-        self.node.lattice_planner.plan.return_value = None
 
     def test_speed_mode_hysteresis_is_carried_between_planning_cycles(self):
         self.node.speed_planner = Mock(wraps=SpeedPlanner(
