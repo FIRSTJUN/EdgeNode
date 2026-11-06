@@ -19,7 +19,7 @@ def test_real_visualization_transport_copies_path_and_deletes_stale_source(route
     topics={'/planning/'+key for key in PATH_STYLES}
     topics.update('/planning/'+style[0] for style in PATH_STYLES.values())
     topics.update('/planning/'+name for name in ('current_link','current_lane_marker','state',
-                  'lane_change_state','obstacles','obstacle_footprint_markers','ego_vehicle_marker'))
+                  'avoidance_state','obstacles','obstacle_footprint_markers','ego_vehicle_marker'))
     topics.add('/route_editor/vehicle_marker')
     for topic in topics:
         args.extend(['-r',f'{topic}:={prefix}/{topic.strip("/").replace("/","_")}'])
@@ -64,7 +64,7 @@ def test_real_volatile_late_joiner_receives_unchanged_cached_path(route_editor_m
     topics={'/planning/'+key for key in PATH_STYLES}
     topics.update('/planning/'+style[0] for style in PATH_STYLES.values())
     topics.update('/planning/'+name for name in ('current_link','current_lane_marker','state',
-                  'lane_change_state','obstacles','obstacle_footprint_markers','ego_vehicle_marker'))
+                  'avoidance_state','obstacles','obstacle_footprint_markers','ego_vehicle_marker'))
     topics.add('/route_editor/vehicle_marker')
     for topic in topics:
         args.extend(['-r',f'{topic}:={prefix}/{topic.strip("/").replace("/","_")}'])

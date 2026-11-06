@@ -1,4 +1,4 @@
-"""Explicit future full-body geometry contract; no guessed Sonata dimensions."""
+"""Full-body geometry with explicit axle reference and measurement provenance."""
 from dataclasses import dataclass
 import math
 
@@ -46,3 +46,20 @@ class VerifiedVehicleGeometry:
             left+=self.rear_axle_from_pose_left_m
             vertices.append((x+c*forward-s*left,y+s*forward+c*left))
         return vertices
+
+
+def sonata_geometry():
+    """User-approved MORAI Sonata: +3.790/-1.109 forward, +/-0.930 lateral.
+
+    Approved axle/overhang sum is 4.899 m versus nominal 4.900 m. Preserve the
+    specified corners, without relaxing the dimension-consistency assertion.
+    """
+    return VerifiedVehicleGeometry(width_m=1.860, length_m=4.899, wheelbase_m=2.840,
+        front_overhang_m=.950, rear_overhang_m=1.109,
+        rear_axle_from_pose_forward_m=0., rear_axle_from_pose_left_m=0.,
+        pose_reference='MORAI rear wheel axle midpoint; user-approved contract',
+        source='User-approved MORAI 2020 Sonata dimensions; '
+        'https://help-morai-sim-en.scrollhelp.site/morai-sim-standard-en/vehicle-specifications; '
+        'width 1.860 m cross-checked against Hyundai SONATA catalogue p17 '
+        'https://www.hyundai.com/contents/repn-car/catalog_en/sonata-catalog.pdf; '
+        'MORAI 4.86 m width rejected as documented typo; nominal length 4.900 m')

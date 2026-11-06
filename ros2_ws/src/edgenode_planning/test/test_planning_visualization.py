@@ -90,7 +90,7 @@ def test_current_lane_is_existing_mgeo_geometry_and_phase_cleanup_has_stable_ids
     view.current_link_callback(String(data=''))
     assert view.current_pub.publish.call_args.args[0].action==Marker.DELETE
     view.phase_callback(String(data='BLOCKED'))
-    for key in ('lane_change_entry_path','adjacent_lane_hold_path','lane_change_recovery_path'):
+    for key in ('avoidance_selected_path','avoidance_return_path'):
         assert view._path_publishers[key].publish.call_args.args[0].action==Marker.DELETE
     assert view.map.links_by_id==before
 
@@ -166,8 +166,8 @@ def test_ros_clock_rewind_clears_route_epoch_and_accepts_new_live_paths(view,mon
 
 
 @pytest.mark.parametrize('key',('global_path','local_path','original_lane_center',
-                                'adjacent_lane_center','lane_change_entry_path',
-                                'adjacent_lane_hold_path','lane_change_recovery_path'))
+                                'left_lane_center','right_lane_center',
+                                'avoidance_selected_path','avoidance_return_path'))
 def test_delayed_valid_input_does_not_get_a_sub_frame_render_lifetime(view,monkeypatch,key):
     # Before: age .99 s => lifetime .01 s, then expire/delete before next update.
     source=path([(0.,0.,1.),(1.,0.,1.)],stamp=1.01)
@@ -225,7 +225,7 @@ def test_changed_local_geometry_updates_same_id_with_add_only(view):
 
 def test_blocked_phase_cannot_alternate_delete_and_add_of_failed_paths(view):
     source=path([(0.,0.,0.),(1.,0.,0.)])
-    view.path_callback('lane_change_entry_path',source)
+    view.path_callback('avoidance_selected_path',source)
     view.phase_callback(String(data='BLOCKED'))
     pubs=[view._path_publishers[key] for key in view._PHASE_PATHS]
     for pub in pubs:pub.publish.reset_mock()
@@ -233,8 +233,8 @@ def test_blocked_phase_cannot_alternate_delete_and_add_of_failed_paths(view):
         view.phase_callback(String(data='BLOCKED'))
         for key in view._PHASE_PATHS:view.path_callback(key,source)
     assert all(pub.publish.call_count==0 for pub in pubs)
-    view.phase_callback(String(data='ENTRY'))
-    view.path_callback('lane_change_entry_path',source)
+    view.phase_callback(String(data='AVOID_ENTRY'))
+    view.path_callback('avoidance_selected_path',source)
     assert pubs[0].publish.call_args.args[0].action==Marker.ADD
 
 

@@ -1,18 +1,14 @@
 """MGeo lane pairs and conservative center-to-center corridors; no routing edits."""
 import math
 
-from .lattice_planner import LatticePlanner
+from .avoidance_geometry import arc, cross
 
 
 EPS = 1e-7
 
 
-def arc(points):
-    return LatticePlanner._arc_lengths(points)
-
-
 def project(points, point, lengths=None):
-    return LatticePlanner._project_reference(points, arc(points) if lengths is None else lengths, point)[0]
+    return PolylineIndex(points).project(point)
 
 
 def sample(points, s, lengths=None):
@@ -39,10 +35,6 @@ def curvature_at(points, s):
     a,b,c = a[0],b[0],c[0]
     denominator = math.dist(a[:2],b[:2])*math.dist(b[:2],c[:2])*math.dist(a[:2],c[:2])
     return 2*((b[0]-a[0])*(c[1]-b[1])-(b[1]-a[1])*(c[0]-b[0]))/denominator if denominator > 1e-12 else 0.
-
-
-def cross(a,b):
-    return a[0]*b[1]-a[1]*b[0]
 
 
 def segment_interval(a,b,polygon):
@@ -170,10 +162,14 @@ class LaneNetwork:
         if original_id not in self.valid:
             return None
         original = self.links[original_id]
+        if original.get('can_move_'+side+'_lane', True) is not True:
+            return None
         target_id = original.get(field)
         if target_id not in self.valid:
             return None
         target = self.links[target_id]
+        if target.get('can_move_'+('right' if side=='left' else 'left')+'_lane', True) is not True:
+            return None
         if target.get(opposite) != original_id:
             return None
         if any(not isinstance(link.get('max_speed'), (int,float)) or

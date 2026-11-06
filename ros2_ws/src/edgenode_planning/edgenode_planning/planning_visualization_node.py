@@ -19,33 +19,30 @@ from .dijkstra_planner import DijkstraPlanner
 # Marker widths are world metres. Keep the final Control path widest;
 # phase colors render as a narrower stripe over its white band.
 PATH_STYLES = {
-    'lane_change_recovery_gate': ('recovery_gate_marker', 'lane_change_recovery_gate', (.55,.90,1.,1.), .16),
     'global_path': ('global_path_marker', 'global_path', (.20,1.,.35,1.), .46),
     'local_path': ('local_path_marker', 'local_path_debug', (1.,1.,1.,1.), .70),
     'original_lane_center': ('original_lane_marker', 'original_lane', (.20,.80,.95,1.), .24),
-    'adjacent_lane_center': ('adjacent_lane_marker', 'adjacent_lane', (1.,.88,.08,1.), .34),
-    'lane_change_entry_path': ('lane_change_entry_marker', 'lane_change_transition', (.05,1.,1.,1.), .34),
-    'adjacent_lane_hold_path': ('adjacent_lane_hold_marker', 'adjacent_lane_hold', (.78,.50,1.,1.), .34),
-    'lane_change_recovery_path': ('lane_change_recovery_marker', 'lane_change_recovery', (1.,.28,.70,1.), .34),
+    'left_lane_center': ('left_lane_marker', 'left_lane', (1.,.88,.08,1.), .26),
+    'right_lane_center': ('right_lane_marker', 'right_lane', (1.,.60,.08,1.), .26),
+    'avoidance_selected_path': ('avoidance_selected_marker', 'avoidance_selected', (.05,1.,1.,1.), .34),
+    'avoidance_return_path': ('avoidance_return_marker', 'avoidance_return', (1.,.28,.70,1.), .34),
 }
 
 # Rendering layers only. Point arrays stay exact copies of the source messages;
 # canonical Global/Local mirrors retain the identity marker pose (no lift).
 DISPLAY_Z_OFFSETS_M = {
     'original_lane_center': .02,
-    'adjacent_lane_center': .04,
-    'lane_change_entry_path': .08,
-    'adjacent_lane_hold_path': .08,
-    'lane_change_recovery_path': .08,
-    'lane_change_recovery_gate': .10,
+    'left_lane_center': .04,
+    'right_lane_center': .04,
+    'avoidance_selected_path': .08,
+    'avoidance_return_path': .08,
 }
 
 
 class PlanningVisualizationNode(Node):
     """Cache display geometry; expire lost sources independently of rendering."""
 
-    _PHASE_PATHS = ('lane_change_entry_path', 'adjacent_lane_hold_path',
-                    'lane_change_recovery_path')
+    _PHASE_PATHS = ('avoidance_selected_path', 'avoidance_return_path')
     _REFRESH_SEC = 1.0  # Volatile RViz late joiners receive a complete cached view.
 
     def __init__(self):
@@ -86,7 +83,7 @@ class PlanningVisualizationNode(Node):
         self.vehicle_pub = self.create_publisher(Marker, '/planning/ego_vehicle_marker', 10)
         self.create_subscription(String, '/planning/current_link', self.current_link_callback, 1)
         self.create_subscription(String, '/planning/state', self.state_callback, 1)
-        self.create_subscription(String, '/planning/lane_change_state', self.phase_callback, 1)
+        self.create_subscription(String, '/planning/avoidance_state', self.phase_callback, 1)
         self.create_subscription(PoseArray, '/planning/obstacles', self.obstacles_callback, 1)
         retained = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                               reliability=ReliabilityPolicy.RELIABLE)
@@ -206,9 +203,8 @@ class PlanningVisualizationNode(Node):
                        for p in msg.poses)
         allowed = (self._planning_ready is not False and
                    not (key in self._PHASE_PATHS and self._phase in
-                        ('BLOCKED', 'CLEAR', 'LEGACY_OFFSET')) and
-                   not (key == 'adjacent_lane_center' and self._phase in
-                        ('CLEAR', 'LEGACY_OFFSET')))
+                        ('BLOCKED', 'NORMAL')) and
+                   not (key in ('left_lane_center','right_lane_center') and self._phase == 'NORMAL'))
         if (not allowed or msg.header.frame_id != 'map' or not points or
                 not all(math.isfinite(v) for point in points for v in point)):
             self._delete_path(key)
@@ -251,11 +247,12 @@ class PlanningVisualizationNode(Node):
 
     def phase_callback(self, msg):
         self._phase = msg.data
-        if msg.data in ('BLOCKED', 'CLEAR', 'LEGACY_OFFSET'):
+        if msg.data in ('BLOCKED', 'NORMAL'):
             for key in self._PHASE_PATHS:
                 self._delete_path(key)
-            if msg.data in ('CLEAR', 'LEGACY_OFFSET'):
-                self._delete_path('adjacent_lane_center')
+            if msg.data == 'NORMAL':
+                self._delete_path('left_lane_center')
+                self._delete_path('right_lane_center')
 
     def obstacles_callback(self, msg):
         if not self._accept_stamp('obstacles', msg.header):

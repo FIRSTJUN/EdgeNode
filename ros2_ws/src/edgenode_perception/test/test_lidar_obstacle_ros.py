@@ -17,7 +17,7 @@ from sensor_msgs_py.point_cloud2 import create_cloud_xyz32
 from std_msgs.msg import Float32, Header, Int32
 
 from edgenode_perception.lidar_obstacle_node import LidarObstacleNode
-from edgenode_planning.lattice_planner import LatticePlanner
+from edgenode_planning.static_obstacle_planner import StaticObstaclePlanner
 from edgenode_planning.planning_fsm import PlanningFSM
 from edgenode_planning.planning_node import PlanningNode
 
@@ -85,22 +85,25 @@ def test_best_effort_cloud_world_pose_planning_lattice_and_disabled_fsm():
 
         # Exercise the exact existing consumer and algorithm, without starting
         # a Planning node or publishing its paths/target speeds on live topics.
-        consumer = SimpleNamespace(latest_obstacles=[])
+        consumer = SimpleNamespace(latest_obstacle_groups=[],obstacle_stamp_ns=None,
+            get_clock=probe.get_clock,get_parameter=lambda name:SimpleNamespace(value=8))
         PlanningNode.obstacle_callback(consumer, result)
         assert len(result.poses) == 8
-        assert len(consumer.latest_obstacles) == 8
-        assert consumer.latest_obstacles[0] == pytest.approx((15.25, 0.06), abs=1e-6)
+        assert len(consumer.latest_obstacle_groups) == 1
+        assert len(consumer.latest_obstacle_groups[0]) == 8
+        assert consumer.latest_obstacle_groups[0][0] == pytest.approx((15.25, 0.06), abs=1e-6)
         route = [[float(x), 0.0, 0.0] for x in range(31)]
-        avoidance = LatticePlanner().plan(
-            route, consumer.latest_obstacles, current_position=(0.0, 0.0))
-        assert avoidance['status'] == 'AVOIDING'
-        assert avoidance['obstacle_avoid_requested']
-        assert not avoidance['blocked']
+        avoidance = StaticObstaclePlanner(SimpleNamespace(pair=lambda *args:None)).plan(
+            route, consumer.latest_obstacle_groups, (0.0, 0.0, 0.0))
+        # Repeated identical synthetic returns form a degenerate box. Detection
+        # transport is valid; missing physical obstacle extent must fail closed.
+        assert avoidance['blocked'] and not avoidance['points']
         fsm = PlanningFSM()
         assert fsm.update(localization_ready=True, map_match_ready=True,
                           global_path_ready=True, local_path_ready=True, speed_ready=True,
                           drive_status='DISABLED',
-                          obstacle_avoid_requested=avoidance['obstacle_avoid_requested']) == 'READY'
+                          obstacle_avoid_requested=avoidance['active'],
+                          emergency_stop_requested=avoidance['blocked']) == 'EMERGENCY_STOP'
         assert not fsm.motion_allowed
 
         old_count = len(received)
@@ -109,7 +112,7 @@ def test_best_effort_cloud_world_pose_planning_lattice_and_disabled_fsm():
               and math.isnan(distances[-1].data))
         assert not received[-1].poses
         PlanningNode.obstacle_callback(consumer, received[-1])
-        assert not consumer.latest_obstacles
+        assert not consumer.latest_obstacle_groups
     finally:
         executor.shutdown(timeout_sec=0)
         for node in reversed(nodes):

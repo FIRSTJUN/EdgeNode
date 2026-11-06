@@ -21,7 +21,7 @@ setup(
     zip_safe=True,
     maintainer='EdgeNode Team',
     maintainer_email='poj285895@gmail.com',
-    description='FSM and lane-offset candidate planner.',
+    description='Static obstacle lattice planner and guarded path following.',
     license='MIT',
     entry_points={
         'console_scripts': [

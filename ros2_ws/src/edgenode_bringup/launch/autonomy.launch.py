@@ -28,9 +28,10 @@ def generate_launch_description():
     # One startup source for planner feasibility and the unchanged Control.
     with open(control_cfg, encoding='utf-8') as stream:
         control_geometry = yaml.safe_load(stream)['control_node']['ros__parameters']
-    lattice_geometry = {
-        'lattice_' + name: control_geometry[name]
-        for name in ('wheelbase_m', 'max_wheel_angle_rad', 'max_front_steer_normalized')
+    avoidance_geometry = {
+        'avoidance_' + name: control_geometry[name]
+        for name in ('wheelbase_m', 'max_wheel_angle_rad', 'max_front_steer_normalized',
+                     'steering_sign', 'control_rate_hz', 'lookahead_min_m', 'lookahead_max_m', 'lookahead_preview_time_sec')
     }
 
     return LaunchDescription([
@@ -53,7 +54,7 @@ def generate_launch_description():
             executable='planning_node',
             name='planning_node',
             output='screen',
-            parameters=[planning_cfg, lattice_geometry],
+            parameters=[planning_cfg, avoidance_geometry],
         ),
 
         Node(

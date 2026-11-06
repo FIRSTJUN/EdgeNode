@@ -2,7 +2,7 @@
 <package format="3">
   <name>edgenode_planning</name>
   <version>0.1.0</version>
-  <description>FSM and lane-offset candidate planner for EdgeNode.</description>
+  <description>Static obstacle lattice planning and guarded path following for EdgeNode.</description>
   <maintainer email="poj285895@gmail.com">EdgeNode Team</maintainer>
   <license>MIT</license>
 
@@ -20,7 +20,7 @@
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>rviz2</exec_depend>
   <test_depend>python3-pytest</test_depend>
-  <test_depend>edgenode_control</test_depend>
+  <exec_depend>edgenode_control</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

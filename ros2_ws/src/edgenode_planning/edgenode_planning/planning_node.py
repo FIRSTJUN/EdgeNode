@@ -1,5 +1,6 @@
 import json
 import math
+import time
 
 import rclpy
 from rclpy.node import Node
@@ -7,8 +8,9 @@ from rclpy.node import Node
 from geometry_msgs.msg import PoseArray, PoseStamped
 from nav_msgs.msg import Odometry, Path
 from rcl_interfaces.msg import ParameterDescriptor
-from std_msgs.msg import Bool, Float32, Float64, Int32, String
+from std_msgs.msg import Float32, Float64, Int32, String
 from std_srvs.srv import Trigger
+from visualization_msgs.msg import MarkerArray
 
 from edgenode_planning.dijkstra_planner import DijkstraPlanner
 from edgenode_planning.local_path_planner import LocalPathPlanner
@@ -27,12 +29,11 @@ def _finite_number(value):
 
 
 from .planning_fsm import PlanningFSM
-from .adjacent_lane_planner import AdjacentLanePlanner
-from .static_obstacle_lane_change import StaticObstacleLaneChangeBehavior
 from .lane_geometry import LaneNetwork
-from .maneuver_diagnostics import inspect_maneuver
-from .corridor_scene import capture_scene, json_value, planner_snapshot, write_scene
-from .lattice_planner import DEFAULT_CANDIDATE_OFFSETS_M, LatticePlanner
+from .static_obstacle_planner import AvoidanceConfig, StaticObstaclePlanner
+from .lattice_path import CostWeights, control_local_path
+from .avoidance_geometry import load_drivable_area
+from .avoidance_visualization import candidate_markers, diagnostic
 
 
 class PlanningNode(Node):
@@ -40,7 +41,7 @@ class PlanningNode(Node):
     Match localization and publish global and local paths at 20 Hz.
 
     Current stage:
-      - Perception supplies world-frame obstacle footprint samples.
+      - Perception supplies map-frame grouped obstacle footprints; unknown road boundaries stop avoidance.
       - Localization odometry is the only pose input.
       - Global routes are fixed until the active waypoint list or goal changes.
       - Local paths start at a bounded, forward-only global-segment projection.
@@ -112,34 +113,6 @@ class PlanningNode(Node):
                 ('max_drive_speed_kmh', 1.0),
                 ('drive_duration_sec', 15.0),
                 ('drive_status_topic', '/planning/drive_status'),
-                ('obstacle_topic', '/planning/obstacles'),
-                # Perception publishes ordered eight-point footprints; legacy
-                # center publishers can retain the default ungrouped contract.
-                ('obstacle_points_per_cluster', 1, ParameterDescriptor(read_only=True)),
-                ('obstacle_avoidance_mode', 'adjacent_lane', ParameterDescriptor(read_only=True)),
-                ('lane_change_primitive_length_m', 20.0, ParameterDescriptor(read_only=True)),
-                ('lane_change_min_duration_sec', 3.0, ParameterDescriptor(read_only=True)),
-                ('lane_change_corridor_dump_dir', '/workspace/logs/kcity_s4_corridor_diagnostics',
-                 ParameterDescriptor(read_only=True)),
-                ('lattice_status_topic', '/planning/lattice_status'),
-                ('lattice_offset_topic', '/planning/lattice_offset'),
-                ('lattice_clearance_topic', '/planning/lattice_clearance'),
-                # Legacy clearance is a floor, never smaller than width+margin.
-                ('lattice_clearance_m', 0.55),
-                ('ego_half_width_m', 0.95),
-                ('obstacle_safety_margin_m', 0.25),
-                ('lattice_candidate_offsets_m', list(DEFAULT_CANDIDATE_OFFSETS_M)),
-                ('lattice_transition_after_m', 10.0),
-                ('lattice_transition_before_m', 5.0, ParameterDescriptor(read_only=True)),
-                ('obstacle_avoid_speed_cap_kmh', 3.0),
-                # Static planner geometry: the bringup launch takes these from
-                # the same control.yaml used to start Control.
-                ('lattice_wheelbase_m', 2.84, ParameterDescriptor(read_only=True)),
-                ('lattice_max_wheel_angle_rad', 0.610865, ParameterDescriptor(read_only=True)),
-                ('lattice_max_front_steer_normalized', 0.70, ParameterDescriptor(read_only=True)),
-                ('lattice_curvature_safety_factor', 1.0, ParameterDescriptor(read_only=True)),
-                ('lattice_obstacle_rear_margin_m', 0.5, ParameterDescriptor(read_only=True)),
-                ('lattice_blocked_release_cycles', 3, ParameterDescriptor(read_only=True)),
                 ('fsm_state_topic', '/planning/fsm_state'),
                 ('curve_speed_kmh', 0.7),
                 ('sharp_curve_speed_kmh', 0.5),
@@ -193,6 +166,51 @@ class PlanningNode(Node):
             curvature_persistence_m=self.get_parameter('speed_curvature_persistence_m').value,
             curvature_hysteresis=self.get_parameter('speed_curvature_hysteresis').value,
         )
+
+        self.declare_parameter('obstacle_topic', '/planning/obstacles')
+        self.declare_parameter('obstacle_points_per_cluster', 8, ParameterDescriptor(read_only=True))
+        self.declare_parameter('avoidance_boundary_file', '', ParameterDescriptor(read_only=True))
+        self.declare_parameter('avoidance_observation_timeout_sec', .6, ParameterDescriptor(read_only=True))
+        defaults = AvoidanceConfig()
+        for name, value in defaults.__dict__.items():
+            self.declare_parameter('avoidance_'+name, list(value) if isinstance(value, tuple) else value,
+                                   ParameterDescriptor(read_only=True))
+        values = {name:self.get_parameter('avoidance_'+name).value for name in defaults.__dict__}
+        values['transition_lengths_m'] = tuple(values['transition_lengths_m'])
+        weights=CostWeights()
+        for name,value in weights.__dict__.items():
+            self.declare_parameter('avoidance_cost_'+name,value,ParameterDescriptor(read_only=True))
+        self.avoidance_planner = StaticObstaclePlanner(LaneNetwork(self.dijkstra_planner),
+            config=AvoidanceConfig(**values),
+            weights=CostWeights(**{name:self.get_parameter('avoidance_cost_'+name).value
+                                   for name in weights.__dict__}),
+            drivable_area=load_drivable_area(self.get_parameter('avoidance_boundary_file').value))
+        self.latest_obstacle_groups = []
+        self.latest_obstacle_valid = True
+        self.obstacle_received_ns = None
+        self.obstacle_stamp_ns = None
+        self.latest_speed_kmh = 0.
+        self.latest_turn_curvature = 0.
+        self.latest_pose_stamp_ns = None
+        self.latest_pose_received_ns = None
+        self._validation_pending_stamp_ns = None
+        self._validation_fresh_stamps = set()
+        self._candidate_marker_ids = set()
+        self._candidate_cache=None
+        self._diagnostic_path_cache={}
+        self.avoidance_state_pub = self.create_publisher(String, '/planning/avoidance_state', 10)
+        self.avoidance_debug_pub = self.create_publisher(String, '/planning/avoidance_debug', 10)
+        self.candidate_pub = self.create_publisher(MarkerArray, '/planning/lattice_candidate_markers', 10)
+        for name in ('runtime_cruise_speed','runtime_curve_speed','runtime_sharp_curve_speed','runtime_max_drive_speed'):
+            setattr(self,name+'_pub',self.create_publisher(Float32,'/planning/'+name,10))
+        self._avoidance_path_publishers = {name:self.create_publisher(Path, '/planning/'+name, 10)
+            for name in ('original_lane_center','left_lane_center','right_lane_center',
+                         'avoidance_selected_path','avoidance_return_path')}
+        self.obstacle_sub = self.create_subscription(PoseArray,
+            self.get_parameter('obstacle_topic').value, self.obstacle_callback, 10)
+        self.reset_avoidance_service = self.create_service(Trigger, '/planning/reset_avoidance',
+                                                          self.reset_avoidance)
+
         self._previous_speed_mode = None
         self._route_key = None
         self._route_result = None
@@ -205,46 +223,6 @@ class PlanningNode(Node):
         self._drive_session_duration_sec = None
         self._drive_last_time_ns = None
         self.fsm = PlanningFSM()
-        self.lattice_planner = LatticePlanner(
-            obstacle_clearance_m=self.get_parameter('lattice_clearance_m').value,
-            ego_half_width_m=self.get_parameter('ego_half_width_m').value,
-            obstacle_safety_margin_m=self.get_parameter('obstacle_safety_margin_m').value,
-            candidate_offsets_m=self.get_parameter('lattice_candidate_offsets_m').value,
-            transition_after_m=self.get_parameter('lattice_transition_after_m').value,
-            transition_before_m=self.get_parameter('lattice_transition_before_m').value,
-            wheelbase_m=self.get_parameter('lattice_wheelbase_m').value,
-            max_wheel_angle_rad=self.get_parameter('lattice_max_wheel_angle_rad').value,
-            max_front_steer_normalized=self.get_parameter(
-                'lattice_max_front_steer_normalized').value,
-            curvature_safety_factor=self.get_parameter('lattice_curvature_safety_factor').value,
-            obstacle_rear_margin_m=self.get_parameter('lattice_obstacle_rear_margin_m').value,
-            blocked_release_cycles=self.get_parameter('lattice_blocked_release_cycles').value,
-        )
-        mode = self.get_parameter('obstacle_avoidance_mode').value
-        if mode not in ('legacy_offset', 'adjacent_lane', 'lane_change_primitive'):
-            raise ValueError('unknown obstacle_avoidance_mode')
-        if mode in ('adjacent_lane', 'lane_change_primitive'):
-            legacy = self.lattice_planner
-            planner_type = (StaticObstacleLaneChangeBehavior if mode == 'lane_change_primitive'
-                            else AdjacentLanePlanner)
-            extra = (dict(transition_length_m=self.get_parameter('lane_change_primitive_length_m').value)
-                     if mode == 'lane_change_primitive' else {})
-            self.lattice_planner = planner_type(
-                LaneNetwork(self.dijkstra_planner),
-                min_transition_time_sec=self.get_parameter('lane_change_min_duration_sec').value,
-                obstacle_clearance_m=legacy.required_clearance_m,
-                ego_half_width_m=legacy.ego_half_width_m,
-                obstacle_safety_margin_m=legacy.obstacle_safety_margin_m,
-                transition_before_m=legacy.transition_before_m,
-                transition_after_m=legacy.transition_after_m,
-                wheelbase_m=legacy.wheelbase_m,max_wheel_angle_rad=legacy.max_wheel_angle_rad,
-                max_front_steer_normalized=legacy.max_front_steer_normalized,
-                curvature_safety_factor=legacy.curvature_safety_factor,
-                obstacle_rear_margin_m=legacy.obstacle_rear_margin_m,
-                blocked_release_cycles=legacy.blocked_release_cycles, **extra)
-        self.latest_speed_kmh = 0.0
-        self.latest_obstacles = []
-
         self.target_error_pub = self.create_publisher(
             Float32,
             self.get_parameter('target_error_topic').value,
@@ -333,66 +311,6 @@ class PlanningNode(Node):
             self.get_parameter('fsm_state_topic').value,
             10,
         )
-        self.lattice_status_pub = self.create_publisher(
-            String,
-            self.get_parameter('lattice_status_topic').value,
-            10,
-        )
-        self.lattice_offset_pub = self.create_publisher(
-            Float32,
-            self.get_parameter('lattice_offset_topic').value,
-            10,
-        )
-        self.lattice_clearance_pub = self.create_publisher(
-            Float32,
-            self.get_parameter('lattice_clearance_topic').value,
-            10,
-        )
-        for diagnostic in ('obstacle_avoid_speed_cap_kmh', 'applied_speed_cap_kmh',
-                           'lattice_max_curvature', 'lattice_curvature_limit',
-                           'lattice_obstacle_front_s', 'lattice_obstacle_rear_s',
-                           'lattice_entry_length', 'lattice_full_offset_start_s',
-                           'lattice_recovery_length', 'runtime_cruise_speed',
-                           'runtime_curve_speed', 'runtime_sharp_curve_speed',
-                           'runtime_max_drive_speed', 'actual_lateral_offset',
-                           'last_approved_offset', 'evaluated_candidate_offset',
-                           'evaluated_candidate_clearance',
-                           'evaluated_candidate_profile_curvature',
-                           'evaluated_candidate_polyline_curvature'):
-            setattr(self, diagnostic + '_pub', self.create_publisher(
-                Float32, '/planning/' + diagnostic, 10))
-        self.lattice_blocked_reason_pub = self.create_publisher(
-            String, '/planning/lattice_blocked_reason', 10)
-        self.evaluated_candidate_reject_reason_pub = self.create_publisher(
-            String, '/planning/evaluated_candidate_reject_reason', 10)
-        for diagnostic in ('lane_change_obstacle_safe', 'lane_change_steering_feasible', 'lane_change_corridor_safe'):
-            setattr(self, diagnostic+'_pub', self.create_publisher(Bool, '/planning/'+diagnostic, 10))
-        self.lane_change_state_pub = self.create_publisher(String, '/planning/lane_change_state', 10)
-        self.lane_change_side_pub = self.create_publisher(String, '/planning/lane_change_side', 10)
-        self.selected_adjacent_link_pub = self.create_publisher(String, '/planning/selected_adjacent_link', 10)
-        self.adjacent_lane_separation_pub = self.create_publisher(Float32, '/planning/adjacent_lane_separation', 10)
-        self.lane_change_corridor_violation_m_pub = self.create_publisher(
-            Float32, '/planning/lane_change_corridor_violation_m', 10)
-        for diagnostic in ('lane_change_corridor_failed_index', 'lane_change_corridor_failed_point_count'):
-            setattr(self, diagnostic+'_pub', self.create_publisher(Int32, '/planning/'+diagnostic, 10))
-        self.lane_change_corridor_debug_pub = self.create_publisher(
-            String, '/planning/lane_change_corridor_debug', 10)
-        self.lane_change_maneuver_debug_pub = self.create_publisher(
-            String, '/planning/lane_change_maneuver_debug', 10)
-        self._corridor_scene = None
-        self.corridor_dump_service = self.create_service(
-            Trigger, '/planning/dump_lane_change_corridor_scene', self.dump_lane_change_corridor_scene)
-        for diagnostic in ('original_lane_center', 'adjacent_lane_center', 'lane_change_entry_path',
-                           'adjacent_lane_hold_path', 'lane_change_recovery_path', 'lane_change_recovery_gate'):
-            setattr(self, diagnostic + '_pub', self.create_publisher(Path, '/planning/' + diagnostic, 10))
-        self.latest_obstacle_groups = None
-        self._obstacle_points_per_cluster = self.get_parameter('obstacle_points_per_cluster').value
-        self.obstacle_sub = self.create_subscription(
-            PoseArray,
-            self.get_parameter('obstacle_topic').value,
-            self.obstacle_callback,
-            10,
-        )
         self.localization_sub = self.create_subscription(
             Odometry,
             self.get_parameter('localization_topic').value,
@@ -411,36 +329,62 @@ class PlanningNode(Node):
             'waiting for localization (drive disabled by default)'
         )
 
-    def dump_lane_change_corridor_scene(self, request, response):
-        """Write one current input snapshot on explicit request; no control action."""
-        try:
-            response.message = write_scene(self._corridor_scene,
-                self.get_parameter('lane_change_corridor_dump_dir').value)
-            response.success = True
-        except (OSError, ValueError, TypeError) as error:
-            response.success = False
-            response.message = str(error)
+    def reset_avoidance(self, request, response):
+        response.success = self.get_parameter('enable_drive').value is not True
+        if response.success:
+            self.avoidance_planner.reset()
+            self._validation_pending_stamp_ns=None
+            self._validation_fresh_stamps.clear()
+        response.message = 'reset complete' if response.success else 'disable drive before resetting avoidance'
         return response
 
     def obstacle_callback(self, msg):
-        """Store world-frame obstacle XY positions for Lattice planning."""
-        obstacles = []
+        now = self.get_clock().now().nanoseconds
+        stamp = msg.header.stamp.sec*10**9+msg.header.stamp.nanosec
+        points = [(p.position.x,p.position.y) for p in msg.poses]
+        valid = (msg.header.frame_id == 'map' and len(points)%8 == 0
+            and self.get_parameter('obstacle_points_per_cluster').value == 8
+            and all(_finite_number(v) for p in points for v in p)
+            and (self.obstacle_stamp_ns is None or stamp >= self.obstacle_stamp_ns))
+        # Do not turn malformed/reordered observations into an apparent empty
+        # free road. The planner retains previous obstacle solids on a miss.
+        self.latest_obstacle_valid = valid
+        if valid:
+            self.latest_obstacle_groups = [points[i:i+8] for i in range(0,len(points),8)]
+            self.obstacle_received_ns = now
+            self.obstacle_stamp_ns = stamp
 
-        for pose in msg.poses:
-            x = pose.position.x
-            y = pose.position.y
-
-            if _finite_number(x) and _finite_number(y):
-                obstacles.append((float(x), float(y)))
-
-        self.latest_obstacles = obstacles
-        size = getattr(self, '_obstacle_points_per_cluster', 1)
-        # Never discard malformed or legacy samples. Grouping is metadata only;
-        # all finite input points remain in the collision set.
-        self.latest_obstacle_groups = (
-            [obstacles[i:i + size] for i in range(0, len(obstacles), size)]
-            if size == 8 and len(obstacles) == len(msg.poses) and len(obstacles) % size == 0
-            else None)
+    def publish_avoidance(self, result):
+        stamp = self.get_clock().now().to_msg()
+        self.avoidance_state_pub.publish(String(data=result['state']))
+        self.avoidance_debug_pub.publish(String(data=json.dumps(diagnostic(result),allow_nan=False)))
+        key=(id(result.get('candidates')),result['state'],result.get('reason'),result.get('selected_lane'))
+        cache=getattr(self,'_candidate_cache',None)
+        if cache is None or cache[0]!=key:
+            markers,self._candidate_marker_ids = candidate_markers(result,stamp,self._candidate_marker_ids)
+            self._candidate_cache=(key,markers,result.get('candidates'))
+        else:
+            markers=cache[1]
+            for marker in markers.markers:marker.header.stamp=stamp
+        self.candidate_pub.publish(markers)
+        paths = {'original_lane_center':result.get('original_lane',()),
+                 'left_lane_center':result.get('left_lane',()), 'right_lane_center':result.get('right_lane',()),
+                 'avoidance_selected_path':result.get('points',()) if result.get('active') else (),
+                 'avoidance_return_path':result.get('return_path',()) if not result.get('blocked') else ()}
+        for name, points in paths.items():
+            if not hasattr(self,'_diagnostic_path_cache'):self._diagnostic_path_cache={}
+            cached=self._diagnostic_path_cache.get(name)
+            if cached is None or cached[0] is not points:
+                msg=Path();msg.header.frame_id='map'
+                for point in points:
+                    p=PoseStamped();p.header=msg.header
+                    p.pose.position.x,p.pose.position.y,p.pose.position.z=map(float,point)
+                    p.pose.orientation.w=1.;msg.poses.append(p)
+                self._diagnostic_path_cache[name]=(points,msg)
+            else:msg=cached[1]
+            msg.header.stamp=stamp
+            for p in msg.poses:p.header.stamp=stamp
+            self._avoidance_path_publishers[name].publish(msg)
 
     def localization_callback(self, msg):
         """Store the latest pose; map matching runs only in the planning timer."""
@@ -451,10 +395,13 @@ class PlanningNode(Node):
             1.0 - 2.0 * (q.y * q.y + q.z * q.z),
         )
         self.latest_pose = (position.x, position.y, yaw)
-        self.latest_pose_stamp_ns = msg.header.stamp.sec*10**9+msg.header.stamp.nanosec
-        self.latest_pose_receipt_ns = self.get_clock().now().nanoseconds
+        self.latest_pose_stamp_ns=msg.header.stamp.sec*10**9+msg.header.stamp.nanosec
+        self.latest_pose_received_ns=self.get_clock().now().nanoseconds
         speed = msg.twist.twist.linear.x
-        self.latest_speed_kmh = abs(float(speed))*3.6 if _finite_number(speed) else math.nan
+        turn = msg.twist.twist.angular.z
+        self.latest_speed_kmh = float(speed)*3.6 if _finite_number(speed) else math.nan
+        self.latest_turn_curvature = (float(turn)/speed if _finite_number(speed)
+            and _finite_number(turn) and abs(speed)>.05 else 0. if _finite_number(turn) and abs(turn)<.005 else math.nan)
 
     def plan(self):
         """Publish routes, recommendations and guarded, time-limited commands.
@@ -463,17 +410,9 @@ class PlanningNode(Node):
         every tick. Match loss retains progress/cache but publishes no Path.
         An active route configuration change invalidates both immediately.
         """
-        # A missing/invalid current cycle must not dump an older scene.
-        self._corridor_scene = None
-        # Read on every cycle, before the recommendation. ROS parameter
-        # readback and the actual planner share the same runtime contract.
         for name in ('cruise_speed_kmh', 'curve_speed_kmh', 'sharp_curve_speed_kmh'):
             setattr(self.speed_planner, name, self.get_parameter(name).value)
-        lattice_result = None
-        corridor_before = None
-        input_odometry_stamp_ns = getattr(self, 'latest_pose_stamp_ns', None)
-        input_receipt_stamp_ns = getattr(self, 'latest_pose_receipt_ns', None)
-        planning_start_stamp_ns = self.get_clock().now().nanoseconds
+        avoidance_result = None
         state_value = 'WAIT_FOR_LOCALIZATION'
         status_value = 'WAIT_FOR_LOCALIZATION'
         current_link = ''
@@ -486,19 +425,6 @@ class PlanningNode(Node):
         local_result = None
         speed_result = None
         speed_valid = False
-        lattice_status = 'IDLE'
-        lattice_offset = 0.0
-        lattice_clearance = float('nan')
-        lattice_max_curvature = float('nan')
-        lattice_obstacle_front_s = float('nan')
-        lattice_obstacle_rear_s = float('nan')
-        lattice_blocked_reason = ''
-        lattice_entry_length = math.nan
-        lattice_full_offset_start_s = math.nan
-        lattice_recovery_length = math.nan
-        lattice_blocked = False
-        obstacle_avoid_requested = False
-
         route_node_ids = self.get_parameter('route_node_ids').value
         use_waypoints = (route_node_ids is not None
                          and not (isinstance(route_node_ids, (list, tuple))
@@ -511,12 +437,17 @@ class PlanningNode(Node):
             goal_node_id = self.get_parameter('goal_node_id').value
             route_key = ('goal', goal_node_id)
         if route_key != self._route_key:
+            if self._route_key is not None and self.avoidance_planner.state!='NORMAL':
+                # A route edit must not erase a committed maneuver, remembered
+                # hazard or latched STOP. Explicit disarmed reset is required.
+                self.avoidance_planner.stop('ROUTE_CHANGED_DURING_AVOIDANCE')
             self._route_key = None
             self._route_result = None
             self._progress_index = None
             self._progress_arc_m = None
             self._previous_speed_mode = None
-            self.lattice_planner.reset()
+            self._validation_pending_stamp_ns=None
+            self._validation_fresh_stamps.clear()
 
         now_ns = self.get_clock().now().nanoseconds
         enable_drive = self.get_parameter('enable_drive').value is True
@@ -596,63 +527,78 @@ class PlanningNode(Node):
                         self._progress_arc_m = local_result['progress_arc_m']
                         active_local_points = local_result['points']
 
-                        lane_options = {}
-                        corridor_before = None
-                        if isinstance(self.lattice_planner, AdjacentLanePlanner):
-                            corridor_before = planner_snapshot(self.lattice_planner)
-                        if isinstance(self.lattice_planner, (AdjacentLanePlanner, StaticObstacleLaneChangeBehavior)):
-                            recommendation_bound = max(self.get_parameter(name).value for name in (
-                                'cruise_speed_kmh', 'curve_speed_kmh', 'sharp_curve_speed_kmh'))
-                            configured_speed = min(recommendation_bound,
-                                self.get_parameter('max_drive_speed_kmh').value,
-                                self.get_parameter('obstacle_avoid_speed_cap_kmh').value)
-                            planned_speed = max(getattr(self, 'latest_speed_kmh', 0.0), configured_speed)
-                            lane_options = dict(current_link_id=current_link,
-                                route_link_ids=self._route_result['link_ids'], speed_kmh=planned_speed)
-                        lattice_result = self.lattice_planner.plan(
-                            active_local_points,
-                            self.latest_obstacles,
-                            current_position=(x, y),
-                            current_heading=yaw,
-                            obstacle_groups=getattr(self, 'latest_obstacle_groups', None),
-                            road_progress_m=self._progress_arc_m, **lane_options,
-                        )
-                        if corridor_before is not None:
-                            self._corridor_scene = capture_scene(self.lattice_planner, corridor_before,
-                                dict(reference_points=local_result['points'], obstacles=self.latest_obstacles,
-                                     current_position=[x, y], current_heading=yaw,
-                                     obstacle_groups=getattr(self, 'latest_obstacle_groups', None),
-                                     road_progress_m=self._progress_arc_m, **lane_options),
-                                lattice_result, now_ns, self.get_parameter('global_path_frame_id').value)
-
-                        if lattice_result is not None:
-                            lattice_status = lattice_result['status']
-                            lattice_offset = lattice_result['selected_offset_m']
-                            lattice_clearance = lattice_result['minimum_clearance_m']
-                            lattice_max_curvature = lattice_result['maximum_curvature']
-                            lattice_obstacle_front_s = lattice_result['obstacle_front_s']
-                            lattice_obstacle_rear_s = lattice_result['obstacle_rear_s']
-                            lattice_blocked_reason = lattice_result['blocked_reason']
-                            lattice_entry_length = lattice_result['entry_length']
-                            lattice_full_offset_start_s = lattice_result['full_offset_start_s']
-                            lattice_recovery_length = lattice_result['recovery_length']
-                            lattice_blocked = lattice_result['blocked']
-                            obstacle_avoid_requested = lattice_result[
-                                'obstacle_avoid_requested'
-                            ]
-
-                            if not lattice_blocked:
-                                active_local_points = lattice_result['points']
-                            elif isinstance(self.lattice_planner, (AdjacentLanePlanner, StaticObstacleLaneChangeBehavior)):
-                                # No approved local path exists. Publish an empty
-                                # path rather than an unapproved road-center fallback.
-                                active_local_points = []
-                        elif self.latest_obstacles or isinstance(self.lattice_planner, (AdjacentLanePlanner, StaticObstacleLaneChangeBehavior)):
-                            lattice_status = 'BLOCKED'
-                            lattice_blocked = True
-                            lattice_blocked_reason = 'INVALID_AVOIDANCE_REFERENCE'
-                            if isinstance(self.lattice_planner, (AdjacentLanePlanner, StaticObstacleLaneChangeBehavior)):
-                                active_local_points = []
+                        receipt = self.obstacle_received_ns
+                        observation_valid = self.latest_obstacle_valid and (receipt is None or
+                            0 <= (now_ns-receipt)/1e9 <= self.get_parameter('avoidance_observation_timeout_sec').value)
+                        pose_receipt=getattr(self,'latest_pose_received_ns',None)
+                        if pose_receipt is not None:
+                            observation_valid=observation_valid and 0 <= (now_ns-pose_receipt)/1e9 <= self.get_parameter('avoidance_observation_timeout_sec').value
+                        stamp=getattr(self,'latest_pose_stamp_ns',None)
+                        validation_start=time.perf_counter()
+                        validation_stop=False
+                        control_points=None
+                        try:
+                            try:
+                                validation_stop=enable_drive and self.avoidance_planner.needs_validation_stop(
+                                    active_local_points,self.latest_obstacle_groups)
+                            except (ValueError,TypeError,OverflowError):
+                                # Unknown footprint extent must still reach the
+                                # planner's latched rejection, not become a
+                                # transient preprocessing exception/free road.
+                                validation_stop=enable_drive
+                            if validation_stop:
+                                # Send STOP BEFORE lengthy validation, never
+                                # leave the previous motion command live while
+                                # searching a new maneuver/changed obstacle.
+                                stop=Path();stop.header=path.header
+                                self.local_path_pub.publish(stop)
+                                self.target_speed_pub.publish(Float32(data=0.))
+                            avoidance_result = self.avoidance_planner.plan(active_local_points,
+                                self.latest_obstacle_groups,(x,y,yaw),speed_kmh=self.latest_speed_kmh,
+                                actual_curvature=self.latest_turn_curvature,current_link_id=current_link,
+                                route_link_ids=self._route_result.get('link_ids',()),observation_valid=observation_valid,
+                                control_horizon_m=self.get_parameter('local_path_length_m').value)
+                            if (not isinstance(avoidance_result,dict) or
+                                    not isinstance(avoidance_result.get('blocked'),bool) or
+                                    'points' not in avoidance_result or 'state' not in avoidance_result):
+                                raise ValueError('missing avoidance result')
+                            if not avoidance_result['blocked'] and avoidance_result.get('active'):
+                                points=avoidance_result['points']
+                                if (len(points)<2 or any(len(p)!=3 or not all(_finite_number(v) for v in p)
+                                                       for p in points)):
+                                    raise ValueError('invalid avoidance control geometry')
+                                # Window extraction is part of validation:
+                                # failure must latch STOP before any publish.
+                                control_points=control_local_path(points,(x,y,yaw),
+                                    self.get_parameter('local_path_length_m').value)
+                        except Exception as error:
+                            self.get_logger().error(f'Avoidance validation failed: {error}')
+                            avoidance_result=self.avoidance_planner.stop('INVALID_AVOIDANCE_RESULT')
+                        elapsed=time.perf_counter()-validation_start
+                        avoidance_result['validation_elapsed_ms']=elapsed*1000.
+                        if not avoidance_result['blocked'] and avoidance_result.get('active') and enable_drive:
+                            if validation_stop or elapsed>.05:
+                                self._validation_pending_stamp_ns=stamp if stamp is not None else -1
+                                self._validation_fresh_stamps.clear()
+                            pending=self._validation_pending_stamp_ns
+                            if pending is not None:
+                                if stamp is not None and stamp>pending:
+                                    self._validation_fresh_stamps.add(stamp)
+                                if len(self._validation_fresh_stamps)<3:
+                                    # A successful check on an old pose is not
+                                    # permission to drive. Require three distinct
+                                    # fresh odometry frames revalidated against
+                                    # the fixed path/controller before release.
+                                    avoidance_result=dict(avoidance_result,state='VALIDATING',points=(),
+                                        blocked=True,reason='WAIT_FRESH_VALIDATION')
+                                else:
+                                    self._validation_pending_stamp_ns=None
+                                    self._validation_fresh_stamps.clear()
+                        active_local_points = avoidance_result['points']
+                        if avoidance_result['blocked']:
+                            active_local_points=()
+                        elif control_points is not None:
+                            active_local_points=control_points
 
                         local_path = Path()
                         local_path.header = path.header
@@ -681,9 +627,12 @@ class PlanningNode(Node):
                             speed_max_curvature = speed_result['max_curvature']
 
         if local_result is None:
-            self.lattice_planner.break_release_confirmation()
+            self.avoidance_planner.invalidate_observation()
+        if avoidance_result is None:
+            avoidance_result = dict(state='BLOCKED',points=(),blocked=True,reason='PLANNING_NOT_READY',active=False)
+        PlanningNode.publish_avoidance(self, avoidance_result)
 
-        # Speed classification keeps its own hysteresis. Invalid planning
+        # Hysteresis belongs to speed classification only. Invalid planning
         # input or a route change must not carry a stale mode into recovery.
         self._previous_speed_mode = speed_mode if speed_valid else None
 
@@ -719,11 +668,6 @@ class PlanningNode(Node):
                 else:
                     drive_status = 'NOT_READY'
 
-        avoid_cap = self.get_parameter('obstacle_avoid_speed_cap_kmh').value
-        avoid_cap_valid = _finite_number(avoid_cap) and avoid_cap > 0
-        if obstacle_avoid_requested and not avoid_cap_valid:
-            drive_status = 'INVALID_CONFIG'
-
         previous_fsm_state = self.fsm.state
 
         fsm_state_value = self.fsm.update(
@@ -733,12 +677,9 @@ class PlanningNode(Node):
             local_path_ready=local_result is not None,
             speed_ready=speed_valid,
             drive_status=drive_status,
-            # Future behavior inputs.
-            # These remain False until Lattice / Perception / goal detection
-            # are connected to the planning layer.
-            obstacle_avoid_requested=obstacle_avoid_requested,
+            obstacle_avoid_requested=avoidance_result.get('active',False),
             traffic_stop_requested=False,
-            emergency_stop_requested=lattice_blocked,
+            emergency_stop_requested=avoidance_result['blocked'] and local_result is not None,
             goal_reached=False,
         )
 
@@ -747,17 +688,14 @@ class PlanningNode(Node):
                 f'FSM transition: {previous_fsm_state} -> {fsm_state_value}'
             )
 
-        # The S4 cap is applied at the final command, after speed classification
-        # and FSM arbitration. NORMAL_DRIVE keeps its existing cruise/cap.
-        max_speed = self.get_parameter('max_drive_speed_kmh').value
-        applied_cap = float(max_speed) if _finite_number(max_speed) and max_speed > 0 else 0.0
-        if fsm_state_value == PlanningFSM.OBSTACLE_AVOID:
-            applied_cap = min(applied_cap, float(avoid_cap)) if avoid_cap_valid else 0.0
+        # High-level FSM is the final motion gate.
+        # Speed Planning may recommend a speed, but motion is permitted
+        # only while the FSM is explicitly in DRIVING.
         if self.fsm.motion_allowed:
-            target_speed.data = min(requested_target_speed, applied_cap)
+            cap = avoidance_result.get('speed_cap_kmh')
+            target_speed.data = min(requested_target_speed,cap) if cap is not None else requested_target_speed
         else:
             target_speed.data = 0.0
-            applied_cap = 0.0
 
         state = String()
         state.data = state_value
@@ -777,95 +715,15 @@ class PlanningNode(Node):
         self.map_match_distance_pub.publish(Float32(data=distance))
         self.map_match_heading_diff_pub.publish(Float32(data=heading_diff))
         self.recommended_speed_pub.publish(Float32(data=recommended_speed))
-        for diagnostic, parameter in (
-                ('runtime_cruise_speed', 'cruise_speed_kmh'),
-                ('runtime_curve_speed', 'curve_speed_kmh'),
-                ('runtime_sharp_curve_speed', 'sharp_curve_speed_kmh')):
-            getattr(self, diagnostic + '_pub').publish(Float32(
-                data=float(getattr(self.speed_planner, parameter))))
-        self.runtime_max_drive_speed_pub.publish(Float32(
-            data=float(max_speed) if _finite_number(max_speed) else math.nan))
-        for diagnostic in ('actual_lateral_offset', 'last_approved_offset',
-                           'evaluated_candidate_offset', 'evaluated_candidate_clearance',
-                           'evaluated_candidate_profile_curvature',
-                           'evaluated_candidate_polyline_curvature'):
-            getattr(self, diagnostic + '_pub').publish(Float32(
-                data=lattice_result[diagnostic] if lattice_result else math.nan))
-        self.evaluated_candidate_reject_reason_pub.publish(String(
-            data=lattice_result['evaluated_candidate_reject_reason']
-            if lattice_result else 'NOT_EVALUATED'))
         self.speed_mode_pub.publish(String(data=speed_mode))
         self.speed_curvature_pub.publish(Float32(data=speed_curvature))
         self.speed_max_curvature_pub.publish(Float32(data=speed_max_curvature))
         self.drive_status_pub.publish(String(data=drive_status))
-        self.lattice_status_pub.publish(String(data=lattice_status))
-        self.lattice_offset_pub.publish(Float32(data=lattice_offset))
-        self.lattice_clearance_pub.publish(Float32(data=lattice_clearance))
-        self.obstacle_avoid_speed_cap_kmh_pub.publish(Float32(
-            data=float(avoid_cap) if avoid_cap_valid else 0.0))
-        self.applied_speed_cap_kmh_pub.publish(Float32(data=applied_cap))
-        self.lattice_max_curvature_pub.publish(Float32(data=lattice_max_curvature))
-        self.lattice_curvature_limit_pub.publish(Float32(
-            data=self.lattice_planner.usable_curvature_limit))
-        self.lattice_obstacle_front_s_pub.publish(Float32(data=lattice_obstacle_front_s))
-        self.lattice_obstacle_rear_s_pub.publish(Float32(data=lattice_obstacle_rear_s))
-        self.lattice_blocked_reason_pub.publish(String(data=lattice_blocked_reason))
-        self.lattice_entry_length_pub.publish(Float32(data=lattice_entry_length))
-        self.lattice_full_offset_start_s_pub.publish(Float32(data=lattice_full_offset_start_s))
-        self.lattice_recovery_length_pub.publish(Float32(data=lattice_recovery_length))
-        if hasattr(self, 'lane_change_state_pub'):
-            diagnostic = lattice_result or {}
-            phase = ('BLOCKED' if lattice_blocked else diagnostic.get('lane_change_phase',
-                     'LEGACY_OFFSET' if obstacle_avoid_requested else 'CLEAR'))
-            self.lane_change_state_pub.publish(String(data=phase))
-            self.lane_change_obstacle_safe_pub.publish(Bool(data=bool(
-                diagnostic.get('evaluated_candidate_clearance', math.nan)>=self.lattice_planner.required_clearance_m)))
-            self.lane_change_steering_feasible_pub.publish(Bool(data=bool(
-                diagnostic.get('maximum_curvature', math.inf)<=self.lattice_planner.usable_curvature_limit)))
-            self.lane_change_corridor_safe_pub.publish(Bool(data=bool(diagnostic.get('drivable_safe', False))))
-            corridor = diagnostic.get('corridor_diagnostics') or dict(
-                evaluated=False, reason='NOT_EVALUATED', max_violation_m=None,
-                failed_index=-1, failed_point_count=0)
-            self.lane_change_corridor_violation_m_pub.publish(Float32(
-                data=corridor['max_violation_m'] if corridor['max_violation_m'] is not None else math.nan))
-            self.lane_change_corridor_failed_index_pub.publish(Int32(data=corridor['failed_index']))
-            self.lane_change_corridor_failed_point_count_pub.publish(Int32(data=corridor['failed_point_count']))
-            self.lane_change_corridor_debug_pub.publish(String(
-                data=json.dumps(json_value(corridor), allow_nan=False, ensure_ascii=False)))
-            if isinstance(self.lattice_planner, AdjacentLanePlanner) and hasattr(self, 'lane_change_maneuver_debug_pub'):
-                maneuver=inspect_maneuver(self.lattice_planner,corridor_before,lattice_result,
-                    input_odometry_stamp_ns=input_odometry_stamp_ns,input_receipt_stamp_ns=input_receipt_stamp_ns,
-                    planning_start_stamp_ns=planning_start_stamp_ns,output_stamp_ns=self.get_clock().now().nanoseconds,
-                    current_position=self.latest_pose[:2] if self.latest_pose is not None else None,
-                    current_heading=self.latest_pose[2] if self.latest_pose is not None else None)
-                self.lane_change_maneuver_debug_pub.publish(String(
-                    data=json.dumps(maneuver,allow_nan=False,ensure_ascii=False)))
-                if self._corridor_scene is not None:
-                    self._corridor_scene['maneuver_diagnostics']=maneuver
-            self.lane_change_side_pub.publish(String(data=diagnostic.get('selected_side', '')))
-            self.selected_adjacent_link_pub.publish(String(data=diagnostic.get('adjacent_link_id', '')))
-            self.adjacent_lane_separation_pub.publish(Float32(data=diagnostic.get('adjacent_separation', math.nan)))
-            for topic, field in (
-                    ('original_lane_center', 'original_lane_points'),
-                    ('adjacent_lane_center', 'adjacent_lane_points'),
-                    ('lane_change_entry_path', 'entry_points'),
-                    ('adjacent_lane_hold_path', 'hold_points'),
-                    ('lane_change_recovery_path', 'recovery_points'),
-                    ('lane_change_recovery_gate', 'recovery_gate_points')):
-                msg = Path()
-                msg.header.frame_id = self.get_parameter('global_path_frame_id').value
-                msg.header.stamp = self.get_clock().now().to_msg()
-                points = diagnostic.get(field, [])
-                if field == 'original_lane_points' and not points and local_result is not None:
-                    points = local_result['points']
-                for point in points:
-                    pose = PoseStamped()
-                    pose.header = msg.header
-                    pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = map(float, point)
-                    pose.pose.orientation.w = 1.0
-                    msg.poses.append(pose)
-                getattr(self, topic + '_pub').publish(msg)
-
+        for topic,parameter in (('runtime_cruise_speed','cruise_speed_kmh'),
+                ('runtime_curve_speed','curve_speed_kmh'),('runtime_sharp_curve_speed','sharp_curve_speed_kmh'),
+                ('runtime_max_drive_speed','max_drive_speed_kmh')):
+            value=self.get_parameter(parameter).value
+            getattr(self,topic+'_pub').publish(Float32(data=float(value) if _finite_number(value) else math.nan))
 
 
 def main(args=None):

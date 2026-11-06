@@ -66,37 +66,34 @@ planning_node:
 
     # lidar_obstacle_node preserves ordered eight-point groups in PoseArray.
     obstacle_points_per_cluster: 8
-    obstacle_avoidance_mode: adjacent_lane
-    # Opt-in fixed primitive mode: lane_change_primitive. Legacy modes preserved.
-    lane_change_primitive_length_m: 20.0
-    # Minimum duration policy at the greater of measured/requested avoidance
-    # speed; geometric/corridor gates remain authoritative. Not a dynamics spec.
-    lane_change_min_duration_sec: 3.0
 
-    # S4 MORAI test baseline; 0.95 m is a provisional half-width, not a spec.
-    ego_half_width_m: 0.95
-    obstacle_safety_margin_m: 0.25
-    # Compatibility floor: required=max(this, half_width+safety_margin)=1.20 m.
-    lattice_clearance_m: 0.55
-    # Legacy mode compatibility only; adjacent_lane uses actual MGeo centers.
-    lattice_candidate_offsets_m: [0.0, 0.6, -0.6, 0.8, -0.8, 1.2, -1.2, 1.5, -1.5, 1.8, -1.8, 2.1, -2.1, 2.4, -2.4]
-    # Preferred RECOVERING length; adaptive generation extends it if required.
-    # 10m stays below the existing 0.70-steer geometric limit on straight baseline.
-    lattice_transition_after_m: 10.0
-    # Preferred minimum only. Geometry may require more; front deadline is strict.
-    lattice_transition_before_m: 5.0
-
-    # S4 final-command limit, only while FSM=OBSTACLE_AVOID (includes recovery).
-    # General cruise/max_drive_speed above remain unchanged.
-    obstacle_avoid_speed_cap_kmh: 3.0
-    # Standalone defaults; autonomy.launch.py overrides the geometry from the
-    # exact control.yaml used for Control. Restart both after geometry changes.
-    lattice_wheelbase_m: 2.84
-    lattice_max_wheel_angle_rad: 0.610865
-    lattice_max_front_steer_normalized: 0.70
-    # 1.0 uses the actual command-limit geometry; never allow a factor > 1.
-    lattice_curvature_safety_factor: 1.0
-    # Reference-point clearance only; this is NOT an Ego rear overhang.
-    lattice_obstacle_rear_margin_m: 0.5
-    # Three consecutive safe Planning cycles; one safe frame cannot release.
-    lattice_blocked_release_cycles: 3
+    # Generic avoidance uses verified external road cells only. Empty means
+    # unknown boundary: candidates remain diagnostic and avoidance stops.
+    avoidance_boundary_file: ""
+    avoidance_observation_timeout_sec: 0.6
+    avoidance_transition_lengths_m: [12.0, 16.0, 20.0]
+    avoidance_prediction_distance_m: 80.0
+    avoidance_obstacle_margin_m: 0.25
+    avoidance_reference_clearance_m: 1.20
+    avoidance_return_margin_m: 0.5
+    avoidance_road_margin_m: 0.0
+    avoidance_avoid_speed_kmh: 3.0
+    avoidance_deceleration_mps2: 2.0
+    avoidance_reaction_time_s: 0.3
+    avoidance_max_lateral_acceleration_mps2: 1.5
+    avoidance_max_wheel_rate_radps: 0.6
+    avoidance_rollout_seconds: 2.0
+    avoidance_command_delay_s: 0.1
+    avoidance_wheelbase_m: 2.84
+    avoidance_max_wheel_angle_rad: 0.610865
+    avoidance_max_front_steer_normalized: 0.70
+    avoidance_steering_sign: -1.0
+    avoidance_control_rate_hz: 30.0
+    avoidance_lookahead_min_m: 2.5
+    avoidance_lookahead_max_m: 10.0
+    avoidance_lookahead_preview_time_sec: 0.45
+    avoidance_cost_reference: 1.0
+    avoidance_cost_adjacent: 1.5
+    avoidance_cost_curvature: 0.2
+    avoidance_cost_lane_switch: 0.2
+    avoidance_cost_progress: 0.1

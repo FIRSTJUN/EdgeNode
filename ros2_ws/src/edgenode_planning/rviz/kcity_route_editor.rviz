@@ -58,10 +58,10 @@ Visualization Manager:
       History Policy: Keep Last
       Depth: 1
   - Class: rviz_default_plugins/Marker
-    Name: 05 Selected Adjacent Center - YELLOW
+    Name: 05 Left Adjacent Center - YELLOW
     Enabled: true
     Topic:
-      Value: /planning/adjacent_lane_marker
+      Value: /planning/left_lane_marker
       Reliability Policy: Reliable
       Durability Policy: Volatile
       History Policy: Keep Last
@@ -76,37 +76,37 @@ Visualization Manager:
       History Policy: Keep Last
       Depth: 1
   - Class: rviz_default_plugins/Marker
-    Name: 07 Lane Change ENTRY - CYAN stripe
+    Name: 07 Selected Avoidance - CYAN stripe
     Enabled: true
     Topic:
-      Value: /planning/lane_change_entry_marker
+      Value: /planning/avoidance_selected_marker
       Reliability Policy: Reliable
       Durability Policy: Volatile
       History Policy: Keep Last
       Depth: 1
   - Class: rviz_default_plugins/Marker
-    Name: 08 Adjacent Lane HOLD - PURPLE stripe
+    Name: 08 Right Adjacent Center - ORANGE
     Enabled: true
     Topic:
-      Value: /planning/adjacent_lane_hold_marker
+      Value: /planning/right_lane_marker
       Reliability Policy: Reliable
       Durability Policy: Volatile
       History Policy: Keep Last
       Depth: 1
   - Class: rviz_default_plugins/Marker
-    Name: 09 Recovery Path - PINK stripe
+    Name: 09 Reserved Return Path - PINK stripe
     Enabled: true
     Topic:
-      Value: /planning/lane_change_recovery_marker
+      Value: /planning/avoidance_return_marker
       Reliability Policy: Reliable
       Durability Policy: Volatile
       History Policy: Keep Last
       Depth: 1
-  - Class: rviz_default_plugins/Marker
-    Name: 09b Recovery gate - reference rear + margin
+  - Class: rviz_default_plugins/MarkerArray
+    Name: 09b Lattice Candidates - Cost and Rejection Reasons
     Enabled: true
     Topic:
-      Value: /planning/recovery_gate_marker
+      Value: /planning/lattice_candidate_markers
       Reliability Policy: Reliable
       Durability Policy: Volatile
       History Policy: Keep Last
