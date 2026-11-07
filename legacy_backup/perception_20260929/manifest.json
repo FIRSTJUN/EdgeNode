@@ -1,0 +1,92 @@
+[
+  {
+    "original_path": "ros2_ws/src/edgenode_perception/config/perception.yaml",
+    "archive_path": "legacy_backup/perception_20260929/ros2_ws/src/edgenode_perception/config/perception.yaml.txt",
+    "sha256": "c097303661efccc2ba52d4a39b6fe66178ebd48879f0ad24174e890b04bd16ac",
+    "bytes": 3001
+  },
+  {
+    "original_path": "ros2_ws/src/edgenode_perception/edgenode_perception/__init__.py",
+    "archive_path": "legacy_backup/perception_20260929/ros2_ws/src/edgenode_perception/edgenode_perception/__init__.py.txt",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "original_path": "ros2_ws/src/edgenode_perception/edgenode_perception/perception_node.py",
+    "archive_path": "legacy_backup/perception_20260929/ros2_ws/src/edgenode_perception/edgenode_perception/perception_node.py.txt",
+    "sha256": "78a1706824503a47eb62b60fcf5a993709e009d8260f9153fdb22a13d641c168",
+    "bytes": 95288
+  },
+  {
+    "original_path": "ros2_ws/src/edgenode_perception/package.xml",
+    "archive_path": "legacy_backup/perception_20260929/ros2_ws/src/edgenode_perception/package.xml.txt",
+    "sha256": "167ba55c308b0dbdb4b50500b7b1eb49583744ed2d31ab8d8fb3cee2a45397c1",
+    "bytes": 678
+  },
+  {
+    "original_path": "ros2_ws/src/edgenode_perception/resource/edgenode_perception",
+    "archive_path": "legacy_backup/perception_20260929/ros2_ws/src/edgenode_perception/resource/edgenode_perception.txt",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "original_path": "ros2_ws/src/edgenode_perception/setup.cfg",
+    "archive_path": "legacy_backup/perception_20260929/ros2_ws/src/edgenode_perception/setup.cfg.txt",
+    "sha256": "e915f0e0d062d747a5fdf54f3b4f85a63c409aa7166915c2d0734056a4b2dc1e",
+    "bytes": 107
+  },
+  {
+    "original_path": "ros2_ws/src/edgenode_perception/setup.py",
+    "archive_path": "legacy_backup/perception_20260929/ros2_ws/src/edgenode_perception/setup.py.txt",
+    "sha256": "3d70e2d2d1affe6fc5fc3fa79dc754f4e3dd05f6ce2a7b517c57f4b3655cd643",
+    "bytes": 825
+  },
+  {
+    "original_path": "ros2_ws/src/edgenode_perception/test/offline_experimental_shadow_override.py",
+    "archive_path": "legacy_backup/perception_20260929/ros2_ws/src/edgenode_perception/test/offline_experimental_shadow_override.py.txt",
+    "sha256": "d8a2bf6a132c177418f69de827f5180f32bc5909f728ab0e1202f93825278344",
+    "bytes": 14889
+  },
+  {
+    "original_path": "ros2_ws/src/edgenode_perception/test/offline_production_regression.py",
+    "archive_path": "legacy_backup/perception_20260929/ros2_ws/src/edgenode_perception/test/offline_production_regression.py.txt",
+    "sha256": "03bbb2ca0cbb252658b7e5b82fbaf9f37ad955192a9d0a19fb4bbd39347a467a",
+    "bytes": 5422
+  },
+  {
+    "original_path": "ros2_ws/src/edgenode_perception/test/offline_ransac_lane_analysis.py",
+    "archive_path": "legacy_backup/perception_20260929/ros2_ws/src/edgenode_perception/test/offline_ransac_lane_analysis.py.txt",
+    "sha256": "dd9670d588c7958229a09e6a441c8d1bb2d0f6a29a9490188fca7bd207736022",
+    "bytes": 41578
+  },
+  {
+    "original_path": "ros2_ws/src/edgenode_perception/test/offline_semantic_centerline_ransac_analysis.py",
+    "archive_path": "legacy_backup/perception_20260929/ros2_ws/src/edgenode_perception/test/offline_semantic_centerline_ransac_analysis.py.txt",
+    "sha256": "1543083fec68e40f0dbb64c014838ce5a230489c1617d4fef53b3843bf598e6a",
+    "bytes": 34450
+  },
+  {
+    "original_path": "ros2_ws/src/edgenode_perception/test/offline_shadow_validation.py",
+    "archive_path": "legacy_backup/perception_20260929/ros2_ws/src/edgenode_perception/test/offline_shadow_validation.py.txt",
+    "sha256": "f570c0c5ccb171bd447b5627675824dfb4c8bfa18bea71a1cc92b5f9d5e62653",
+    "bytes": 9835
+  },
+  {
+    "original_path": "tools/ufld/morai_ufld_test.py",
+    "archive_path": "legacy_backup/perception_20260929/tools/ufld/morai_ufld_test.py.txt",
+    "sha256": "21233dda0c53a2c1bcd318cb1f030b1389a5b51a0b1071b68986a5cf7321b4e6",
+    "bytes": 9182
+  },
+  {
+    "original_path": "tools/ufld/smoke_test_ufld.py",
+    "archive_path": "legacy_backup/perception_20260929/tools/ufld/smoke_test_ufld.py.txt",
+    "sha256": "20214608393fdc176df21402aa2db4d0916f3faed62bb98c2df8e4615be705b2",
+    "bytes": 1810
+  },
+  {
+    "original_path": "tools/ufld/video_test_ufld.py",
+    "archive_path": "legacy_backup/perception_20260929/tools/ufld/video_test_ufld.py.txt",
+    "sha256": "5030da0a4cbe0cf0200c478a5a2faf29fbb025e009afd9deab0a7aea2703e905",
+    "bytes": 5695
+  }
+]
