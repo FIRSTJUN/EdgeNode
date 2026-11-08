@@ -121,6 +121,7 @@ class PlanningNode(Node):
                 # Humble infers Python [] as BYTE_ARRAY and YAML [] as NOT_SET.
                 # Allow both and STRING_ARRAY; plan_route validates nonempty values.
                 ('route_node_ids', [], ParameterDescriptor(dynamic_typing=True)),
+                ('route_activation_id', ''),
                 ('global_path_frame_id', 'map'),
                 ('mgeo_dir', '/workspace/local_data/kcity_mgeo'),
                 ('map_match_search_radius_m', 6.0),
@@ -315,6 +316,12 @@ class PlanningNode(Node):
         else:
             goal_node_id = self.get_parameter('goal_node_id').value
             route_key = ('goal', goal_node_id)
+
+        route_key = (
+            self.get_parameter('route_activation_id').value,
+            route_key
+        )
+
         if route_key != self._route_key:
             self._route_key = None
             self._route_result = None
