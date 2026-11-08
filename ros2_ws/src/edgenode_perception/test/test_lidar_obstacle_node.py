@@ -69,6 +69,7 @@ def node(monkeypatch):
                         lambda self, name: SimpleNamespace(value=parameters[name]))
     monkeypatch.setattr(Node, 'create_publisher', publish)
     monkeypatch.setattr(Node, 'create_subscription', subscribe)
+    monkeypatch.setattr(Node, 'create_timer', Mock())
     monkeypatch.setattr(Node, 'get_clock', lambda self: SimpleNamespace(
         now=lambda: Time(nanoseconds=clock.time_ns)))
     monkeypatch.setattr(Node, 'get_logger', lambda self: logger)

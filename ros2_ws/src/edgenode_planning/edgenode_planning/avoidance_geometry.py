@@ -2,6 +2,8 @@
 from dataclasses import dataclass
 import json
 import math
+import hashlib
+from pathlib import Path
 
 
 EPS = 1e-9
@@ -146,11 +148,29 @@ class DrivableArea:
         return not remaining
 
 
-def load_drivable_area(filename):
+def load_drivable_area(filename, *, approved_sha256=None, mgeo_dir=None):
+    """S4 accepts only an operator-reviewed, pinned real-map artifact.
+
+    Hash approval is an explicit trust input, not an automatic survey verdict.
+    No approval hashes are supplied by the map audit tool or default config.
+    None preserves the legacy contract; an empty S4 pin rejects nonempty files.
+    """
     if not filename:
         return None
-    with open(filename, encoding='utf-8') as stream:
-        data = json.load(stream)
+    raw = Path(filename).read_bytes()
+    if approved_sha256 is not None:
+        if (not isinstance(approved_sha256, str) or len(approved_sha256) != 64 or
+                any(c not in '0123456789abcdef' for c in approved_sha256) or
+                hashlib.sha256(raw).hexdigest() != approved_sha256):
+            raise ValueError('S4 boundary requires a matching explicitly approved SHA256')
+    data = json.loads(raw)
+    if approved_sha256 is not None:
+        if data.get('data_kind') != 'real_map' or not mgeo_dir:
+            raise ValueError('S4 boundary must be a reviewed real-map artifact')
+        expected = {name: hashlib.sha256((Path(mgeo_dir) / name).read_bytes()).hexdigest()
+                    for name in ('global_info.json', 'node_set.json', 'link_set.json')}
+        if data.get('mgeo_sha256') != expected:
+            raise ValueError('S4 boundary is not bound to this exact MGeo revision')
     if data.get('frame_id')!='map':
         raise ValueError('boundary data must be registered to the MGeo map frame')
     return DrivableArea(tuple(data['cells']), data['source'])

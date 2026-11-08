@@ -152,24 +152,53 @@ class LaneNetwork:
     Reciprocal neighbor relation, valid ordinary endpoints, same direction and
     connected successor pairs are required. Unknown geometry fails closed.
     """
-    def __init__(self, planner):
+    def __init__(self, planner, *, require_explicit_permission=False):
+        if type(require_explicit_permission) is not bool:
+            raise ValueError('explicit permission policy must be boolean')
+        self.require_explicit_permission = require_explicit_permission
         self.links = planner.links_by_id
         self.valid = {edge['link_id'] for edges in planner.graph.values() for edge in edges}
 
+    def permission_reason(self, original_id, side):
+        """Topology alone is never positive permission in the S4 mode.
+
+        Require both outward and reserved return permissions. This is only a
+        metadata gate; it does not certify line crossing or road containment.
+        """
+        if side not in ('left', 'right') or original_id not in self.valid:
+            return 'INVALID_LANE_REFERENCE'
+        original = self.links[original_id]
+        target_id = original.get(side + '_lane_change_dst_link_idx')
+        if target_id not in self.valid:
+            return 'NO_VALID_ADJACENT_LANE'
+        reverse = 'right' if side == 'left' else 'left'
+        default = None if self.require_explicit_permission else True
+        values = (original.get('can_move_' + side + '_lane', default),
+                  self.links[target_id].get('can_move_' + reverse + '_lane', default))
+        if any(value is False for value in values):
+            return 'LANE_CHANGE_FORBIDDEN'
+        if any(value is not True for value in values):
+            return 'UNKNOWN_LANE_CHANGE_PERMISSION'
+        if self.require_explicit_permission and any(
+                link.get('link_type') not in ('6', 6) for link in (original, self.links[target_id])):
+            # NGII 2019 table 24: only ordinary travel lanes are in this S4
+            # verification profile. Intersection/bus/reversible/unknown types
+            # need separate, direction/section-specific crossing evidence.
+            return 'UNVERIFIED_LANE_TYPE'
+        return ''
+
     def neighbor(self, original_id, side):
+        if self.permission_reason(original_id, side):
+            return None
         field = side+'_lane_change_dst_link_idx'
         opposite = ('right' if side=='left' else 'left')+'_lane_change_dst_link_idx'
         if original_id not in self.valid:
             return None
         original = self.links[original_id]
-        if original.get('can_move_'+side+'_lane', True) is not True:
-            return None
         target_id = original.get(field)
         if target_id not in self.valid:
             return None
         target = self.links[target_id]
-        if target.get('can_move_'+('right' if side=='left' else 'left')+'_lane', True) is not True:
-            return None
         if target.get(opposite) != original_id:
             return None
         if any(not isinstance(link.get('max_speed'), (int,float)) or

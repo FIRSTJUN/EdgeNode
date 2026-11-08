@@ -1,5 +1,6 @@
 import math
 import json
+import hashlib
 
 import pytest
 
@@ -60,3 +61,38 @@ def test_boundary_loader_has_no_inferred_fallback_and_requires_provenance(tmp_pa
 
 def test_cyclic_nonconvex_or_crossing_boundary_cell_is_rejected():
     with pytest.raises(ValueError):DrivableArea((((0,0),(2,2),(0,2),(2,0)),),'bad geometry')
+
+
+def test_s4_boundary_has_no_implicit_approval_even_with_a_source_label(tmp_path):
+    path = tmp_path / 'unreviewed.json'
+    path.write_text(json.dumps(dict(frame_id='map', source='claimed verified', cells=[box(0,0,1,1)])))
+    assert load_drivable_area('', approved_sha256='') is None
+    with pytest.raises(ValueError, match='approved SHA256'):
+        load_drivable_area(path, approved_sha256='')
+    with pytest.raises(ValueError, match='approved SHA256'):
+        load_drivable_area(path, approved_sha256='0' * 64)
+
+
+def test_s4_pinned_boundary_rejects_synthetic_or_wrong_map_and_changed_bytes(tmp_path):
+    # This tests the trust/binding contract only, never real-map validity.
+    directory = tmp_path / 'mock_mgeo'; directory.mkdir()
+    for name in ('global_info.json', 'node_set.json', 'link_set.json'):
+        (directory / name).write_text('{}')
+    hashes = {p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in directory.iterdir()}
+    path = tmp_path / 'contract_fixture.json'
+    data = dict(frame_id='map', source='unit-test review contract; not a K-City boundary',
+                cells=[box(0,0,1,1)], data_kind='synthetic', mgeo_sha256=hashes)
+    def write():
+        path.write_text(json.dumps(data))
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    with pytest.raises(ValueError, match='real-map'):
+        load_drivable_area(path, approved_sha256=write(), mgeo_dir=directory)
+    data['data_kind'] = 'real_map'  # Mock external review input, not a survey claim.
+    digest = write()
+    assert load_drivable_area(path, approved_sha256=digest, mgeo_dir=directory)
+    (directory / 'link_set.json').write_text('{"different":true}')
+    with pytest.raises(ValueError, match='exact MGeo'):
+        load_drivable_area(path, approved_sha256=digest, mgeo_dir=directory)
+    path.write_text(path.read_text() + '\n')
+    with pytest.raises(ValueError, match='approved SHA256'):
+        load_drivable_area(path, approved_sha256=digest, mgeo_dir=directory)

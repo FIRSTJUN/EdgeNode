@@ -1,6 +1,7 @@
 """Publish local MORAI LiDAR footprints through the existing world obstacle interface."""
 
 from dataclasses import fields
+import json
 import math
 
 import numpy as np
@@ -8,11 +9,14 @@ import rclpy
 from geometry_msgs.msg import Pose, PoseArray
 from nav_msgs.msg import Odometry
 from rcl_interfaces.msg import ParameterDescriptor
+from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import PointCloud2, PointField
 from sensor_msgs_py.point_cloud2 import dtype_from_fields
-from std_msgs.msg import Float32, Int32
+from std_msgs.msg import Float32, Int32, String
+
+from edgenode_perception.lidar_status import LidarStatus, footprint_digest
 
 from edgenode_perception.lidar_obstacles import (
     LidarObstacleConfig, detect_clusters, lidar_to_vehicle_xy, vehicle_to_world_xy,
@@ -26,8 +30,6 @@ def pointcloud_xyz(cloud):
     the payload never infers a transform from that misleading frame ID. The
     message buffer is not mutated, including for big-endian inputs.
     """
-    if cloud.width == 0 or cloud.height == 0:
-        return np.empty((0, 3), dtype=float)
     xyz_fields = [field for field in cloud.fields if field.name in ('x', 'y', 'z')]
     if (len(xyz_fields) != 3 or {f.name for f in xyz_fields} != {'x', 'y', 'z'}
             or any(f.count != 1 or f.datatype not in (PointField.FLOAT32, PointField.FLOAT64)
@@ -36,6 +38,10 @@ def pointcloud_xyz(cloud):
     if (cloud.point_step <= 0 or cloud.row_step < cloud.width * cloud.point_step
             or len(cloud.data) < cloud.row_step * cloud.height):
         raise ValueError('Invalid PointCloud2 point/row step or truncated data')
+    if cloud.width == 0 or cloud.height == 0:
+        if cloud.data or cloud.row_step or cloud.width:
+            raise ValueError('Inconsistent empty PointCloud2 dimensions')
+        return np.empty((0, 3), dtype=float)
     dtype = dtype_from_fields(xyz_fields, point_step=cloud.point_step)
     dtype = dtype.newbyteorder('>' if cloud.is_bigendian else '<')
     records = np.ndarray((cloud.height, cloud.width), dtype=dtype, buffer=cloud.data,
@@ -63,6 +69,11 @@ class LidarObstacleNode(Node):
             ('nearest_distance_topic', '/perception/nearest_obstacle_distance'),
             ('cluster_centers_topic', '/perception/lidar_obstacle_centers'),
             ('localization_timeout_sec', 0.6),
+            ('sensor_status_topic', '/perception/lidar_status'),
+            ('sensor_timeout_sec', .6),
+            ('sensor_max_source_age_sec', .6),
+            ('sensor_future_tolerance_sec', .05),
+            ('sensor_status_period_sec', .1),
         ):
             self.declare_parameter(name, default, descriptor)
         self.localization_timeout_sec = self.get_parameter('localization_timeout_sec').value
@@ -72,6 +83,19 @@ class LidarObstacleNode(Node):
             raise ValueError('localization_timeout_sec must be finite and positive')
         self.latest_pose = None
         self.pose_received_ns = None
+        self.pose_source_stamp_ns = None
+        self.pose_stamp_ordered = False
+        self.sensor_status = LidarStatus(
+            self.get_parameter('sensor_timeout_sec').value,
+            self.get_parameter('sensor_max_source_age_sec').value,
+            self.get_parameter('sensor_future_tolerance_sec').value)
+        period = self.get_parameter('sensor_status_period_sec').value
+        if isinstance(period, bool) or not math.isfinite(period) or not 0 < period <= .2:
+            raise ValueError('sensor_status_period_sec must be in (0, .2]')
+        self.sensor_status_pub = self.create_publisher(
+            String, self.get_parameter('sensor_status_topic').value, 10)
+        self.sensor_status_timer = self.create_timer(period, self.publish_sensor_status,
+            clock=Clock(clock_type=ClockType.STEADY_TIME))
 
         self.obstacles_pub = self.create_publisher(
             PoseArray, self.get_parameter('obstacles_topic').value, 10)
@@ -99,6 +123,11 @@ class LidarObstacleNode(Node):
     def localization_callback(self, msg):
         """Read the same ROS quaternion yaw convention as Planning/Control."""
         position, q = msg.pose.pose.position, msg.pose.pose.orientation
+        stamp = msg.header.stamp.sec * 10**9 + msg.header.stamp.nanosec
+        self.pose_stamp_ordered = stamp > 0 and (
+            self.pose_source_stamp_ns is None or stamp > self.pose_source_stamp_ns)
+        if self.pose_stamp_ordered:
+            self.pose_source_stamp_ns = stamp
         values = (position.x, position.y, q.x, q.y, q.z, q.w)
         norm = math.hypot(q.x, q.y, q.z, q.w)
         if (msg.header.frame_id.lstrip('/') != 'map'
@@ -118,6 +147,8 @@ class LidarObstacleNode(Node):
 
     def lidar_callback(self, msg):
         now = self.get_clock().now()
+        stamp_ns = msg.header.stamp.sec * 10**9 + msg.header.stamp.nanosec
+        self.sensor_status.begin(stamp_ns, now.nanoseconds)
         age = ((now.nanoseconds - self.pose_received_ns) / 1e9
                if self.pose_received_ns is not None else math.inf)
         if self.latest_pose is None or not 0.0 <= age <= self.localization_timeout_sec:
@@ -125,16 +156,39 @@ class LidarObstacleNode(Node):
                 'Missing or stale localization; publishing empty map obstacles',
                 throttle_duration_sec=5.0)
             self.publish_obstacles(msg.header.stamp, [])
+            self.sensor_status.finish(0, '', now.nanoseconds, 'LOCALIZATION_UNAVAILABLE')
+            self.publish_sensor_status()
             return
+        failure = 'INVALID_INPUT'
         try:
-            clusters = detect_clusters(pointcloud_xyz(msg), self.config)
-        except (ValueError, TypeError, KeyError, AssertionError, BufferError) as error:
+            xyz = pointcloud_xyz(msg)
+            if len(xyz) and not np.isfinite(xyz).all(axis=1).any():
+                raise ValueError('cloud contains no finite XYZ returns')
+            failure = 'PROCESSING_ERROR'
+            clusters = detect_clusters(xyz, self.config)
+        except Exception as error:
             self.get_logger().warning(
                 f'Invalid LiDAR cloud; publishing empty map obstacles: {error}',
                 throttle_duration_sec=5.0)
             self.publish_obstacles(msg.header.stamp, [])
+            self.sensor_status.finish(0, '', self.get_clock().now().nanoseconds, failure)
+            self.publish_sensor_status()
             return
-        self.publish_obstacles(msg.header.stamp, clusters)
+        obstacles = self.publish_obstacles(msg.header.stamp, clusters)
+        self.sensor_status.finish(len(clusters), footprint_digest('map', stamp_ns,
+            [(p.position.x, p.position.y) for p in obstacles.poses]),
+            self.get_clock().now().nanoseconds)
+        self.publish_sensor_status()
+
+    def publish_sensor_status(self):
+        now_ns = self.get_clock().now().nanoseconds
+        age = (now_ns - self.pose_received_ns) / 1e9 if self.pose_received_ns is not None else math.inf
+        valid_pose = self.latest_pose is not None and 0 <= age <= self.localization_timeout_sec
+        valid_pose = valid_pose and self.pose_stamp_ordered and (
+            -self.sensor_status.future_ns <= now_ns - self.pose_source_stamp_ns
+            <= int(self.localization_timeout_sec * 1e9))
+        status = self.sensor_status.snapshot(now_ns, localization_valid=valid_pose)
+        self.sensor_status_pub.publish(String(data=json.dumps(status, allow_nan=False)))
 
     def world_pose(self, lidar_x, lidar_y):
         vx, vy = lidar_to_vehicle_xy(float(lidar_x), float(lidar_y), self.config)
@@ -164,6 +218,7 @@ class LidarObstacleNode(Node):
         self.centers_pub.publish(centers)
         self.count_pub.publish(Int32(data=len(clusters)))
         self.distance_pub.publish(Float32(data=min(distances) if distances else float('nan')))
+        return obstacles
 
 
 def main(args=None):
@@ -177,7 +232,8 @@ def main(args=None):
     finally:
         if node is not None:
             node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

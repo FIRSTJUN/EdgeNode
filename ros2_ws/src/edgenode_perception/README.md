@@ -1,5 +1,10 @@
 # LiDAR obstacle perception for S4
 
+For the opt-in S4 sensor gate, `/perception/lidar_status` distinguishes successful
+empty detection from invalid, missing, stale, duplicate and reordered input.
+The legacy PoseArray and ROI remain compatible. See the
+[sensor contract, timing requirements and disarmed validation launch](../edgenode_planning/docs/s4_sensor_validation.md).
+
 `lidar_obstacle_node` filters local MORAI LiDAR, clusters returns, and publishes
 **8 observed footprint samples per cluster** to the existing world-frame Planning
 PoseArray. It also keeps cluster counts, centroid range, and separate debug centers.

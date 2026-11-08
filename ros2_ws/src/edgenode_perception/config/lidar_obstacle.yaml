@@ -7,6 +7,11 @@ lidar_obstacle_node:
     nearest_distance_topic: /perception/nearest_obstacle_distance
     cluster_centers_topic: /perception/lidar_obstacle_centers
     localization_timeout_sec: 0.6
+    sensor_status_topic: /perception/lidar_status
+    sensor_timeout_sec: 0.6
+    sensor_max_source_age_sec: 0.6
+    sensor_future_tolerance_sec: 0.05
+    sensor_status_period_sec: 0.1
 
     # Initial MORAI Sonata baseline, not final S4 tuning.
     # XYZ is sensor-local even though the incoming frame_id is /map.

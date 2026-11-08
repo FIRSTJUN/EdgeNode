@@ -10,6 +10,7 @@ from geometry_msgs.msg import Pose,PoseArray
 from nav_msgs.msg import Odometry
 from rclpy.parameter import Parameter
 from std_srvs.srv import Trigger
+from std_msgs.msg import String
 
 from edgenode_planning.planning_node import PlanningNode
 from edgenode_planning.static_obstacle_planner import StaticObstaclePlanner
@@ -26,9 +27,13 @@ PLANNING_TOPICS=('target_error','target_speed','state','current_link','map_match
 
 
 @pytest.fixture
-def node(route_editor_map):
+def node(route_editor_map, request):
     prefix='/offline_avoidance_'+uuid.uuid4().hex[:8]
     args=['--ros-args','-r','__ns:='+prefix,'-p',f'mgeo_dir:={route_editor_map}','-p','goal_node_id:=D']
+    if getattr(request, 'param', False):
+        args += ['-p', 's4_sensor_validation_enabled:=true',
+                 '-r', '/perception/lidar_status:=' + prefix + '/lidar_status',
+                 '-r', '/planning/s4_sensor_state:=' + prefix + '/s4_sensor_state']
     for topic in PLANNING_TOPICS:args+=['-r',f'/planning/{topic}:={prefix}/{topic}']
     args+=['-r',f'/localization/odometry:={prefix}/odometry']
     rclpy.init(args=args)
@@ -255,3 +260,16 @@ def test_reverse_measured_motion_is_not_reinterpreted_as_forward_speed(node):
     node.localization_callback(msg);node.plan()
     assert node.latest_speed_kmh<0
     assert not output(node,'local_path').poses and output(node,'target_speed').data==0.
+
+
+def test_baseline_without_s4_mode_ignores_sensor_health_and_keeps_normal_speed(node):
+    assert node.sensor_guard is None
+    node.plan()
+    original = [p.pose.position for p in output(node, 'local_path').poses]
+    node.sensor_status_callback(String(data='{invalid status'))
+    arm_isolated_node(node)  # Motion outputs are mocks; no live Control exists.
+    node.plan()
+    assert node.avoidance_planner.state == 'NORMAL'
+    assert output(node, 'target_speed').data == 20.
+    assert [p.pose.position for p in output(node, 'local_path').poses] == original
+    node.dijkstra_planner.plan.assert_called_once()

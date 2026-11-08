@@ -67,9 +67,20 @@ planning_node:
     # lidar_obstacle_node preserves ordered eight-point groups in PoseArray.
     obstacle_points_per_cluster: 8
 
+    # Normal baseline stays compatible. s4_sensor_validation.yaml enables this
+    # startup-only gate; cloud and status stamps must share the ROS clock.
+    s4_sensor_validation_enabled: false
+    s4_sensor_status_topic: /perception/lidar_status
+    s4_sensor_timeout_sec: 0.6
+    s4_sensor_max_source_age_sec: 0.6
+    s4_sensor_future_tolerance_sec: 0.05
+
     # Generic avoidance uses verified external road cells only. Empty means
     # unknown boundary: candidates remain diagnostic and avoidance stops.
     avoidance_boundary_file: ""
+    # No reviewed real-map release exists. S4 rejects nonempty files without
+    # this exact operator-approved pin and an exact MGeo revision binding.
+    avoidance_boundary_approved_sha256: ""
     avoidance_observation_timeout_sec: 0.6
     avoidance_transition_lengths_m: [12.0, 16.0, 20.0]
     avoidance_prediction_distance_m: 80.0

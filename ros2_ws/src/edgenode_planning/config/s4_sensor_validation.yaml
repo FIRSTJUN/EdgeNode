@@ -1,0 +1,4 @@
+planning_node:
+  ros__parameters:
+    enable_drive: false
+    s4_sensor_validation_enabled: true
