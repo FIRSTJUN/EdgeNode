@@ -33,7 +33,7 @@ planning_node:
     goal_node_id: A119BS010245
     # Empty: use goal_node_id. Nonempty: visit these nodes in order; the last
     # entry is the final goal (goal_node_id is ignored). Set before driving.
-    route_node_ids: []
+    route_node_ids: [A119BS010245]
     # Example using the currently verified destination:
     # route_node_ids: [A119BS010245]
     global_path_frame_id: map

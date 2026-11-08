@@ -1,0 +1,157 @@
+"""School-zone 30 km/h speed-cap adapter for ROS 2 Humble (MORAI prototype).
+
+Input:  /school_zone/active       (std_msgs/Bool)
+Target: /planning_node parameter max_drive_speed_kmh (double)
+
+Safety behavior:
+- When active=True, only LOWER the current Planning cap to at most 30 km/h.
+- If the current cap is already below 30, never increase it.
+- While active=True, check the cap periodically to correct accidental increases.
+- When active=False, NEVER automatically restore a higher cap: a manual
+  school_zone_manager/reset is not proof of a confirmed legal zone exit.
+- Never enable driving, never modify steering or accelerator commands.
+- Experimental simulator integration only, not an automotive safety mechanism.
+"""
+
+import math
+
+import rclpy
+from rcl_interfaces.msg import Parameter as ParameterMsg
+from rcl_interfaces.msg import ParameterType, ParameterValue
+from rcl_interfaces.srv import GetParameters, SetParameters
+from rclpy.node import Node
+from std_msgs.msg import Bool
+
+
+class SchoolZoneSpeedLimitNode(Node):
+    def __init__(self):
+        super().__init__('school_zone_speed_limit_node')
+        self.declare_parameter('school_zone_cap_kmh', 30.0)
+        self.declare_parameter('active_topic', '/school_zone/active')
+        self.declare_parameter('planning_node_name', '/planning_node')
+
+        self.cap_kmh = float(self.get_parameter('school_zone_cap_kmh').value)
+        if not math.isfinite(self.cap_kmh) or self.cap_kmh <= 0:
+            raise ValueError('school_zone_cap_kmh must be a positive finite number')
+
+        planning = str(self.get_parameter('planning_node_name').value).rstrip('/')
+        self.get_client = self.create_client(
+            GetParameters, f'{planning}/get_parameters'
+        )
+        self.set_client = self.create_client(
+            SetParameters, f'{planning}/set_parameters'
+        )
+        self.create_subscription(
+            Bool,
+            str(self.get_parameter('active_topic').value),
+            self.on_active,
+            10,
+        )
+        self.active = None
+        self.get_pending = False
+        self.set_pending = False
+        self._service_warned = False
+        self.create_timer(0.5, self.enforce_limit)
+        self.get_logger().info(
+            f'School-zone speed limiter ready: cap={self.cap_kmh:.1f} km/h; '
+            'waiting for active=True; automatic speed restore DISABLED'
+        )
+
+    def on_active(self, msg: Bool):
+        new_active = bool(msg.data)
+        if new_active != self.active:
+            if new_active:
+                self.get_logger().warning(
+                    'School-zone ACTIVE: ensure Planning cap <= '
+                    f'{self.cap_kmh:.1f} km/h'
+                )
+            else:
+                self.get_logger().info(
+                    'School-zone inactive: preserving current Planning cap. '
+                    'Never restore a higher speed from a test reset/exit candidate.'
+                )
+        self.active = new_active
+
+    def enforce_limit(self):
+        if self.active is not True or self.get_pending or self.set_pending:
+            return
+        if not (self.get_client.service_is_ready() and
+                self.set_client.service_is_ready()):
+            if not self._service_warned:
+                self.get_logger().warning('Planning parameter services unavailable')
+                self._service_warned = True
+            return
+        self._service_warned = False
+        request = GetParameters.Request()
+        request.names = ['max_drive_speed_kmh']
+        self.get_pending = True
+        try:
+            future = self.get_client.call_async(request)
+            future.add_done_callback(self.on_get_result)
+        except Exception as exc:
+            self.get_pending = False
+            self.get_logger().error(f'Planning parameter read failed: {exc}')
+
+    def on_get_result(self, future):
+        self.get_pending = False
+        try:
+            response = future.result()
+            if response is None or len(response.values) != 1:
+                raise RuntimeError('Unexpected get_parameters response')
+            value = response.values[0]
+            if value.type != ParameterType.PARAMETER_DOUBLE:
+                raise RuntimeError('max_drive_speed_kmh is not a double')
+            current = float(value.double_value)
+            if not math.isfinite(current) or current <= 0:
+                raise RuntimeError('Invalid current speed cap')
+            if self.active is not True or current <= self.cap_kmh + 1e-6:
+                return
+            request = SetParameters.Request()
+            request.parameters = [
+                ParameterMsg(
+                    name='max_drive_speed_kmh',
+                    value=ParameterValue(
+                        type=ParameterType.PARAMETER_DOUBLE,
+                        double_value=self.cap_kmh,
+                    ),
+                )
+            ]
+            self.set_pending = True
+            set_future = self.set_client.call_async(request)
+            set_future.add_done_callback(self.on_set_result)
+        except Exception as exc:
+            self.set_pending = False
+            self.get_logger().error(f'Could not enforce school-zone cap: {exc}')
+
+    def on_set_result(self, future):
+        self.set_pending = False
+        try:
+            response = future.result()
+            if response is None or not response.results:
+                raise RuntimeError('Unexpected set_parameters response')
+            if not all(result.successful for result in response.results):
+                reasons = [result.reason for result in response.results
+                           if not result.successful]
+                raise RuntimeError('; '.join(reasons) or 'Parameter change rejected')
+            self.get_logger().warning(
+                f'Planning speed cap set to {self.cap_kmh:.1f} km/h'
+            )
+        except Exception as exc:
+            self.get_logger().error(f'Speed cap update failed: {exc}')
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = SchoolZoneSpeedLimitNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

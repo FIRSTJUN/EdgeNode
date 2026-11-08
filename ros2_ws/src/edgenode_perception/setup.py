@@ -47,6 +47,14 @@ setup(
         'console_scripts': [
             'perception_node = '
             'edgenode_perception.perception_node:main',
+            'school_zone_road_node = '
+            'edgenode_perception.school_zone_road_node:main',
+
+            'road_transition_detector = '
+            'edgenode_perception.road_transition_detector:main',
+
+            'school_zone_manager = '
+            'edgenode_perception.school_zone_manager:main',
         ],
     },
 )

@@ -1,0 +1,258 @@
+"""ROS 2 Humble MORAI prototype: school-zone speed-cap adapter.
+
+The school-zone manager must observe entry sign -> RED -> RED_TO_GRAY,
+then explicitly confirm exit via /school_zone_manager/confirm_exit.
+
+This adapter *never* raises a speed cap on /school_zone/active=False alone.
+It restores the cap captured in NORMAL *only* if all of the following hold:
+- the adapter itself previously reduced that cap for the current school-zone cycle;
+- RED_CONFIRMED and EXIT_CANDIDATE have been observed in this cycle;
+- state == EXIT_CONFIRMED and exit_confirmed=True and active=False;
+- enable_drive=False (vehicle stopped/drive disabled, for this test version);
+- current Planning cap is still exactly the school-zone cap;
+- allow_confirmed_restore=True (explicit opt-in, default False).
+
+Prototyping only; not an automotive safety controller.
+"""
+
+import math
+
+import rclpy
+from rcl_interfaces.msg import Parameter as ParameterMsg
+from rcl_interfaces.msg import ParameterType, ParameterValue
+from rcl_interfaces.srv import GetParameters, SetParameters
+from rclpy.node import Node
+from std_msgs.msg import Bool, String
+
+
+class SchoolZoneSpeedLimitNode(Node):
+    def __init__(self):
+        super().__init__('school_zone_speed_limit_node')
+        self.declare_parameter('school_zone_cap_kmh', 30.0)
+        self.declare_parameter('allow_confirmed_restore', False)
+        self.declare_parameter('planning_node_name', '/planning_node')
+        self.declare_parameter('active_topic', '/school_zone/active')
+        self.declare_parameter('state_topic', '/school_zone/state')
+        self.declare_parameter('exit_confirmed_topic', '/school_zone/exit_confirmed')
+
+        self.cap = float(self.get_parameter('school_zone_cap_kmh').value)
+        if not math.isfinite(self.cap) or self.cap <= 0.0:
+            raise ValueError('school_zone_cap_kmh must be positive and finite')
+        self.allow_restore = bool(self.get_parameter('allow_confirmed_restore').value)
+        planning = str(self.get_parameter('planning_node_name').value).rstrip('/')
+        self.get_client = self.create_client(GetParameters, f'{planning}/get_parameters')
+        self.set_client = self.create_client(SetParameters, f'{planning}/set_parameters')
+
+        self.active = None
+        self.state = None
+        self.exit_confirmed = False
+        self.baseline_cap = None
+        self.seen_active = False
+        self.seen_red = False
+        self.seen_candidate = False
+        self.reduced_by_this_node = False
+        self.restored = False
+        self.get_pending = False
+        self.set_pending = False
+        self._set_action = None
+        self._warned_unavailable = False
+        self._warned_stopped = False
+        self._warned_baseline = False
+
+        self.create_subscription(
+            Bool, str(self.get_parameter('active_topic').value), self.on_active, 10
+        )
+        self.create_subscription(
+            String, str(self.get_parameter('state_topic').value), self.on_state, 10
+        )
+        self.create_subscription(
+            Bool, str(self.get_parameter('exit_confirmed_topic').value),
+            self.on_exit_confirmed, 10
+        )
+        self.create_timer(0.5, self.tick)
+        self.get_logger().info(
+            'School-zone limiter ready: cap=%.1f km/h; restore_on_confirm=%s; '
+            'restoration requires enable_drive=False and a complete observed cycle'
+            % (self.cap, self.allow_restore)
+        )
+
+    def on_active(self, msg):
+        new = bool(msg.data)
+        if new and self.active is not True:
+            # A fresh entry begins a new protected cycle.
+            self.seen_active = True
+            self.seen_red = False
+            self.seen_candidate = False
+            self.reduced_by_this_node = False
+            self.restored = False
+            self._warned_stopped = False
+            self.get_logger().warning('School-zone ACTIVE: enforcing cap')
+        self.active = new
+        self._forget_test_reset()
+
+    def on_state(self, msg):
+        self.state = str(msg.data).strip().upper()
+        if self.seen_active and self.state == 'SCHOOL_ZONE_RED_CONFIRMED':
+            self.seen_red = True
+        if self.seen_active and self.seen_red and self.state == 'EXIT_CANDIDATE':
+            self.seen_candidate = True
+        self._forget_test_reset()
+
+    def on_exit_confirmed(self, msg):
+        self.exit_confirmed = bool(msg.data)
+
+    def _forget_test_reset(self):
+        # The test reset service must NEVER become a speed-restoration signal.
+        if self.active is False and self.state == 'NORMAL':
+            self.seen_active = False
+            self.seen_red = False
+            self.seen_candidate = False
+            self.reduced_by_this_node = False
+            self.restored = False
+            self.exit_confirmed = False
+
+    def tick(self):
+        if self.get_pending or self.set_pending:
+            return
+        if not (self.get_client.service_is_ready() and
+                self.set_client.service_is_ready()):
+            if not self._warned_unavailable:
+                self.get_logger().warning('Planning parameter services unavailable')
+                self._warned_unavailable = True
+            return
+        self._warned_unavailable = False
+        request = GetParameters.Request()
+        request.names = ['max_drive_speed_kmh', 'enable_drive']
+        self.get_pending = True
+        try:
+            future = self.get_client.call_async(request)
+            future.add_done_callback(self.on_get)
+        except Exception as exc:
+            self.get_pending = False
+            self.get_logger().error('Planning parameter read failed: %s' % exc)
+
+    def on_get(self, future):
+        self.get_pending = False
+        try:
+            response = future.result()
+            if response is None or len(response.values) != 2:
+                raise RuntimeError('Unexpected get_parameters response')
+            speed, enable = response.values
+            if speed.type != ParameterType.PARAMETER_DOUBLE:
+                raise RuntimeError('max_drive_speed_kmh is not double')
+            if enable.type != ParameterType.PARAMETER_BOOL:
+                raise RuntimeError('enable_drive is not bool')
+            current = float(speed.double_value)
+            if not math.isfinite(current) or current <= 0:
+                raise RuntimeError('Invalid Planning cap')
+            drive_enabled = bool(enable.bool_value)
+
+            # Capture pre-zone limit only during stable, observed NORMAL state.
+            # A limiter launched mid-zone will not invent a baseline to restore.
+            if (self.active is False and self.state == 'NORMAL'
+                    and not self.seen_active):
+                self.baseline_cap = current
+                return
+
+            if self.active is True:
+                if current > self.cap + 1e-5:
+                    self._set_cap(self.cap, 'limit')
+                return
+
+            if not self.allow_restore or self.restored:
+                return
+            confirmed = (
+                self.active is False
+                and self.state == 'EXIT_CONFIRMED'
+                and self.exit_confirmed
+                and self.seen_active
+                and self.seen_red
+                and self.seen_candidate
+                and self.reduced_by_this_node
+            )
+            if not confirmed:
+                return
+            if drive_enabled:
+                if not self._warned_stopped:
+                    self.get_logger().warning(
+                        'Exit confirmed, but restore BLOCKED: enable_drive=True. '
+                        'Stop the vehicle before this prototype restores speed.'
+                    )
+                    self._warned_stopped = True
+                return
+            if self.baseline_cap is None or self.baseline_cap <= self.cap:
+                if not self._warned_baseline:
+                    self.get_logger().warning(
+                        'Restore BLOCKED: no verified normal-road cap above zone cap'
+                    )
+                    self._warned_baseline = True
+                return
+            if abs(current - self.cap) > 1e-3:
+                # Someone may have deliberately lowered it to 10 km/h; never
+                # override a changed cap or silently accelerate.
+                self.get_logger().warning(
+                    'Restore BLOCKED: current cap %.2f != zone cap %.2f'
+                    % (current, self.cap)
+                )
+                return
+            self._set_cap(self.baseline_cap, 'restore')
+        except Exception as exc:
+            self.get_logger().error('Planning parameter handling failed: %s' % exc)
+
+    def _set_cap(self, speed_kmh, action):
+        request = SetParameters.Request()
+        request.parameters = [ParameterMsg(
+            name='max_drive_speed_kmh',
+            value=ParameterValue(
+                type=ParameterType.PARAMETER_DOUBLE,
+                double_value=float(speed_kmh),
+            ),
+        )]
+        self.set_pending = True
+        self._set_action = action
+        try:
+            future = self.set_client.call_async(request)
+            future.add_done_callback(self.on_set)
+        except Exception as exc:
+            self.set_pending = False
+            self._set_action = None
+            self.get_logger().error('Set speed parameter failed: %s' % exc)
+
+    def on_set(self, future):
+        action = self._set_action
+        self._set_action = None
+        self.set_pending = False
+        try:
+            response = future.result()
+            if response is None or not response.results:
+                raise RuntimeError('Unexpected set_parameters response')
+            if not all(item.successful for item in response.results):
+                raise RuntimeError('Planning rejected parameter update')
+            if action == 'limit':
+                self.reduced_by_this_node = True
+                self.get_logger().warning('School-zone cap applied: %.1f km/h' % self.cap)
+            elif action == 'restore':
+                self.restored = True
+                self.get_logger().warning(
+                    'Confirmed simulator exit: normal-road cap restored to %.1f km/h'
+                    % self.baseline_cap
+                )
+        except Exception as exc:
+            self.get_logger().error('Speed cap update failed: %s' % exc)
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = SchoolZoneSpeedLimitNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

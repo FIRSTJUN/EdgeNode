@@ -27,6 +27,8 @@ setup(
         'console_scripts': [
             'planning_node = edgenode_planning.planning_node:main',
             'route_editor_node = edgenode_planning.route_editor_node:main',
+            'school_zone_speed_limit_node = '
+            'edgenode_planning.school_zone_speed_limit_node:main',
         ],
     },
 )

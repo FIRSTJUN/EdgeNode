@@ -1,0 +1,125 @@
+"""School-zone perception state manager (ROS 2 Humble, observation-only).
+
+Inputs:
+  /perception/school_zone/sign_detected   std_msgs/Bool  (True = validated entry-sign event)
+  /perception/road_color/state            std_msgs/String (RED/GRAY/UNKNOWN)
+  /perception/road_transition/event       std_msgs/String (RED_TO_GRAY)
+
+Outputs:
+  /school_zone/state                      std_msgs/String
+  /school_zone/active                     std_msgs/Bool (True until exit independently verified)
+  /school_zone/exit_candidate             std_msgs/Bool
+
+This node does NOT command steering/throttle/brake or lift speed limits.
+Color transition is NOT sufficient to establish a legal school-zone boundary.
+"""
+
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import Bool, String
+from std_srvs.srv import Trigger
+
+
+class SchoolZoneManager(Node):
+    NORMAL = 'NORMAL'
+    WAITING_FOR_RED = 'SCHOOL_ZONE_WAITING_FOR_RED'
+    RED_CONFIRMED = 'SCHOOL_ZONE_RED_CONFIRMED'
+    EXIT_CANDIDATE = 'EXIT_CANDIDATE'
+
+    def __init__(self):
+        super().__init__('school_zone_manager')
+
+        self.declare_parameter('sign_topic', '/perception/school_zone/sign_detected')
+        self.declare_parameter('color_topic', '/perception/road_color/state')
+        self.declare_parameter('transition_topic', '/perception/road_transition/event')
+
+        self.state = self.NORMAL
+        self.seen_red_since_sign = False
+
+        self.state_pub = self.create_publisher(String, '/school_zone/state', 10)
+        self.active_pub = self.create_publisher(Bool, '/school_zone/active', 10)
+        self.exit_pub = self.create_publisher(Bool, '/school_zone/exit_candidate', 10)
+
+        self.sign_sub = self.create_subscription(
+            Bool, str(self.get_parameter('sign_topic').value), self.on_sign, 10
+        )
+        self.color_sub = self.create_subscription(
+            String, str(self.get_parameter('color_topic').value), self.on_color, 10
+        )
+        self.transition_sub = self.create_subscription(
+            String, str(self.get_parameter('transition_topic').value), self.on_transition, 10
+        )
+
+        # For TESTING only: call the reset service after putting the vehicle
+        # back at its start pose. This is not proof of a real road-zone exit.
+        self.reset_srv = self.create_service(
+            Trigger, '/school_zone_manager/reset', self.on_reset
+        )
+        self.heartbeat = self.create_timer(1.0, self.publish_status)
+        self.publish_status()
+        self.get_logger().info(
+            'School-zone manager ready (observation only; no speed control)'
+        )
+
+    def set_state(self, new_state):
+        if new_state != self.state:
+            self.get_logger().info(f'{self.state} -> {new_state}')
+            self.state = new_state
+            self.publish_status()
+
+    def on_sign(self, msg: Bool):
+        # A sign detection begins a zone only if not already inside one.
+        # Ignore repeated sign detections and False messages.
+        if msg.data and self.state == self.NORMAL:
+            self.seen_red_since_sign = False
+            self.set_state(self.WAITING_FOR_RED)
+
+    def on_color(self, msg: String):
+        color = msg.data.strip().upper()
+        if color == 'RED' and self.state in (
+            self.WAITING_FOR_RED, self.RED_CONFIRMED, self.EXIT_CANDIDATE
+        ):
+            self.seen_red_since_sign = True
+            self.set_state(self.RED_CONFIRMED)
+
+    def on_transition(self, msg: String):
+        if msg.data.strip().upper() != 'RED_TO_GRAY':
+            return
+        # Ignore bus-lane transitions or stale events before a school-zone sign.
+        # Require that RED was observed AFTER that sign.
+        if self.state == self.RED_CONFIRMED and self.seen_red_since_sign:
+            self.set_state(self.EXIT_CANDIDATE)
+            self.get_logger().warning(
+                'Exit CANDIDATE only: external zone-end confirmation required'
+            )
+
+    def on_reset(self, request, response):
+        # Explicit TEST reset, never automatic deactivation from pavement color.
+        self.seen_red_since_sign = False
+        self.set_state(self.NORMAL)
+        self.publish_status()
+        response.success = True
+        response.message = 'State reset for testing. No speed command was sent.'
+        return response
+
+    def publish_status(self):
+        self.state_pub.publish(String(data=self.state))
+        self.active_pub.publish(Bool(data=self.state != self.NORMAL))
+        self.exit_pub.publish(Bool(data=self.state == self.EXIT_CANDIDATE))
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = SchoolZoneManager()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

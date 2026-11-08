@@ -1,0 +1,7 @@
+route_name: kcity_demo_route
+frame_id: map
+waypoint_node_ids:
+- A119BS010164
+- A119BS010249
+created_from:
+  mgeo_dir: /workspace/local_data/kcity_mgeo

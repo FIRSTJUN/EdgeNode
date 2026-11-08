@@ -1,5 +1,6 @@
 """RViz Publish Point, persistent markers and services for editing MGeo routes."""
 
+import uuid
 import math
 from pathlib import Path as FilePath
 
@@ -175,7 +176,7 @@ class RouteEditorNode(Node):
                              (1.0, 1.0, 1.0, 1.0), (1.0, 1.0, 1.0))
         clear.action = Marker.DELETEALL
         links.markers.append(clear)
-        for index, link_id in enumerate(sorted(self.editor.valid_link_ids)):
+        for index, link_id in enumerate(sorted(self.editor.valid_link_ids), start=1):
             marker = self._marker('mgeo_links', index, Marker.LINE_STRIP,
                                   (0.6, 0.7, 0.8, 1.0), (0.35, 0.0, 0.0))
             marker.points = [self._point(p) for p in self.editor.planner.links_by_id[link_id]['points']]
@@ -195,7 +196,7 @@ class RouteEditorNode(Node):
         clear = self._marker('waypoints', 0, Marker.SPHERE, (1.0, 1.0, 0.0, 1.0), (1.0, 1.0, 1.0))
         clear.action = Marker.DELETEALL
         markers.markers.append(clear)
-        for index, node_id in enumerate(self.editor.waypoint_node_ids):
+        for index, node_id in enumerate(self.editor.waypoint_node_ids, start=1):
             xyz = self.editor.node_points[node_id]
             point = self._marker('waypoints', index, Marker.SPHERE,
                                  (1.0, 0.8, 0.1, 1.0), (2.0, 2.0, 2.0))
@@ -363,6 +364,7 @@ class RouteEditorNode(Node):
             # Atomic with drive=false: even a late response or racing enable
             # cannot apply a new route while preserving an armed drive state.
             parameters = [Parameter('enable_drive', value=False),
+                          Parameter('route_activation_id', value=str(uuid.uuid4())),
                           Parameter('route_node_ids', Parameter.Type.STRING_ARRAY, node_ids)]
             result = (await self._call_parameter_service(self.set_parameters_client,
                 SetParametersAtomically.Request(parameters=[p.to_parameter_msg() for p in parameters]))).result
