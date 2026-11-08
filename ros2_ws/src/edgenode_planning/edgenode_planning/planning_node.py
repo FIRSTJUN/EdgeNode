@@ -413,7 +413,9 @@ class PlanningNode(Node):
                             local_path.poses.append(pose)
 
                         self.local_path_pub.publish(local_path)
-
+                        self.speed_planner.cruise_speed_kmh = self.get_parameter('cruise_speed_kmh').value
+                        self.speed_planner.curve_speed_kmh = self.get_parameter('curve_speed_kmh').value
+                        self.speed_planner.sharp_curve_speed_kmh = self.get_parameter('sharp_curve_speed_kmh').value
                         speed_result = self.speed_planner.plan(
                             active_local_points, previous_speed_mode=self._previous_speed_mode,
                         )

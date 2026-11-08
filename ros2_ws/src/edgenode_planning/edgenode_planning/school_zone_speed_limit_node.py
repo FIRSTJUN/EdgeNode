@@ -31,6 +31,7 @@ class SchoolZoneSpeedLimitNode(Node):
         self.declare_parameter('school_zone_cap_kmh', 30.0)
         self.declare_parameter('allow_confirmed_restore', False)
         self.declare_parameter('sim_allow_moving_restore', False)
+        self.declare_parameter('max_sim_restore_kmh', 60.0)
         self.declare_parameter('planning_node_name', '/planning_node')
         self.declare_parameter('active_topic', '/school_zone/active')
         self.declare_parameter('state_topic', '/school_zone/state')
@@ -191,8 +192,12 @@ class SchoolZoneSpeedLimitNode(Node):
                     )
                     self._warned_baseline = True
                 return
-            if self.sim_allow_moving_restore and self.baseline_cap > 40.0 + 1e-5:
-                self.get_logger().warning('MORAI demo restore blocked: cap over 40')
+            max_restore = float(self.get_parameter('max_sim_restore_kmh').value)
+
+            if self.sim_allow_moving_restore and self.baseline_cap > max_restore + 1e-5:
+                self.get_logger().warning(
+                    'MORAI demo restore blocked: cap over configured maximum'
+                )
                 return
             if abs(current - self.cap) > 1e-3:
                 # Someone may have deliberately lowered it to 10 km/h; never
