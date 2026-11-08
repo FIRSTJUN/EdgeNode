@@ -124,3 +124,8 @@ The isolated domain needs its own synthetic/recorded, clock-compatible inputs.
 This launch is not MORAI driving approval. Verified road boundaries, usable
 sensing/entry distances, full obstacle extent, control latency and braking
 remain separate requirements.
+
+Stage 4 also requires independently pinned observation evidence and stopping
+distance admission, including for READY_EMPTY and explicit reset. See
+[s4_distance_validation.md](s4_distance_validation.md) for the separate preview,
+Control window, delay model and additional BLOCKED reasons.

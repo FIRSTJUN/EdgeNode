@@ -99,6 +99,9 @@ class StaticObstaclePlanner:
         self.generated_transition_count=0
         self.candidate_lane_batches=0
         self._control_horizon_m=20.
+        self._entry_reserve_m=0.
+        self._entry_observation_m=None
+        self._observation_curvature_limit=None
 
     def invalidate_observation(self):
         self.confirmations=0
@@ -171,6 +174,9 @@ class StaticObstaclePlanner:
                 reason=self._body_safety(a,b,obstacles,check_road)
                 if reason:
                     return reason
+        if (self._observation_curvature_limit is not None
+                and max(map(abs,ks))>self._observation_curvature_limit):
+            return 'OBSERVATION_CURVATURE_SCOPE'
         if max(map(abs,ks))>self.config.curvature_limit:
             return 'CURVATURE'
         velocity=speed/3.6
@@ -294,7 +300,11 @@ class StaticObstaclePlanner:
                 combined=entry+return_path[1:]
                 cost,terms=reference_cost(combined,pair.original,pair.adjacent,self.weights)
                 reason=('ENTRY_DEADLINE' if end+self.body.wheelbase_m+self.body.front_overhang_m+
-                        self.config.obstacle_margin_m>front else '')
+                        self.config.obstacle_margin_m+self._entry_reserve_m>front else '')
+                if (not reason and self._entry_observation_m is not None
+                        and end-ego+self.body.wheelbase_m+self.body.front_overhang_m+
+                        self.config.obstacle_margin_m+self._entry_reserve_m>self._entry_observation_m):
+                    reason='ENTRY_OBSERVATION_DISTANCE'
                 if not reason and any(sum(a*b for a,b in zip((b[0]-a[0],b[1]-a[1]),
                     sample(pair.original,pair.original_index.project(a))[1]))<=0
                     for a,b in zip(combined,combined[1:])):
@@ -329,12 +339,21 @@ class StaticObstaclePlanner:
         return self.confirmations>=self.config.acquisition_confirmations
 
     def plan(self, reference, groups, pose, *, speed_kmh=0., actual_curvature=0.,
-             current_link_id='', route_link_ids=(), observation_valid=True, control_horizon_m=20.):
+             current_link_id='', route_link_ids=(), observation_valid=True, control_horizon_m=20.,
+             hazard_reference=None, entry_reserve_m=0., stopping_required_m=None,
+             entry_observation_m=None, observation_curvature_limit=None):
+        normal_reference=reference
+        if hazard_reference is not None:
+            reference=hazard_reference
         self._min_clearance=math.inf
         if self.state=='BLOCKED':
             return self._result()
         try:
-            if (len(pose)!=3 or len(reference)<2 or speed_kmh<0 or not math.isfinite(control_horizon_m)
+            if (any(v is not None and (not math.isfinite(v) or v<0)
+                    for v in (entry_observation_m, observation_curvature_limit))
+                    or not math.isfinite(entry_reserve_m) or entry_reserve_m<0
+                    or (stopping_required_m is not None and (not math.isfinite(stopping_required_m)
+                        or stopping_required_m<=0)) or len(pose)!=3 or len(reference)<2 or speed_kmh<0 or not math.isfinite(control_horizon_m)
                     or control_horizon_m<=0 or not all(math.isfinite(v)
                     for v in (*pose,speed_kmh,actual_curvature)) or any(len(p)!=3 or
                     not all(math.isfinite(v) for v in p) for p in reference)):
@@ -345,6 +364,9 @@ class StaticObstaclePlanner:
         if not observation_valid:
             return self._block('OBSTACLE_OBSERVATION_INVALID_OR_STALE')
         self._control_horizon_m=control_horizon_m
+        self._entry_reserve_m=entry_reserve_m
+        self._entry_observation_m=entry_observation_m
+        self._observation_curvature_limit=observation_curvature_limit
         old_memory=self.remembered
         self._remember(detected)
         # A nominal centerline can miss a collision caused by current tracking
@@ -379,7 +401,7 @@ class StaticObstaclePlanner:
             # activate this planner. No boundary assumption is used here.
             blocking=self._normal_hazards(reference,self.remembered)
             if not blocking:
-                return self._result(reference)
+                return self._result(normal_reference)
             self._hazards=blocking
             current_reference=sample(reference,ego)
             if current_reference is None:
@@ -391,8 +413,12 @@ class StaticObstaclePlanner:
             actual_front=max(index.project(p) for p in self.body.polygon(*pose))
             distance=front-actual_front-self.config.obstacle_margin_m
             velocity=speed_kmh/3.6
+            if stopping_required_m is not None and front-ego<=stopping_required_m:
+                return self._block('S4_OBSTACLE_STOPPING_DISTANCE')
             if distance<=velocity*self.config.reaction_time_s+velocity**2/(2*self.config.deceleration_mps2):
                 return self._block('BRAKING_DISTANCE')
+            if hazard_reference is not None and self.drivable_area is None:
+                return self._block('ROAD_BOUNDARY_UNAVAILABLE')
             pairs=[];all_candidates=[];lane_pairs=[]
             for side in ('left','right'):
                 try:
@@ -470,7 +496,7 @@ class StaticObstaclePlanner:
             # than hoping a cost weight eventually completes the maneuver.
             self.state='NORMAL';self.reason='';self.remembered=();self.selected=None
             self.pair=None;self.candidates=();self._hold_path=()
-            return self._result(reference)
+            return self._result(normal_reference)
         path=(self.selected.entry_path if self.state=='AVOID_ENTRY' else
               self._hold_path if self.state=='AVOID_HOLD' else self.selected.return_path)
         index=PolylineIndex(path);station=index.project(pose[:2]);row=sample(path,station)

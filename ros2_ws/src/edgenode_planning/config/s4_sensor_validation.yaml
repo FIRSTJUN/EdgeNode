@@ -2,3 +2,15 @@ planning_node:
   ros__parameters:
     enable_drive: false
     s4_sensor_validation_enabled: true
+    # S4 only. Preserve NORMAL's 20 m Local Path; preview never goes to Control.
+    s4_distance_speed_cap_kmh: 3.0
+    s4_distance_preview_m: 80.0
+    s4_distance_control_horizon_m: 20.0
+    # Conservative modelling budgets, NOT measured physical/WCET guarantees.
+    s4_distance_perception_budget_s: 0.2
+    s4_distance_planning_budget_s: 1.5
+    s4_distance_control_watchdog_s: 0.6
+    s4_distance_uncertainty_margin_m: 1.0
+    # No real observation validation report exists yet. Fail closed even EMPTY.
+    s4_observation_evidence_file: ""
+    s4_observation_evidence_approved_sha256: ""

@@ -32,10 +32,12 @@ def _finite_number(value):
 from .planning_fsm import PlanningFSM
 from .lane_geometry import LaneNetwork
 from .static_obstacle_planner import AvoidanceConfig, StaticObstaclePlanner
-from .lattice_path import CostWeights, control_local_path
+from .lattice_path import CostWeights, control_local_path, curvatures
 from .avoidance_geometry import load_drivable_area
 from .avoidance_visualization import candidate_markers, diagnostic
 from .sensor_readiness import SensorReadiness
+from .s4_distance_safety import DistancePolicy, DistanceSafety, load_evidence
+from .lane_geometry import arc
 
 
 class PlanningNode(Node):
@@ -205,6 +207,25 @@ class PlanningNode(Node):
                 approved_sha256=(self.get_parameter('avoidance_boundary_approved_sha256').value
                     if self.get_parameter('s4_sensor_validation_enabled').value else None),
                 mgeo_dir=mgeo_dir))
+        self.distance_safety = None
+        for name, value in DistancePolicy().__dict__.items():
+            self.declare_parameter('s4_distance_' + name, value, ParameterDescriptor(read_only=True))
+        for name in ('s4_observation_evidence_file', 's4_observation_evidence_approved_sha256',
+                     's4_lidar_config_file', 's4_control_config_file'):
+            self.declare_parameter(name, '', ParameterDescriptor(read_only=True))
+        if self.sensor_guard is not None:
+            policy = DistancePolicy(**{name: self.get_parameter('s4_distance_' + name).value
+                                       for name in DistancePolicy().__dict__})
+            evidence, reason = load_evidence(
+                self.get_parameter('s4_observation_evidence_file').value,
+                self.get_parameter('s4_observation_evidence_approved_sha256').value,
+                self.get_parameter('s4_lidar_config_file').value,
+                self.get_parameter('s4_control_config_file').value,
+                mgeo_dir, policy, self.avoidance_planner.config)
+            self.distance_safety = DistanceSafety(policy, self.avoidance_planner.config,
+                self.avoidance_planner.body, evidence, reason)
+            self.s4_distance_state_pub = self.create_publisher(String, '/planning/s4_distance_state', 10)
+        self._s4_distance_state = {}
         self.latest_obstacle_groups = []
         self.latest_obstacle_valid = True
         self.obstacle_received_ns = None
@@ -362,6 +383,10 @@ class PlanningNode(Node):
             response.success = False
             response.message = 'fresh paired S4 sensor data required before reset'
             return response
+        if response.success and guard is not None and self.distance_reason(self.get_clock().now().nanoseconds):
+            response.success = False
+            response.message = 'validated S4 observation and stopping distance required before reset'
+            return response
         if response.success:
             self.avoidance_planner.reset()
             self._validation_pending_stamp_ns=None
@@ -394,9 +419,12 @@ class PlanningNode(Node):
             self.obstacle_stamp_ns = stamp
 
     def stop_for_sensor(self, reason):
+        return self.stop_for_safety('S4_SENSOR_' + reason)
+
+    def stop_for_safety(self, reason):
         # A recovered producer must never clear an existing avoidance latch.
         if self.avoidance_planner.state != 'BLOCKED':
-            result = self.avoidance_planner.stop('S4_SENSOR_' + reason)
+            result = self.avoidance_planner.stop(reason)
         else:
             result = self.avoidance_planner.stop(self.avoidance_planner.reason)
         stop = Path()
@@ -452,6 +480,32 @@ class PlanningNode(Node):
             enabled=True, ready=not reason, reason=reason,
             session_id=guard.session_id,
             source_stamp_ns=guard.matched[0]['source_stamp_ns'] if guard.matched else None))))
+
+    def distance_reason(self, now_ns, *, elapsed_s=0., route_link_ids=()):
+        safety = getattr(self, 'distance_safety', None)
+        if safety is None:
+            return ''
+        guard = self.sensor_guard
+        if self.sensor_reason(now_ns):
+            return ''  # Sensor gate supplies the more specific first failure.
+        age = max(0., (now_ns - guard.matched[0]['source_stamp_ns']) / 1e9,
+                  (now_ns - self.latest_pose_stamp_ns) / 1e9)
+        result = safety.evaluate(self.latest_speed_kmh, age, self.latest_turn_curvature, route_link_ids)
+        result['planning_elapsed_s'] = elapsed_s
+        if elapsed_s > safety.policy.planning_budget_s:
+            result.update(ready=False, reason='PLANNING_BUDGET_EXCEEDED')
+        self._s4_distance_state = result
+        self.s4_distance_state_pub.publish(String(data=json.dumps(result, allow_nan=False)))
+        return result['reason']
+
+    def refresh_distance(self, started, route_link_ids=()):
+        if getattr(self, 'distance_safety', None) is None:
+            return None
+        reason = self.distance_reason(self.get_clock().now().nanoseconds,
+            elapsed_s=time.perf_counter() - started, route_link_ids=route_link_ids)
+        if reason:
+            return self.stop_for_safety('S4_DISTANCE_' + reason)
+        return None
 
     def publish_avoidance(self, result):
         stamp = self.get_clock().now().to_msg()
@@ -523,8 +577,12 @@ class PlanningNode(Node):
         every tick. Match loss retains progress/cache but publishes no Path.
         An active route configuration change invalidates both immediately.
         """
-        # Stop before route matching/searching if the S4-only sensor gate fails.
+        # Whole timer duration includes route extraction, global path publication
+        # and candidate search. Steady time also covers a paused ROS clock.
+        s4_started = time.perf_counter() if getattr(self, 'distance_safety', None) else None
         PlanningNode.refresh_sensor(self, self.get_clock().now().nanoseconds)
+        if s4_started is not None:
+            self.refresh_distance(s4_started)
         for name in ('cruise_speed_kmh', 'curve_speed_kmh', 'sharp_curve_speed_kmh'):
             setattr(self.speed_planner, name, self.get_parameter(name).value)
         avoidance_result = None
@@ -641,6 +699,36 @@ class PlanningNode(Node):
                         self._progress_index = local_result['nearest_index']
                         self._progress_arc_m = local_result['progress_arc_m']
                         active_local_points = local_result['points']
+                        hazard_points = active_local_points
+                        s4_kwargs = {}
+                        control_horizon = self.get_parameter('local_path_length_m').value
+                        if s4_started is not None:
+                            policy = self.distance_safety.policy
+                            preview = self.local_path_planner.extract(
+                                self._route_result['points'], x, y, horizon_m=policy.preview_m,
+                                previous_index=self._progress_index,
+                                search_back=self.get_parameter('local_path_search_back').value,
+                                search_forward=self.get_parameter('local_path_search_forward').value,
+                                resample_spacing_m=self.get_parameter('local_path_resample_spacing_m').value,
+                                previous_arc_m=self._progress_arc_m)
+                            hazard_points = preview['points'] if preview else ()
+                            self.refresh_distance(s4_started, self._route_result.get('link_ids', ()))
+                            metrics = self._s4_distance_state
+                            if (not hazard_points or arc(hazard_points)[-1] < metrics.get('stopping_required_m', math.inf)):
+                                self.stop_for_safety('S4_DISTANCE_MAP_STOPPING_SUPPORT')
+                            evidence = self.distance_safety.evidence
+                            if evidence and hazard_points and metrics.get('stopping_required_m'):
+                                corridor = control_local_path(hazard_points, (x, y, yaw), metrics['stopping_required_m'])
+                                if max(map(abs, curvatures(corridor)), default=math.inf) > evidence.max_curvature:
+                                    self.stop_for_safety('S4_DISTANCE_OBSERVATION_CURVATURE_SCOPE')
+                            control_horizon = policy.control_horizon_m
+                            s4_kwargs = dict(hazard_reference=hazard_points,
+                                entry_reserve_m=metrics.get('entry_reserve_m', 0.),
+                                stopping_required_m=metrics.get('stopping_required_m'),
+                                entry_observation_m=self.distance_safety.evidence.forward_range_m
+                                    if self.distance_safety.evidence else 0.,
+                                observation_curvature_limit=self.distance_safety.evidence.max_curvature
+                                    if self.distance_safety.evidence else 0.)
 
                         receipt = self.obstacle_received_ns
                         observation_valid = self.latest_obstacle_valid and (receipt is None or
@@ -655,7 +743,7 @@ class PlanningNode(Node):
                         try:
                             try:
                                 validation_stop=enable_drive and self.avoidance_planner.needs_validation_stop(
-                                    active_local_points,self.latest_obstacle_groups)
+                                    hazard_points,self.latest_obstacle_groups)
                             except (ValueError,TypeError,OverflowError):
                                 # Unknown footprint extent must still reach the
                                 # planner's latched rejection, not become a
@@ -672,7 +760,7 @@ class PlanningNode(Node):
                                 self.latest_obstacle_groups,(x,y,yaw),speed_kmh=self.latest_speed_kmh,
                                 actual_curvature=self.latest_turn_curvature,current_link_id=current_link,
                                 route_link_ids=self._route_result.get('link_ids',()),observation_valid=observation_valid,
-                                control_horizon_m=self.get_parameter('local_path_length_m').value)
+                                control_horizon_m=control_horizon, **s4_kwargs)
                             if (not isinstance(avoidance_result,dict) or
                                     not isinstance(avoidance_result.get('blocked'),bool) or
                                     'points' not in avoidance_result or 'state' not in avoidance_result):
@@ -685,7 +773,7 @@ class PlanningNode(Node):
                                 # Window extraction is part of validation:
                                 # failure must latch STOP before any publish.
                                 control_points=control_local_path(points,(x,y,yaw),
-                                    self.get_parameter('local_path_length_m').value)
+                                    control_horizon)
                         except Exception as error:
                             self.get_logger().error(f'Avoidance validation failed: {error}')
                             avoidance_result=self.avoidance_planner.stop('INVALID_AVOIDANCE_RESULT')
@@ -713,6 +801,10 @@ class PlanningNode(Node):
                         sensor_reason = self.sensor_reason(self.get_clock().now().nanoseconds) if guard else ''
                         if sensor_reason:
                             avoidance_result = self.stop_for_sensor(sensor_reason)
+                        if s4_started is not None:
+                            distance_stop = self.refresh_distance(s4_started, self._route_result.get('link_ids', ()))
+                            if distance_stop:
+                                avoidance_result = distance_stop
                         active_local_points = avoidance_result['points']
                         if avoidance_result['blocked']:
                             active_local_points=()
@@ -791,6 +883,12 @@ class PlanningNode(Node):
         sensor_reason = self.sensor_reason(self.get_clock().now().nanoseconds) if guard else ''
         if sensor_reason:
             avoidance_result = self.stop_for_sensor(sensor_reason)
+        if s4_started is not None:
+            distance_stop = self.refresh_distance(s4_started,
+                self._route_result.get('link_ids', ()) if self._route_result else ())
+            if distance_stop:
+                avoidance_result = distance_stop
+                self.publish_avoidance(avoidance_result)
         previous_fsm_state = self.fsm.state
 
         fsm_state_value = self.fsm.update(
@@ -819,6 +917,9 @@ class PlanningNode(Node):
             target_speed.data = min(requested_target_speed,cap) if cap is not None else requested_target_speed
         else:
             target_speed.data = 0.0
+
+        if s4_started is not None:
+            target_speed.data = min(target_speed.data, self.distance_safety.policy.speed_cap_kmh)
 
         state = String()
         state.data = state_value

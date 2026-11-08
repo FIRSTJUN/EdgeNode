@@ -15,6 +15,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 def generate_launch_description():
     planning = get_package_share_directory('edgenode_planning')
     perception = get_package_share_directory('edgenode_perception')
+    control = get_package_share_directory('edgenode_control')
     sim_time = {'use_sim_time': ParameterValue(LaunchConfiguration('use_sim_time'), value_type=bool)}
     return LaunchDescription([
         DeclareLaunchArgument('use_sim_time', default_value='false'),
@@ -24,5 +25,7 @@ def generate_launch_description():
         Node(package='edgenode_planning', executable='planning_node',
              name='planning_node', output='screen', parameters=[
                  os.path.join(planning, 'config', 'planning.yaml'),
-                 os.path.join(planning, 'config', 's4_sensor_validation.yaml'), sim_time]),
+                 os.path.join(planning, 'config', 's4_sensor_validation.yaml'),
+                 {'s4_lidar_config_file': os.path.join(perception, 'config', 'lidar_obstacle.yaml'),
+                  's4_control_config_file': os.path.join(control, 'config', 'control.yaml')}, sim_time]),
     ])

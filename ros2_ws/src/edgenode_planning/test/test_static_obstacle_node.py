@@ -49,6 +49,11 @@ def node(route_editor_map, request):
         value.dijkstra_planner.plan=Mock(return_value=dict(points=lanes.links['O0']['points']+
             lanes.links['O1']['points'][1:],link_ids=['O0','O1']))
         value.map_matcher.match=Mock(return_value=dict(link_id='O0',distance=0.,heading_diff=0.))
+        if value.distance_safety is not None:
+            # Synthetic sensor-only fixture, not K-City visibility approval.
+            from edgenode_planning.s4_distance_safety import ObservationEvidence
+            value.distance_safety.evidence = ObservationEvidence(21.19, 50., 1., ('O0', 'O1'),
+                                                                  'synthetic unit-test world')
         value.latest_pose=(0.,0.,0.);value.latest_speed_kmh=3.
         value.latest_pose_stamp_ns=1
         value.latest_pose_received_ns=value.get_clock().now().nanoseconds
