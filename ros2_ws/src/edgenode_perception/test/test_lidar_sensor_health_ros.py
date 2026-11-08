@@ -52,6 +52,11 @@ def test_real_sensor_status_pairing_failure_timeout_restart_and_explicit_reset(t
     executor = SingleThreadedExecutor(); nodes = []
     try:
         detector = LidarObstacleNode(); planner = PlanningNode(); probe = Node('probe')
+        # Synthetic straight corridor, only for this isolated sensor lifecycle test.
+        # This is not a physical range claim or a production gate bypass.
+        from edgenode_planning.s4_distance_safety import ObservationEvidence
+        planner.distance_safety.evidence = ObservationEvidence(21.19, 3., .01, ('AB',),
+                                                              'synthetic DDS test corridor')
         nodes.extend((detector, planner, probe))
         for item in nodes: executor.add_node(item)
         speeds, paths, statuses, footprints = [], [], [], []
