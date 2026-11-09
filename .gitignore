@@ -28,3 +28,25 @@ debug_frames/
 # Local rosbag archives
 /edgenode_rosbags.tar.gz
 /rosbags/
+
+# Local ML environments, model weights, recordings and private configuration
+yolo_venv/
+.venv/
+venv/
+*.pt
+*.pth
+*.onnx
+*.bag
+*.db3
+*.mcap
+*.log
+.env
+.env.*
+!.env.example
+/local_data/models/
+/local_data/kcity_mgeo/
+/local_data/school_zone_exit_records/
+/local_data/school_zone_yolo_test.py
+/local_data/school_zone_yolo_bridge.py
+/route_tracking_test_01/
+.pytest_cache/
