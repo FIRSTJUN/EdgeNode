@@ -122,6 +122,8 @@ class LatticeCandidate:
     rejection: str = ''
     entry_path: tuple = ()
     return_path: tuple = ()
+    return_control_reserve_m: float = 0.
+    return_preview_extension_m: float = 0.
 
 
 @dataclass(frozen=True)
@@ -149,11 +151,11 @@ def reference_cost(points, reference, adjacent, weights=CostWeights()):
     deviation = []
     occupancy=[]
     for p in points:
-        row = sample(reference,index.project(p))
+        row = sample(reference,index.project(p),index.lengths)
         if row is None:
             raise ValueError('cost reference range')
         deviation.append(math.dist(p[:2],row[0][:2]))
-        target=sample(adjacent,target_index.project(p))
+        target=sample(adjacent,target_index.project(p),target_index.lengths)
         if target is None:
             raise ValueError('cost adjacent reference range')
         # Nearest-center lane association is a SOFT occupancy cost, never a

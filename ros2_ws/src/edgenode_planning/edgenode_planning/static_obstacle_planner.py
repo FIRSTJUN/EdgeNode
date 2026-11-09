@@ -205,6 +205,12 @@ class StaticObstaclePlanner:
             result=[old for i,old in enumerate(result) if i not in matches]+[combined]
         self.remembered=tuple(sorted(result))
 
+    def _rollout_distance(self, speed):
+        velocity=max(speed,self.config.avoid_speed_kmh)/3.6
+        lookahead=calculate_lookahead_distance(velocity*3.6,self.config.lookahead_min_m,
+            self.config.lookahead_max_m,self.config.lookahead_preview_time_sec)
+        return 2*velocity*self.config.rollout_seconds+lookahead+2*self.config.tracking_limit_m
+
     def _rollout(self, points, pose, speed, actual_curvature, obstacles):
         velocity=max(speed,self.config.avoid_speed_kmh)/3.6
         lookahead=calculate_lookahead_distance(velocity*3.6,self.config.lookahead_min_m,
@@ -218,7 +224,7 @@ class StaticObstaclePlanner:
         # Keep the PP target within the validated window for the full horizon;
         # short configured windows are rejected rather than modeled as a
         # longer path than the actual Control input.
-        if arc(points)[-1]<2*velocity*self.config.rollout_seconds+lookahead+2*self.config.tracking_limit_m:
+        if arc(points)[-1]<self._rollout_distance(speed):
             return 'SHORT_CONTROL_HORIZON'
         dt=1/self.config.control_rate_hz
         previous_angle=math.atan(actual_curvature*self.config.wheelbase_m)
@@ -298,15 +304,31 @@ class StaticObstaclePlanner:
                 hold=center_suffix(pair.adjacent,target['adjacent_s'],back['adjacent_s'])
                 return_path=hold+recovery[1:]+center_suffix(pair.original,return_end,horizon)[1:]
                 combined=entry+return_path[1:]
+                # Compare every candidate over the SAME prediction support.
+                # A control reserve after return is safety geometry, not extra
+                # scored progress. Its vertices come only from the actual
+                # original lane in this connected, permitted lane pair.
                 cost,terms=reference_cost(combined,pair.original,pair.adjacent,self.weights)
-                reason=('ENTRY_DEADLINE' if end+self.body.wheelbase_m+self.body.front_overhang_m+
-                        self.config.obstacle_margin_m+self._entry_reserve_m>front else '')
+                reserve=self._rollout_distance(speed)
+                support_end=return_end+reserve
+                reason=('RETURN_CONTROL_SUPPORT' if support_end>
+                    pair.length-self.body.wheelbase_m-self.body.front_overhang_m-1. else '')
+                extension=max(0.,support_end-horizon) if not reason else 0.
+                if extension:
+                    # Preview truncation is different from absent map data.
+                    # Validate the entire appended real-lane tail below before
+                    # committing. Never extrapolate the map or re-fit a path.
+                    return_path+=center_suffix(pair.original,horizon,support_end)[1:]
+                    combined=entry+return_path[1:]
+                if not reason and end+self.body.wheelbase_m+self.body.front_overhang_m+\
+                        self.config.obstacle_margin_m+self._entry_reserve_m>front:
+                    reason='ENTRY_DEADLINE'
                 if (not reason and self._entry_observation_m is not None
                         and end-ego+self.body.wheelbase_m+self.body.front_overhang_m+
                         self.config.obstacle_margin_m+self._entry_reserve_m>self._entry_observation_m):
                     reason='ENTRY_OBSERVATION_DISTANCE'
                 if not reason and any(sum(a*b for a,b in zip((b[0]-a[0],b[1]-a[1]),
-                    sample(pair.original,pair.original_index.project(a))[1]))<=0
+                    sample(pair.original,pair.original_index.project(a),pair.original_arc)[1]))<=0
                     for a,b in zip(combined,combined[1:])):
                     reason='DIRECTION_CONTINUITY'
                 if not reason:
@@ -316,7 +338,7 @@ class StaticObstaclePlanner:
                 if not reason:
                     reason=self._rollout(entry_path,pose,speed,actual_curvature,self.remembered)
                 candidates.append(LatticeCandidate(pair.side,combined,end,return_start,return_end,length,
-                    cost,terms,reason,entry_path,return_path))
+                    cost,terms,reason,entry_path,return_path,reserve,extension))
             except (ValueError,TypeError,IndexError,OverflowError) as error:
                 # A rejected partial entry remains useful diagnostic geometry;
                 # it is never an executable fallback without a verified return.
