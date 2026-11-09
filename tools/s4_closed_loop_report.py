@@ -8,7 +8,7 @@ Ten/twenty km/h are initial-speed model analyses; the avoidance cap stays 3.
 import argparse
 from collections import Counter
 import csv
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import hashlib
 import json
 import math
@@ -167,9 +167,12 @@ def main():
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--match', default='', help='comma-separated exact scene names')
     parser.add_argument('--resume', action='store_true', help='reuse results with identical scene/source hashes')
+    parser.add_argument('--timing-mode',choices=('modeled','measured'),default='modeled',
+                        help='measured advances virtual callback time by observed core wall delay')
     parser.add_argument('--list', action='store_true')
     args = parser.parse_args()
-    selected = [(s,e) for s,e in matrix() if not args.match or s.name in args.match.split(',')]
+    selected = [(replace(s,timing_mode=args.timing_mode),e) for s,e in matrix()
+                if not args.match or s.name in args.match.split(',')]
     if args.list:
         print(json.dumps([dict(scene=asdict(s),expected=e) for s,e in selected],indent=2)); return
     args.out.mkdir(parents=True, exist_ok=True)
@@ -178,9 +181,18 @@ def main():
     sources += sorted((ROOT/'ros2_ws/src/edgenode_control/edgenode_control').glob('*.py'))
     sources += sorted((ROOT/'ros2_ws/src').glob('edgenode_*/config/*.yaml'))
     hashes = {str(p.relative_to(ROOT)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sources}
-    source_digest = hashlib.sha256(json.dumps(hashes,sort_keys=True).encode()).hexdigest()
+    # An explicit PYTHONPATH may load the frozen pre-optimization modules while
+    # retaining the same measurement harness. Record actual loaded code too.
+    imported = {}
+    for name,module in sorted(sys.modules.items()):
+        if name=='synthetic_s4_loop' or name.startswith(('edgenode_planning.','edgenode_control.')):
+            filename=getattr(module,'__file__',None)
+            if filename:
+                file=Path(filename).resolve()
+                imported[name]=dict(file=str(file),sha256=hashlib.sha256(file.read_bytes()).hexdigest())
+    source_digest = hashlib.sha256(json.dumps(dict(workspace=hashes,imported=imported),sort_keys=True).encode()).hexdigest()
     write_json(args.out/'sources.json',dict(head=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),
-        sha256=hashes,source_digest=source_digest))
+        sha256=hashes,imported_modules=imported,source_digest=source_digest))
     results = []
     for scene, expected in selected:
         folder = args.out/scene.name; folder.mkdir(exist_ok=True)

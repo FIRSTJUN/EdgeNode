@@ -96,6 +96,7 @@ class StaticObstaclePlanner:
         self._original=();self.left_lane=self.right_lane=()
         self._hazards=()
         self._validated_paths={}
+        self._validated_context=None
         self.generated_transition_count=0
         self.candidate_lane_batches=0
         self._control_horizon_m=20.
@@ -161,7 +162,14 @@ class StaticObstaclePlanner:
                 return 'REFERENCE_CLEARANCE'
         return ''
 
-    def _path_safety(self, points, obstacles, speed, check_road=True, geometry_check=True):
+    def _geometry_context(self):
+        # All geometric inputs are immutable value objects. Replacing the
+        # boundary/map object also changes the context even for equal values.
+        return (id(self.network),id(self.drivable_area),self.drivable_area,
+                self.body,self.config,self._observation_curvature_limit)
+
+    def _path_safety(self, points, obstacles, speed, check_road=True, geometry_check=True,
+                     body_cache=None):
         try:
             ks=curvatures(points)
         except (ValueError,OverflowError):
@@ -169,9 +177,28 @@ class StaticObstaclePlanner:
         if not ks or not all(math.isfinite(k) for k in ks):
             return 'INVALID_PATH'
         if geometry_check:
+            if body_cache is not None:
+                context=(self._geometry_context(),obstacles,check_road)
+                if body_cache.get('context')!=context:
+                    body_cache.clear();body_cache['context']=context
             path_poses=poses(points)
             for a,b in zip(path_poses,path_poses[1:]):
-                reason=self._body_safety(a,b,obstacles,check_road)
+                if body_cache is None:
+                    reason=self._body_safety(a,b,obstacles,check_road)
+                else:
+                    key=(a,b)
+                    cached=body_cache.get(key)
+                    if cached is None:
+                        previous=self._min_clearance;self._min_clearance=math.inf
+                        try:
+                            reason=self._body_safety(a,b,obstacles,check_road)
+                        finally:
+                            clearance=self._min_clearance
+                            self._min_clearance=min(previous,clearance)
+                        body_cache[key]=(reason,clearance)
+                    else:
+                        reason,clearance=cached
+                        self._min_clearance=min(self._min_clearance,clearance)
                 if reason:
                     return reason
         if (self._observation_curvature_limit is not None
@@ -256,7 +283,8 @@ class StaticObstaclePlanner:
             pose=next_pose
         return ''
 
-    def _generate(self, pair, pose, speed, actual_curvature, front, rear, horizon=None):
+    def _generate(self, pair, pose, speed, actual_curvature, front, rear, horizon=None,
+                  body_cache=None):
         self.candidate_lane_batches+=1
         ego=pair.original_index.project(pose[:2]);entry_row=pair.at(ego)
         if entry_row is None:
@@ -279,6 +307,10 @@ class StaticObstaclePlanner:
         prepared_s=pair.original_index.project(prepared_pose[:2])
         prefix=tuple((x,y,float(entry_row['original'][0][2])) for x,y,angle in prepared)
         candidates=[]
+        # Lifetime: one synchronous Planning call (or this direct batch). Exact
+        # segment checks may also serve the selected-path validation below.
+        if body_cache is None:body_cache={}
+        projection_cache={}
         for length in self.config.transition_lengths_m:
             entry=entry_path=()
             try:
@@ -308,7 +340,8 @@ class StaticObstaclePlanner:
                 # A control reserve after return is safety geometry, not extra
                 # scored progress. Its vertices come only from the actual
                 # original lane in this connected, permitted lane pair.
-                cost,terms=reference_cost(combined,pair.original,pair.adjacent,self.weights)
+                cost,terms=reference_cost(combined,pair.original,pair.adjacent,self.weights,
+                                          projection_cache=projection_cache)
                 reserve=self._rollout_distance(speed)
                 support_end=return_end+reserve
                 reason=('RETURN_CONTROL_SUPPORT' if support_end>
@@ -332,9 +365,9 @@ class StaticObstaclePlanner:
                     for a,b in zip(combined,combined[1:])):
                     reason='DIRECTION_CONTINUITY'
                 if not reason:
-                    reason=self._path_safety(combined,self.remembered,speed)
+                    reason=self._path_safety(combined,self.remembered,speed,body_cache=body_cache)
                 if not reason:
-                    reason=self._path_safety(entry_path,self.remembered,speed)
+                    reason=self._path_safety(entry_path,self.remembered,speed,body_cache=body_cache)
                 if not reason:
                     reason=self._rollout(entry_path,pose,speed,actual_curvature,self.remembered)
                 candidates.append(LatticeCandidate(pair.side,combined,end,return_start,return_end,length,
@@ -389,6 +422,10 @@ class StaticObstaclePlanner:
         self._entry_reserve_m=entry_reserve_m
         self._entry_observation_m=entry_observation_m
         self._observation_curvature_limit=observation_curvature_limit
+        context=self._geometry_context()
+        if context!=self._validated_context:
+            self._validated_paths.clear();self._validated_context=context
+        body_cache={}
         old_memory=self.remembered
         self._remember(detected)
         # A nominal centerline can miss a collision caused by current tracking
@@ -412,7 +449,7 @@ class StaticObstaclePlanner:
                     if laterals and min(laterals)<=width and max(laterals)>=-width:
                         hazards.append(obstacle)
                 if hazards:self._hazards=tuple(hazards)
-                reason=self._path_safety(self.selected.return_path,self.remembered,speed_kmh)
+                reason=self._path_safety(self.selected.return_path,self.remembered,speed_kmh,body_cache=body_cache)
                 if reason:return self._block('RETURN_RESERVATION_'+reason)
         if self.state=='NORMAL':
             self._original=reference
@@ -464,7 +501,8 @@ class StaticObstaclePlanner:
                     original_index=pair.original_index
                     front_s=min(original_index.project(p) for o in blocking for p in o)
                     rear_s=max(original_index.project(p) for o in blocking for p in o)
-                    candidates=self._generate(pair,pose,speed_kmh,actual_curvature,front_s,rear_s,common_horizon)
+                    candidates=self._generate(pair,pose,speed_kmh,actual_curvature,front_s,rear_s,common_horizon,
+                                               body_cache=body_cache)
                     all_candidates.extend(candidates);pairs.append((pair,candidates))
                 except (ValueError,TypeError,IndexError,OverflowError):
                     continue
@@ -534,7 +572,7 @@ class StaticObstaclePlanner:
         key=(id(path),self.remembered)
         if key not in self._validated_paths:
             future=fixed_path_suffix(path,station)
-            reason=self._path_safety(future,self.remembered,speed_kmh)
+            reason=self._path_safety(future,self.remembered,speed_kmh,body_cache=body_cache)
             if not reason:self._validated_paths[key]=(path,future)
         else:
             reason=self._path_safety(self._validated_paths[key][1],(),speed_kmh,geometry_check=False)

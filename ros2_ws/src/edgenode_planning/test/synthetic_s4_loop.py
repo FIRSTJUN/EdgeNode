@@ -49,6 +49,7 @@ class Scene:
     usable_virtual_range_m: float = 50.
     sensor_delay_s: float = .05
     compute_latency_s: float = .02
+    timing_mode: str = 'modeled'  # 'measured' advances virtual time by observed wall delay.
     command_delay_s: float = .1
     pedal_time_constant_s: float = .08
     steering_time_constant_s: float = .04
@@ -217,6 +218,8 @@ def production_values():
 
 
 def simulate(scene):
+    if scene.timing_mode not in ('modeled','measured'):
+        raise ValueError('unknown synthetic timing mode')
     values = production_values()
     fields = ('wheelbase_m', 'max_wheel_angle_rad', 'max_front_steer_normalized', 'steering_sign',
               'control_rate_hz', 'lookahead_min_m', 'lookahead_max_m', 'lookahead_preview_time_sec')
@@ -237,6 +240,7 @@ def simulate(scene):
     vehicle = Vehicle(scene, pose, config)
     dt = 1/config.control_rate_hz; period = .1
     rows, transitions, fsm_transitions, candidates, timings = [], [], [], [], []
+    process_timings=[]
     planning_rows, rollout_failures, selected_geometry = [], [], []
     original_rollout = planner._rollout
     def audited_rollout(points, pose, speed, curvature, obstacles):
@@ -354,6 +358,10 @@ def simulate(scene):
             source_age = (ns-guard.matched[0]['source_stamp_ns'])/1e9 if guard.matched else 1e6
             max_source_age=max(max_source_age,source_age)
             sensor_reason = guard.reason(ns)
+            job['timing_row'].update(completed_virtual_ns=ns,
+                source_stamp_at_completion_ns=guard.matched[0]['source_stamp_ns'] if guard.matched else None,
+                source_age_at_completion_s=source_age,freshness_reason_at_completion=sensor_reason,
+                control_update_virtual_ns=ns)
             distance = safety.evaluate(vehicle.v*3.6, source_age, vehicle.curvature, road.route_ids)
             if sensor_reason: block('S4_SENSOR_'+sensor_reason, now)
             elif max(job['cpu_s'],job['model_s']) > policy.planning_budget_s:
@@ -383,6 +391,8 @@ def simulate(scene):
             record_transition(now)
         if pending is None and planner.state != 'BLOCKED' and mission_stop_at is None and now+1e-9 >= next_plan:
             whole_started=time.perf_counter()
+            process_started=time.process_time()
+            host_started_ns=time.monotonic_ns()
             next_plan=now+period
             normal = local.extract(road.reference,*vehicle.pose[:2],horizon_m=20., previous_index=previous_index,
                 previous_arc_m=previous_arc,resample_spacing_m=2.)
@@ -409,11 +419,23 @@ def simulate(scene):
                     hazard_reference=preview,entry_reserve_m=distance['entry_reserve_m'],
                     stopping_required_m=distance['stopping_required_m'],entry_observation_m=evidence.forward_range_m,
                     observation_curvature_limit=evidence.max_curvature)
-                cpu=time.perf_counter()-whole_started; model=scene.compute_latency_s
+                # Account for final window construction too; completion still
+                # reprojects the same fixed geometry at the actual model pose.
+                if result['active'] and not result['blocked']:
+                    control_local_path(result['points'],vehicle.pose,policy.control_horizon_m)
+                cpu=time.perf_counter()-whole_started  # legacy name: elapsed wall time
+                process_cpu=time.process_time()-process_started
+                process_timings.append(process_cpu)
+                model=max(scene.compute_latency_s,cpu) if scene.timing_mode=='measured' else scene.compute_latency_s
                 if scene.fault=='compute_timeout' and new and not stall_injected:
                     model=1.6;stall_injected=True
                 timings.append(cpu);cpu_overruns+=int(cpu>policy.planning_budget_s);model_overruns+=int(model>policy.planning_budget_s)
                 planning_rows.append(dict(t=now,state=planner.state,reason=planner.reason,cpu_s=cpu,
+                    wall_s=cpu,process_cpu_s=process_cpu,timing_mode=scene.timing_mode,
+                    source_stamp_at_start_ns=guard.matched[0]['source_stamp_ns'],
+                    observation_received_virtual_ns=guard.matched[2],planning_start_virtual_ns=ns,
+                    expected_completion_virtual_ns=ns+round(model*1e9),host_started_monotonic_ns=host_started_ns,
+                    host_finished_monotonic_ns=time.monotonic_ns(),
                     modeled_s=model,source_age_s=source_age,new_validation=new,
                     speed_kmh=vehicle.v*3.6,stopping_required_m=distance['stopping_required_m']))
                 key=tuple((c.side,c.transition_length_m,c.rejection) for c in planner.candidates)
@@ -432,7 +454,7 @@ def simulate(scene):
                         return_control_reserve_m=getattr(planner.selected,'return_control_reserve_m',None),
                         return_preview_extension_m=getattr(planner.selected,'return_preview_extension_m',None)))
                 pending=dict(result=result,normal=normal['points'],ready_at=now+model,cpu_s=cpu,model_s=model,
-                             new_validation=new,stamp=ns,phase_before=phase_before)
+                             new_validation=new,stamp=ns,phase_before=phase_before,timing_row=planning_rows[-1])
                 record_transition(now)
         fsm_state=fsm.update(localization_ready=True,map_match_ready=True,global_path_ready=True,
             local_path_ready=len(control.local_path_points)>=2,speed_ready=True,drive_status='ACTIVE',
@@ -507,6 +529,7 @@ def simulate(scene):
         stop_distance_m=total_distance-stop_start_distance if stop_start_distance is not None else None,
         blocked_pose=blocked_pose,final_pose=vehicle.pose,final_speed_kmh=vehicle.v*3.6,
         max_cpu_compute_s=max(timings,default=0.),cpu_budget_overruns=cpu_overruns,modeled_budget_overruns=model_overruns,
+        max_process_cpu_compute_s=max(process_timings,default=0.),
         cpu_freshness_budget_exceedances=sum(t+scene.sensor_delay_s>guard.max_age_ns/1e9 for t in timings),
         max_observation_age_s=max_source_age,planning_cycles=len(timings),validating_cycles=validations,sensor_dropout_at_s=sensor_drop_at,
         global_reference_sha256=route_hash_before,rows=rows,planning_rows=planning_rows,

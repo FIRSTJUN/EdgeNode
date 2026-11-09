@@ -140,27 +140,40 @@ class CostWeights:
             raise ValueError('finite positive lane preference and nonnegative other costs required')
 
 
-def reference_cost(points, reference, adjacent, weights=CostWeights()):
+def reference_cost(points, reference, adjacent, weights=CostWeights(), *, projection_cache=None):
     """Distance integrals normalized over a COMMON prediction support.
 
     Positive reference/adjacent costs disfavor extended neighboring-lane travel.
     Safety never enters a weighted sum. Two switches are charged for a complete
     obstacle maneuver; fixed-direction commitment supplies hysteresis.
     """
-    index = PolylineIndex(reference);target_index=PolylineIndex(adjacent);lengths = arc(points)
+    if projection_cache is not None:
+        context=(id(reference),id(adjacent),tuple(map(tuple,reference)),tuple(map(tuple,adjacent)))
+        if projection_cache.get('context')!=context:
+            projection_cache.clear();projection_cache['context']=context
+            projection_cache['indices']=(PolylineIndex(reference),PolylineIndex(adjacent))
+        index,target_index=projection_cache['indices']
+    else:
+        index=PolylineIndex(reference);target_index=PolylineIndex(adjacent)
+    lengths = arc(points)
     deviation = []
     occupancy=[]
     for p in points:
-        row = sample(reference,index.project(p),index.lengths)
-        if row is None:
-            raise ValueError('cost reference range')
-        deviation.append(math.dist(p[:2],row[0][:2]))
-        target=sample(adjacent,target_index.project(p),target_index.lengths)
-        if target is None:
-            raise ValueError('cost adjacent reference range')
+        key=tuple(p);cached=projection_cache.get(key) if projection_cache is not None else None
+        if cached is None:
+            row = sample(reference,index.project(p),index.lengths)
+            if row is None:
+                raise ValueError('cost reference range')
+            distance=math.dist(p[:2],row[0][:2])
+            target=sample(adjacent,target_index.project(p),target_index.lengths)
+            if target is None:
+                raise ValueError('cost adjacent reference range')
+            cached=(distance,math.dist(p[:2],target[0][:2])<distance)
+            if projection_cache is not None:projection_cache[key]=cached
+        deviation.append(cached[0])
         # Nearest-center lane association is a SOFT occupancy cost, never a
         # fabricated lane boundary or permission to approve road containment.
-        occupancy.append(math.dist(p[:2],target[0][:2])<deviation[-1])
+        occupancy.append(cached[1])
     total = lengths[-1]
     support=index.project(points[-1])-index.project(points[0])
     if support<=0:

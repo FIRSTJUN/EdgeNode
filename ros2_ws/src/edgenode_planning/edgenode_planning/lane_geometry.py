@@ -1,5 +1,6 @@
 """MGeo lane pairs and conservative center-to-center corridors; no routing edits."""
 import math
+from bisect import bisect_left
 
 from .avoidance_geometry import arc, cross
 
@@ -17,7 +18,13 @@ def sample(points, s, lengths=None):
     if not points or s < -EPS or s > lengths[-1]+EPS:
         return None
     s = max(0., min(s, lengths[-1]))
-    for i, (a, b) in enumerate(zip(points, points[1:])):
+    # Arc stations are monotone. Keep the original tolerant, earliest-segment
+    # tie rule (including tiny/zero segments); only locate the scan start faster.
+    first=max(0,bisect_left(lengths,s)-1)
+    while first>0 and s<=lengths[first]+EPS:
+        first-=1
+    for i in range(first,len(points)-1):
+        a,b=points[i],points[i+1]
         length = lengths[i+1]-lengths[i]
         if length > 1e-9 and s <= lengths[i+1]+EPS:
             u = max(0., min(1., (s-lengths[i])/length))

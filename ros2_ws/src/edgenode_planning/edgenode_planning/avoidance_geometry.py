@@ -67,10 +67,12 @@ def polygon_distance(a, b):
         return 0.
     distance = math.inf
     for points, edges in ((a,b),(b,a)):
+        segments=[]
+        for x,y in zip(edges,edges[1:]+edges[:1]):
+            dx,dy=y[0]-x[0],y[1]-x[1]
+            segments.append((x,dx,dy,dx*dx+dy*dy))
         for p in points:
-            for x, y in zip(edges, edges[1:]+edges[:1]):
-                dx, dy = y[0]-x[0], y[1]-x[1]
-                length2 = dx*dx+dy*dy
+            for x,dx,dy,length2 in segments:
                 u = max(0., min(1., ((p[0]-x[0])*dx+(p[1]-x[1])*dy)/length2)) if length2 else 0.
                 distance = min(distance, math.hypot(p[0]-x[0]-u*dx, p[1]-x[1]-u*dy))
     return distance
@@ -78,16 +80,36 @@ def polygon_distance(a, b):
 
 def _half_plane(poly, a, b, inside):
     result = []
-    def value(p):
-        return cross((b[0]-a[0],b[1]-a[1]), (p[0]-a[0],p[1]-a[1])) * (1 if inside else -1)
-    for p, q in zip(poly, poly[1:]+poly[:1]):
-        v, w = value(p), value(q)
+    dx,dy=b[0]-a[0],b[1]-a[1]
+    sign=1 if inside else -1
+    # Same operations/order and clipping predicates, with one evaluation per
+    # vertex rather than two and no repeated edge subtraction/closure calls.
+    values=[(dx*(p[1]-a[1])-dy*(p[0]-a[0]))*sign for p in poly]
+    for p, q, v, w in zip(poly, poly[1:]+poly[:1], values, values[1:]+values[:1]):
         if v >= 0:
             result.append(p)
         if (v >= 0) != (w >= 0):
             t = v/(v-w)
             result.append((p[0]+t*(q[0]-p[0]), p[1]+t*(q[1]-p[1])))
     return tuple(result)
+
+
+def _split_half_plane(poly,a,b):
+    """Both original clipping sides; same tests and intersection arithmetic."""
+    dx,dy=b[0]-a[0],b[1]-a[1]
+    values=[dx*(p[1]-a[1])-dy*(p[0]-a[0]) for p in poly]
+    inside=[];outside=[]
+    for p,q,v,w in zip(poly,poly[1:]+poly[:1],values,values[1:]+values[:1]):
+        if v>=0:inside.append(p)
+        if -v>=0:outside.append(p)
+        if (v>=0)!=(w>=0):
+            t=v/(v-w)
+            inside.append((p[0]+t*(q[0]-p[0]),p[1]+t*(q[1]-p[1])))
+        if (-v>=0)!=(-w>=0):
+            # Preserve the negative-side expression, including signed zero.
+            t=(-v)/((-v)-(-w))
+            outside.append((p[0]+t*(q[0]-p[0]),p[1]+t*(q[1]-p[1])))
+    return tuple(inside),tuple(outside)
 
 
 @dataclass(frozen=True)
@@ -116,6 +138,28 @@ class DrivableArea:
             min(p[1] for p in c),max(p[1] for p in c)) for c in clean))
         object.__setattr__(self, '_rectangular', tuple(len(c)==4 and
             len({p[0] for p in c})==2 and len({p[1] for p in c})==2 for c in clean))
+        # Broad phase only: retain the original bounding tests and cell order.
+        # Immutable cells own this index; a replacement area builds a new one.
+        grid={};large=[];entries=0
+        for i,box in enumerate(self._bounds):
+            x0,x1,y0,y1=(math.floor(v/16.) for v in box)
+            count=(x1-x0+1)*(y1-y0+1)
+            if count>4096 or entries+count>65536:
+                large.append(i);continue
+            entries+=count
+            for x in range(x0,x1+1):
+                for y in range(y0,y1+1):grid.setdefault((x,y),[]).append(i)
+        object.__setattr__(self,'_cell_grid',{k:tuple(v) for k,v in grid.items()})
+        object.__setattr__(self,'_large_cells',tuple(large))
+
+    def _candidate_cells(self,bounds):
+        x0,x1,y0,y1=(math.floor(v/16.) for v in bounds)
+        if (x1-x0+1)*(y1-y0+1)>4096:
+            return range(len(self.cells))
+        indices=set(self._large_cells)
+        for x in range(x0,x1+1):
+            for y in range(y0,y1+1):indices.update(self._cell_grid.get((x,y),()))
+        return sorted(indices)
 
     def covers(self, polygon):
         # Subtract each convex road cell from the solid query. Merely checking
@@ -123,13 +167,16 @@ class DrivableArea:
         remaining = [tuple(polygon)]
         bounds=(min(p[0] for p in polygon),max(p[0] for p in polygon),
                 min(p[1] for p in polygon),max(p[1] for p in polygon))
+        candidates=self._candidate_cells(bounds)
         # Exact fast path: one convex verified cell containing all vertices
         # contains the entire solid. This does not fill holes in a cell union.
-        for cell,box,rectangular in zip(self.cells,self._bounds,self._rectangular):
+        for i in candidates:
+            cell,box,rectangular=self.cells[i],self._bounds[i],self._rectangular[i]
             if box[0]<=bounds[0] and bounds[1]<=box[1] and box[2]<=bounds[2] and bounds[3]<=box[3]:
                 if rectangular or convex_covers(cell,polygon):
                     return True
-        for cell, (xmin,xmax,ymin,ymax) in zip(self.cells,self._bounds):
+        for i in candidates:
+            cell=self.cells[i];xmin,xmax,ymin,ymax=self._bounds[i]
             if xmax<bounds[0] or xmin>bounds[1] or ymax<bounds[2] or ymin>bounds[3]:
                 continue
             residual = []
@@ -138,10 +185,9 @@ class DrivableArea:
                     residual.append(piece); continue
                 inside = piece
                 for a, b in zip(cell,cell[1:]+cell[:1]):
-                    outside = _half_plane(inside,a,b,False) if inside else ()
+                    inside,outside=_split_half_plane(inside,a,b) if inside else ((),())
                     if len(outside)>=3 and area(outside)>EPS:
                         residual.append(outside)
-                    inside = _half_plane(inside,a,b,True) if inside else ()
             remaining = residual
             if not remaining:
                 return True
