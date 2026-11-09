@@ -50,6 +50,7 @@ class Scene:
     sensor_delay_s: float = .05
     compute_latency_s: float = .02
     timing_mode: str = 'modeled'  # 'measured' advances virtual time by observed wall delay.
+    coalesce_inputs: bool = True  # measured single-executor scheduler only
     command_delay_s: float = .1
     pedal_time_constant_s: float = .08
     steering_time_constant_s: float = .04
@@ -259,6 +260,7 @@ def simulate(scene):
         return reason
     planner._rollout = audited_rollout
     pending = None; next_plan = 0.; next_sensor = 0.; seq = 0
+    last_planned_frame = None
     last_result = planner._result(); path = (); target = 0.; previous_index = previous_arc = None
     pending_stamp = None; fresh_stamps = set(); last_candidate_key = None
     blocked_at = blocked_station = None; blocked_pose = None; blocked_reason = blocked_phase = ''
@@ -389,7 +391,13 @@ def simulate(scene):
                 if planner.state=='NORMAL' and any(r['state']=='RETURN' for r in transitions) and returned_at is None:
                     returned_at=now
             record_transition(now)
-        if pending is None and planner.state != 'BLOCKED' and mission_stop_at is None and now+1e-9 >= next_plan:
+        if (pending is None and planner.state != 'BLOCKED' and mission_stop_at is None
+                and now+1e-9 >= next_plan and
+                (scene.timing_mode!='measured' or not scene.coalesce_inputs or seq!=last_planned_frame)):
+            # A due timer immediately after a long callback must first yield to
+            # queued input delivery. Vehicle truth continuing to move is not a
+            # newly delivered Planning pose/frame in a single ROS executor.
+            last_planned_frame=seq
             whole_started=time.perf_counter()
             process_started=time.process_time()
             host_started_ns=time.monotonic_ns()

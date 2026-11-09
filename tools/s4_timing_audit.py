@@ -9,7 +9,7 @@ samples. Uninstrumented repeats report wall and process CPU independently.
 """
 import argparse
 from collections import defaultdict
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from dataclasses import replace
 from functools import wraps
 import hashlib
@@ -162,7 +162,7 @@ class Sink:
 
 class NodeCase:
     """Actual ROS Node + actual callback; disarmed and memory output only."""
-    def __init__(self,fixture,m,directory):
+    def __init__(self,fixture,m,directory,live_timers=False):
         import rclpy
         from geometry_msgs.msg import Pose,PoseArray
         from nav_msgs.msg import Odometry
@@ -182,12 +182,13 @@ class NodeCase:
             '-p',f'goal_node_id:={links[-2]["to_node_idx"]}','-p','s4_sensor_validation_enabled:=true',
             '-p','enable_drive:=false','-p','cruise_speed_kmh:=3.0','-p','curve_speed_kmh:=3.0','-p','sharp_curve_speed_kmh:=3.0']
         rclpy.init(args=args)
-        with patch.object(m['planning_node'].PlanningNode,'create_timer'):
+        with (nullcontext() if live_timers else patch.object(m['planning_node'].PlanningNode,'create_timer')):
             self.node=m['planning_node'].PlanningNode()
         node=self.node
         # No deployment schema/pin, no approval file. Test objects only.
         node.avoidance_planner=fixture.planner
         node.distance_safety=fixture.safety
+        self.ros_publishers={name:getattr(node,name) for name in node.__dict__ if name.endswith('_pub')}
         for name in list(node.__dict__):
             if name.endswith('_pub'):
                 label='local_path' if name=='local_path_pub' else 'target_speed' if name=='target_speed_pub' else name
@@ -215,7 +216,7 @@ class NodeCase:
             point=self.Pose();point.position.x=float(x);point.position.y=float(y);obstacles.poses.append(point)
         arrival=node.get_clock().now().nanoseconds;mono=time.monotonic_ns();node.obstacle_callback(obstacles)
         status=dict(schema_version=1,clock='ros',session_id='c'*32,status_seq=self.feed_seq,frame_seq=self.feed_seq,fault_seq=0,
-            state='READY_OBSTACLES',source_stamp_ns=stamp,frame_received_ns=arrival,published_ns=arrival,
+            state='READY_OBSTACLES' if self.fixture.groups else 'READY_EMPTY',source_stamp_ns=stamp,frame_received_ns=arrival,published_ns=arrival,
             cluster_count=len(self.fixture.groups),obstacle_digest=self.m['sensor_readiness'].footprint_digest('map',stamp,points))
         node.sensor_status_callback(self.String(data=json.dumps(status)))
         return dict(source_stamp_ns=stamp,arrival_ros_ns=arrival,arrival_monotonic_ns=mono)

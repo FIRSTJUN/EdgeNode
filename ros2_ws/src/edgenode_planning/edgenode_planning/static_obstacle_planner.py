@@ -74,6 +74,22 @@ def bicycle_step(pose, curvature, distance):
             y+(math.cos(yaw)-math.cos(end))/curvature,end)
 
 
+def _axle_bounds_separated(first,second,sagitta,obstacle,limit):
+    """Sufficient separation proof; ambiguous/touching bounds use exact distance.
+
+    The existing inflated axle is contained in this box. No obstacle distance
+    or road containment diagnostic is replaced. Padding keeps rounding near a
+    threshold in the exact branch, including large map coordinates.
+    """
+    xs,ys=zip(*obstacle)
+    gap=max(min(xs)-max(first[0],second[0])-sagitta,
+            min(first[0],second[0])-sagitta-max(xs),
+            min(ys)-max(first[1],second[1])-sagitta,
+            min(first[1],second[1])-sagitta-max(ys))
+    magnitude=max(abs(v) for v in (*first[:2],*second[:2],*xs,*ys,sagitta,limit))
+    return gap>limit+max(1e-9,32*math.ulp(magnitude))
+
+
 class StaticObstaclePlanner:
     """NORMAL → AVOID_ENTRY → AVOID_HOLD → RETURN → NORMAL, or latched BLOCKED.
 
@@ -157,9 +173,10 @@ class StaticObstaclePlanner:
             angle=abs(heading_error(second[2],first[2]))
             chord=math.dist(first[:2],second[:2])
             sagitta=(chord/(2*math.sin(angle/2))*(1-math.cos(angle/2))) if angle>1e-9 else 0.
-            axle=inflate((tuple(first[:2]),tuple(second[:2])),sagitta)
-            if polygon_distance(axle,obstacle)<self.config.reference_clearance_m:
-                return 'REFERENCE_CLEARANCE'
+            if not _axle_bounds_separated(first,second,sagitta,obstacle,self.config.reference_clearance_m):
+                axle=inflate((tuple(first[:2]),tuple(second[:2])),sagitta)
+                if polygon_distance(axle,obstacle)<self.config.reference_clearance_m:
+                    return 'REFERENCE_CLEARANCE'
         return ''
 
     def _geometry_context(self):
@@ -521,16 +538,26 @@ class StaticObstaclePlanner:
                 self.reason='DECELERATING'
                 return self._result(center_suffix(reference,ego,stop_s),speed_cap=self.config.avoid_speed_kmh)
             self.selected,self.pair=min(safe,key=lambda row:row[0].cost)
+            # Check the exact future RETURN representation while search is
+            # already stopped. Most segments share this call's exact memo with
+            # the full candidate, but endpoint poses are checked independently.
+            reason=self._path_safety(self.selected.return_path,self.remembered,speed_kmh,
+                                     body_cache=body_cache)
+            if reason:
+                return self._block('RETURN_RESERVATION_'+reason)
+            self._validated_paths[(id(self.selected.return_path),self.remembered)]=(self.selected.return_path,
+                                                                                 self.selected.return_path)
             # Progress belongs to this lane-pair coordinate frame. A later
             # independent maneuver may start on a different current link.
             self._last_progress=None
             self._original=self.pair.original
-            start=self.pair.at(self.pair.original_index.project(pose[:2]))['adjacent_s']
-            end=self.pair.at(min(self.pair.length-self.body.wheelbase_m-self.body.front_overhang_m-1.,
-                                self.pair.original_index.project(pose[:2])+self.config.prediction_distance_m))['adjacent_s']
-            self._hold_path=center_suffix(self.pair.adjacent,start,end)
+            # Acquisition may occur before the quintic endpoint. Retain the
+            # same fixed entry/adjacent geometry through HOLD: no target jump
+            # to a separately sampled centerline and no new long validation.
+            self._hold_path=self.selected.entry_path
             self.state='AVOID_ENTRY';self.reason='';self.entry_commits=1;self.return_commits=0
         pair=self.pair;progress=pair.original_index.project(pose[:2])
+        return_rollout_verified=False
         if not math.isfinite(progress):
             return self._block('INVALID_PROGRESS')
         if self._last_progress is not None and progress<self._last_progress-self.config.tracking_limit_m:
@@ -548,6 +575,7 @@ class StaticObstaclePlanner:
                 reason=self._rollout(self.selected.return_path,pose,speed_kmh,actual_curvature,self.remembered)
                 if reason:
                     return self._block('RETURN_'+reason)
+                return_rollout_verified=True
                 self.state='RETURN';self.confirmations=0;self.return_commits+=1
             elif progress>self.selected.return_start_s:
                 return self._block('RETURN_RESERVATION_INVALIDATED')
@@ -576,5 +604,8 @@ class StaticObstaclePlanner:
             if not reason:self._validated_paths[key]=(path,future)
         else:
             reason=self._path_safety(self._validated_paths[key][1],(),speed_kmh,geometry_check=False)
-        if not reason:reason=self._rollout(path,pose,speed_kmh,actual_curvature,self.remembered)
+        # The entry into RETURN above already rolled out this exact path with
+        # the same pose/speed/turn/obstacles in this synchronous call.
+        if not reason and not return_rollout_verified:
+            reason=self._rollout(path,pose,speed_kmh,actual_curvature,self.remembered)
         return self._block(reason) if reason else self._result(path)

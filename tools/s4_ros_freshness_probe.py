@@ -25,11 +25,12 @@ def periodic(adapter,seconds):
         arrivals.append(arrival)
     def plan():
         before=time.monotonic_ns();source=node.sensor_guard.status['source_stamp_ns']
-        node.plan();after=time.monotonic_ns()
+        getattr(node,'planning_tick',node.plan)();after=time.monotonic_ns()
         rows.append(dict(index=len(rows),start_monotonic_ns=before,end_monotonic_ns=after,
             wall_s=(after-before)/1e9,source_stamp_ns=source,
             source_age_at_end_s=(node.get_clock().now().nanoseconds-source)/1e9,
             state=node.avoidance_planner.state,reason=node.avoidance_planner.reason,
+            skipped=getattr(node,'_planning_skipped',False),execution_id=getattr(node,'_planning_execution_id',None),
             local_points=len(node.local_path_pub.last.poses),target_speed=node.target_speed_pub.last.data))
     timer=node.create_timer(.05,plan);sensor=node.create_timer(.1,observe)
     try:

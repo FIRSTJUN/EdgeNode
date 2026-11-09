@@ -169,9 +169,10 @@ def main():
     parser.add_argument('--resume', action='store_true', help='reuse results with identical scene/source hashes')
     parser.add_argument('--timing-mode',choices=('modeled','measured'),default='modeled',
                         help='measured advances virtual callback time by observed core wall delay')
+    parser.add_argument('--no-coalesce',action='store_true',help='measured legacy scheduler diagnostic')
     parser.add_argument('--list', action='store_true')
     args = parser.parse_args()
-    selected = [(replace(s,timing_mode=args.timing_mode),e) for s,e in matrix()
+    selected = [(replace(s,timing_mode=args.timing_mode,coalesce_inputs=not args.no_coalesce),e) for s,e in matrix()
                 if not args.match or s.name in args.match.split(',')]
     if args.list:
         print(json.dumps([dict(scene=asdict(s),expected=e) for s,e in selected],indent=2)); return

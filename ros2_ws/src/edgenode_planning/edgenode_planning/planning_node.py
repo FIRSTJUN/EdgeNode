@@ -269,6 +269,12 @@ class PlanningNode(Node):
         self._drive_session_expired = False
         self._drive_session_duration_sec = None
         self._drive_last_time_ns = None
+        self._last_planning_input = None
+        self._planning_execution_id = 0
+        self._planning_skipped = False
+        self._last_wakeup_frame = None
+        self._planning_wakeup = (self.create_guard_condition(self.planning_tick)
+                                 if self.sensor_guard is not None else None)
         self.fsm = PlanningFSM()
         self.target_error_pub = self.create_publisher(
             Float32,
@@ -368,7 +374,7 @@ class PlanningNode(Node):
         # Planning loop: 20 Hz
         self.create_timer(
             0.05,
-            self.plan,
+            self.planning_tick if self.sensor_guard is not None else self.plan,
         )
 
         self.get_logger().info(
@@ -389,6 +395,7 @@ class PlanningNode(Node):
             return response
         if response.success:
             self.avoidance_planner.reset()
+            self._last_planning_input = None
             self._validation_pending_stamp_ns=None
             self._validation_fresh_stamps.clear()
         response.message = 'reset complete' if response.success else 'disable drive before resetting avoidance'
@@ -405,6 +412,8 @@ class PlanningNode(Node):
             if reason:
                 guard.failure = reason
                 self.stop_for_sensor(reason)
+            else:
+                self.wake_planning_for_frame()
             return
         valid = (msg.header.frame_id == 'map' and len(points)%8 == 0
             and self.get_parameter('obstacle_points_per_cluster').value == 8
@@ -444,9 +453,78 @@ class PlanningNode(Node):
             if reason:
                 self.stop_for_sensor(reason)
             self.refresh_sensor(now)
+            self.wake_planning_for_frame()
 
     def sensor_watchdog(self):
         self.refresh_sensor(self.get_clock().now().nanoseconds)
+
+    def wake_planning_for_frame(self):
+        """Wake the same serialized callback group on a complete fresh frame.
+
+        The 20 Hz timer remains the safety/lease fallback. Do not spend another
+        timer period ageing a newly paired observation before a long search.
+        Heartbeats and unmatched half-frames never create a wakeup.
+        """
+        wakeup = getattr(self, '_planning_wakeup', None)
+        guard = getattr(self, 'sensor_guard', None)
+        if wakeup is None or guard is None or guard.matched is None:
+            return
+        now = self.get_clock().now().nanoseconds
+        status = guard.matched[0]
+        pose_stamp = getattr(self, 'latest_pose_stamp_ns', None)
+        if (pose_stamp is None or pose_stamp < status['source_stamp_ns']-guard.future_ns
+                or self.sensor_reason(now)):
+            return
+        key = (guard.session_id, status['frame_seq'], status['source_stamp_ns'], status['obstacle_digest'])
+        if key != self._last_wakeup_frame:
+            self._last_wakeup_frame = key
+            wakeup.trigger()
+
+    def planning_tick(self):
+        """Coalesce identical S4 inputs without refreshing a command or frame.
+
+        All callbacks still use the single mutually exclusive callback group.
+        No worker/thread owns a second mutable planner. A due timer on unchanged
+        input does only the existing safety checks, allowing ready sensor work
+        to run instead of repeating an expensive validation on the same frame.
+        """
+        guard = getattr(self, 'sensor_guard', None)
+        self._planning_skipped = False
+        if guard is None:
+            self.plan()
+            return
+        now = self.get_clock().now().nanoseconds
+        self.refresh_sensor(now)
+        route = (getattr(self, '_route_result', None) or {}).get('link_ids', ())
+        self.refresh_distance(time.perf_counter(), route)
+        matched = guard.matched[0] if guard.matched else {}
+        parameters = tuple(repr(self.get_parameter(name).value) for name in (
+            'route_node_ids', 'goal_node_id', 'enable_drive', 'max_drive_speed_kmh',
+            'drive_duration_sec', 'cruise_speed_kmh', 'curve_speed_kmh', 'sharp_curve_speed_kmh',
+            'global_path_frame_id', 'local_path_length_m', 'local_path_resample_spacing_m',
+            'local_path_search_back', 'local_path_search_forward'))
+        start = self._drive_session_start_ns
+        duration = self._drive_session_duration_sec
+        lease_expired = (start is not None and duration is not None
+                         and now-start >= duration*1e9)
+        key = (guard.session_id, guard.fault_seq,
+            tuple(matched.get(name) for name in ('frame_seq', 'source_stamp_ns', 'obstacle_digest')),
+            self.latest_pose_stamp_ns, self.latest_pose, self.latest_speed_kmh, self.latest_turn_curvature,
+            id(self.avoidance_planner), id(self.avoidance_planner.network),
+            id(self.avoidance_planner.drivable_area), self.avoidance_planner.body,
+            self.avoidance_planner.config,
+            self.distance_safety.evidence if self.distance_safety is not None else None,
+            self.avoidance_planner.state == 'BLOCKED', parameters, lease_expired)
+        if key == self._last_planning_input:
+            self._planning_skipped = True
+            return
+        self._last_planning_input = key
+        self._planning_execution_id += 1
+        try:
+            self.plan()
+        except Exception:
+            self._last_planning_input = None
+            raise
 
     def sensor_reason(self, now_ns):
         guard = getattr(self, 'sensor_guard', None)
@@ -569,6 +647,7 @@ class PlanningNode(Node):
         self.latest_speed_kmh = float(speed)*3.6 if _finite_number(speed) else math.nan
         self.latest_turn_curvature = (float(turn)/speed if _finite_number(speed)
             and _finite_number(turn) and abs(speed)>.05 else 0. if _finite_number(turn) and abs(turn)<.005 else math.nan)
+        self.wake_planning_for_frame()
 
     def plan(self):
         """Publish routes, recommendations and guarded, time-limited commands.
