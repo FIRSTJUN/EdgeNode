@@ -18,7 +18,9 @@ control_node:
     max_wheel_angle_rad: 0.610865
 
     # Measured EgoVehicleStatus speed: clamp((km/h / 3.6) * preview, min, max).
-    lookahead_min_m: 2.5
+    # Repeated K-City 334m tests: advance low-speed tracking slightly.
+    # Preview is unchanged above 24km/h (50km/h still uses 6.25m).
+    lookahead_min_m: 3.0
     lookahead_max_m: 10.0
     lookahead_preview_time_sec: 0.45
     # Legacy lookahead_distance_m supplies min only when lookahead_min_m is

@@ -60,3 +60,18 @@ def test_equal_bounds_produce_constant_distance():
     for speed_kmh in (0.0, 20.0, 50.0, 1000.0):
         assert calculate_lookahead_distance(
             speed_kmh, lookahead_min_m=2.5, lookahead_max_m=2.5) == 2.5
+
+
+@pytest.mark.parametrize('speed_kmh', [24.0, 30.0, 40.0, 50.0])
+def test_kcity_minimum_change_preserves_faster_steering_on_same_inputs(speed_kmh):
+    """The low-speed tuning must not alter the 50km/h controller geometry."""
+    from edgenode_control.pure_pursuit import PurePursuit
+    points = [[200.0 * math.sin(s / 200.0),
+               200.0 * (1.0 - math.cos(s / 200.0)), 0.0]
+              for s in [i * 0.5 for i in range(41)]]
+    old = calculate_lookahead_distance(speed_kmh, lookahead_min_m=2.5)
+    new = calculate_lookahead_distance(speed_kmh, lookahead_min_m=3.0)
+    assert old == new
+    planner = PurePursuit()
+    assert planner.compute(points, 0.1, -0.1, 0.002, old) == planner.compute(
+        points, 0.1, -0.1, 0.002, new)

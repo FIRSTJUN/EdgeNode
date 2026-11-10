@@ -1,5 +1,14 @@
 # SpeedPlanner runtime parameter synchronization
 
+The optional [global-route planner](longitudinal_speed_planner.md) adds ten
+settings to the same committed snapshot (nineteen total). The nine Local
+settings below retain their contract. Speed/budget/release updates reuse the
+geometry cache; geometric updates gate motion while rebuilding. Upward release
+history survives non-geometric updates, while urgent/progress state resets.
+Phase 5 recovery settings reuse geometry but reset clear-road confirmation;
+they do not delay any lower safety limit or change Local classification.
+The experimental feature remains disabled by default.
+
 `planning_node` now applies committed SpeedPlanner parameters at the start of
 the next planning cycle. Previously these values were copied only during node
 construction, so `ros2 param get` could report 30/15/8 km/h while the active
@@ -7,7 +16,7 @@ planner still recommended its startup values of 50/25/3.5 km/h.
 
 ## Configuration and transaction behavior
 
-The following nine values form one configuration snapshot:
+The following nine values form the Local part of the committed snapshot:
 
 | ROS parameter | Valid values |
 | --- | --- |
@@ -28,12 +37,14 @@ callback may still reject the request. An invalid atomic request changes no
 parameters, including unrelated parameters bundled in that request.
 
 The timer and parameter services use the node's default mutually exclusive
-callback group. At the start of each cycle the node reads all nine committed
-values together. If they changed, it constructs a new SpeedPlanner and clears
-the previous Speed Mode. The next path calculation uses the new configuration.
-If values did not change, it keeps the same object and hysteresis state; only
-the nine-value comparison is added to the cycle. Route progress/cache and the
-drive session are not reset by a speed configuration change.
+callback group. At the start of each cycle the node reads the nineteen committed
+values together. If the Local nine changed, it constructs a new SpeedPlanner and clears
+the previous Speed Mode and curve-anchor state. The next path calculation uses
+the new configuration.
+If values did not change, it keeps the same object and hysteresis state. Route
+progress, the Global Route cache and the drive session are not reset by a speed
+configuration change. The separate speed geometry cache is invalidated only
+when its geometry settings or enablement change.
 
 The validation limits match the existing SpeedPlanner contract. Zero speed
 and zero hysteresis remain valid; no new ordering constraint is imposed on
@@ -68,7 +79,8 @@ ros2 run edgenode_planning planning_node --ros-args \
   --params-file /workspace/ros2_ws/install/edgenode_planning/share/edgenode_planning/config/planning.yaml
 ```
 
-Startup defaults/YAML files are unchanged by this fix. Runtime values do not
+The original nine defaults are unchanged; optional global settings are described
+in the linked document. Runtime values do not
 survive a restart; restore the route and drive configuration through the
 existing procedure, and explicitly apply the desired speed profile again.
 
@@ -80,6 +92,7 @@ and recommendation topics.
 
 ```bash
 ros2 param set /planning_node enable_drive false
+ros2 param set /planning_node speed_long_preview_enabled false
 ros2 topic info /planning/recommended_speed --verbose
 ros2 param dump /planning_node
 ```
@@ -113,7 +126,7 @@ ros2 topic echo /planning/recommended_speed
 ros2 topic echo /planning/target_speed
 ```
 
-With a valid path, CRUISE/CURVE/SHARP_CURVE recommendations should use
+With a valid path and the optional global feature disabled, CRUISE/CURVE/SHARP_CURVE recommendations should use
 30/15/8 km/h from the next cycle. This fix does not change when curvature is
 classified as a curve. While `enable_drive=false`, target speed must remain 0
 even if the recommendation is positive. With driving enabled in a separately

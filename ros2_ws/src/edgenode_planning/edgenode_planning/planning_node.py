@@ -1,3 +1,4 @@
+import json
 import math
 
 import rclpy
@@ -5,6 +6,7 @@ from rclpy.node import Node
 
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry, Path
+from morai_ros2_msgs.msg import EgoVehicleStatus
 from rcl_interfaces.msg import ParameterDescriptor, SetParametersResult
 from std_msgs.msg import Float32, Float64, Int32, String
 
@@ -12,6 +14,9 @@ from edgenode_planning.dijkstra_planner import DijkstraPlanner
 from edgenode_planning.local_path_planner import LocalPathPlanner
 from edgenode_planning.map_matcher import MapMatcher
 from edgenode_planning.speed_planner import SpeedPlanner
+from edgenode_planning.longitudinal_speed_planner import (
+    LongitudinalSpeedPlanner, RouteProfileBuilder, SpeedPlanSettings,
+)
 
 
 def _finite_number(value):
@@ -39,6 +44,27 @@ _SPEED_PLANNER_PARAMETERS = (
     ('speed_curvature_hysteresis', 'curvature_hysteresis'),
 )
 _SPEED_PARAMETER_NAMES = tuple(name for name, _ in _SPEED_PLANNER_PARAMETERS)
+_LONG_SPEED_DEFAULTS = (
+    ('speed_long_preview_enabled', False),
+    ('speed_long_preview_distance_m', 80.0),
+    ('speed_plan_deceleration_mps2', 1.5),
+    ('speed_plan_reaction_time_sec', 0.5),
+    ('speed_plan_distance_margin_m', 5.0),
+    ('speed_plan_lateral_accel_mps2', 1.5),
+    ('speed_plan_speed_timeout_sec', 0.2),
+    ('speed_plan_acceleration_mps2', 1.0),
+    ('speed_plan_recovery_acceleration_mps2', 2.0),
+    ('speed_plan_recovery_clear_sec', 1.0),
+)
+_LONG_SPEED_NAMES = tuple(name for name, _ in _LONG_SPEED_DEFAULTS)
+
+
+def _long_configuration_error(snapshot):
+    if not isinstance(snapshot[0], bool):
+        return 'speed_long_preview_enabled must be boolean'
+    if not SpeedPlanSettings(*snapshot[1:]).valid():
+        return 'Long speed settings must be finite and within the documented distance, acceleration, delay, margin and clear-time bounds'
+    return ''
 
 
 def _read_speed_planner_snapshot(node):
@@ -158,6 +184,9 @@ class PlanningNode(Node):
                 ('speed_mode_topic', '/planning/speed_mode'),
                 ('speed_curvature_topic', '/planning/speed_curvature'),
                 ('speed_max_curvature_topic', '/planning/speed_max_curvature'),
+                ('ego_status_topic', '/ego_vehicle_status'),
+                ('long_speed_plan_topic', '/planning/long_speed_plan'),
+                *_LONG_SPEED_DEFAULTS,
                 ('goal_node_id', 'A119BS010245'),
                 # Humble infers Python [] as BYTE_ARRAY and YAML [] as NOT_SET.
                 # Allow both and STRING_ARRAY; plan_route validates nonempty values.
@@ -190,6 +219,14 @@ class PlanningNode(Node):
         self._speed_planner_snapshot = _read_speed_planner_snapshot(self)
         self.speed_planner = _speed_planner_from_snapshot(self._speed_planner_snapshot)
         self._previous_speed_mode = None
+        self._previous_curve_state = None
+        self._long_speed_snapshot = tuple(p.value for p in self.get_parameters(_LONG_SPEED_NAMES))
+        self._long_settings = SpeedPlanSettings(*self._long_speed_snapshot[1:])
+        self._long_builder = None
+        self._long_planner = None
+        self._long_build_failed = False
+        self._ego_speed = None
+        self._long_last_clock_ns = None
         self.add_on_set_parameters_callback(self._validate_speed_parameters)
         self._route_key = None
         self._route_result = None
@@ -294,7 +331,18 @@ class PlanningNode(Node):
             Odometry,
             self.get_parameter('localization_topic').value,
             self.localization_callback,
-            10,
+            # These callbacks store a current value, not a history. A busy
+            # planning cycle must not replay queued poses behind the vehicle.
+            1,
+        )
+        self.ego_status_sub = self.create_subscription(
+            EgoVehicleStatus, self.get_parameter('ego_status_topic').value,
+            # MORAI publishes faster than a full route can be serialized.
+            # Keep the newest sample so the header-age guard checks live data.
+            self.ego_status_callback, 1,
+        )
+        self.long_speed_plan_pub = self.create_publisher(
+            String, self.get_parameter('long_speed_plan_topic').value, 10,
         )
 
         # Planning loop: 20 Hz
@@ -314,13 +362,15 @@ class PlanningNode(Node):
         Humble invokes this before committing values, and another callback can
         still reject the transaction after this one accepts it.
         """
+        names = _SPEED_PARAMETER_NAMES + _LONG_SPEED_NAMES
         changes = {parameter.name: parameter.value for parameter in parameters
-                   if parameter.name in _SPEED_PARAMETER_NAMES}
+                   if parameter.name in names}
         if not changes:
             return SetParametersResult(successful=True)
-        values = dict(zip(_SPEED_PARAMETER_NAMES, _read_speed_planner_snapshot(self)))
+        values = dict(zip(names, (p.value for p in self.get_parameters(names))))
         values.update(changes)
         error = _speed_configuration_error(tuple(values[name] for name in _SPEED_PARAMETER_NAMES))
+        error = error or _long_configuration_error(tuple(values[name] for name in _LONG_SPEED_NAMES))
         return SetParametersResult(successful=not error, reason=error)
 
     def _refresh_speed_planner(self):
@@ -329,12 +379,93 @@ class PlanningNode(Node):
         The timer and parameter services share the default mutually-exclusive
         callback group, so one cycle reads a complete committed snapshot.
         """
-        snapshot = _read_speed_planner_snapshot(self)
-        if snapshot != self._speed_planner_snapshot:
+        committed = tuple(p.value for p in self.get_parameters(_SPEED_PARAMETER_NAMES + _LONG_SPEED_NAMES))
+        snapshot, long_snapshot = committed[:9], committed[9:]
+        changed = snapshot != self._speed_planner_snapshot
+        long_changed = long_snapshot != self._long_speed_snapshot
+        geometry_changed = any(snapshot[i] != self._speed_planner_snapshot[i] for i in (4,5,6,7))
+        enabled_changed = long_snapshot[0] != self._long_speed_snapshot[0]
+        if changed:
             planner = _speed_planner_from_snapshot(snapshot)
             self.speed_planner = planner
             self._speed_planner_snapshot = snapshot
             self._previous_speed_mode = None
+            self._previous_curve_state = None
+        if changed or long_changed:
+            self._long_speed_snapshot = long_snapshot
+            self._long_settings = SpeedPlanSettings(*long_snapshot[1:])
+            if geometry_changed or enabled_changed:
+                self._reset_long_plan(rebuild=True)
+            elif self._long_planner is not None:
+                previous = self._long_planner
+                self._long_planner = LongitudinalSpeedPlanner(
+                    previous.profile, self.speed_planner, self._long_settings)
+                self._long_planner.inherit_release_history(previous)
+            if self._long_builder is not None:
+                self._long_builder.local_planner = self.speed_planner
+
+    def _reset_long_plan(self, rebuild=False):
+        if self._long_planner is not None:
+            self._long_planner.reset()
+        if rebuild:
+            self._long_builder = None
+            self._long_planner = None
+            self._long_build_failed = False
+
+    def ego_status_callback(self, msg):
+        values = (msg.velocity.x,msg.velocity.y,msg.velocity.z)
+        now = self.get_clock().now().nanoseconds
+        if not all(_finite_number(v) for v in values):
+            self._ego_speed = None
+            return
+        speed = math.hypot(*values)*3.6
+        stamp = msg.header.stamp.sec*1_000_000_000 + msg.header.stamp.nanosec
+        self._ego_speed = (speed,stamp,now) if _finite_number(speed) else None
+
+    def _long_speed_recommendation(self, progress, local_speed, now_ns, local_mode=None):
+        diag = dict(enabled=True,status='BUILDING',ready=False)
+        if (_long_configuration_error(self._long_speed_snapshot)
+                or _speed_configuration_error(self._speed_planner_snapshot)):
+            return None,dict(diag,status='INVALID_CONFIG')
+        if self._long_build_failed:
+            return None,dict(diag,status='INVALID_ROUTE')
+        try:
+            if self._long_planner is None:
+                if self._long_builder is None:
+                    self._long_builder = RouteProfileBuilder(self._route_result['points'],self.speed_planner)
+                profile = self._long_builder.advance()
+                diag['built_windows'] = self._long_builder.next_window
+                diag['total_windows'] = len(self._long_builder.centers)
+                if profile is None:
+                    return None,diag
+                self._long_planner = LongitudinalSpeedPlanner(profile,self.speed_planner,self._long_settings)
+                self._long_builder = None
+            decision_ns = self.get_clock().now().nanoseconds
+            if decision_ns < now_ns:
+                self._ego_speed = None
+                self._reset_long_plan()
+                return None,dict(diag,status='CLOCK_REWIND')
+            now_ns = decision_ns
+            value = self._ego_speed
+            if value is None:
+                self._reset_long_plan()
+                return None,dict(diag,status='MISSING_SPEED')
+            speed,stamp,received = value
+            age,receive_age = (now_ns-stamp)/1e9,(now_ns-received)/1e9
+            diag.update(actual_speed_kmh=speed,speed_age_sec=age,speed_receive_age_sec=receive_age)
+            if not (0 <= age <= self._long_settings.speed_timeout_sec
+                    and 0 <= receive_age <= self._long_settings.speed_timeout_sec):
+                self._reset_long_plan()
+                return None,dict(diag,status='STALE_SPEED')
+            result = self._long_planner.plan(progress,speed,local_speed,
+                time_sec=now_ns/1e9,local_mode=local_mode)
+            if result is None:
+                return None,dict(diag,status='INVALID_INPUT')
+            return result,dict(diag,**result,status='READY',ready=True)
+        except (ArithmeticError,ValueError,KeyError,TypeError) as error:
+            self._reset_long_plan(rebuild=True)
+            self._long_build_failed = True
+            return None,dict(diag,status='INVALID_ROUTE_OR_CONFIG',error=str(error))
 
     def localization_callback(self, msg):
         """Store the latest pose; map matching runs only in the planning timer."""
@@ -380,11 +511,20 @@ class PlanningNode(Node):
         if route_key != self._route_key:
             self._route_key = None
             self._route_result = None
+            self._global_path_cache = None
             self._progress_index = None
             self._progress_arc_m = None
             self._previous_speed_mode = None
+            self._previous_curve_state = None
+            self._reset_long_plan(rebuild=True)
 
         now_ns = self.get_clock().now().nanoseconds
+        if self._long_last_clock_ns is not None and now_ns < self._long_last_clock_ns:
+            self._reset_long_plan()
+            self._ego_speed = None
+            self._previous_speed_mode = None
+            self._previous_curve_state = None
+        self._long_last_clock_ns = now_ns
         enable_drive = self.get_parameter('enable_drive').value is True
         if not enable_drive:
             self._drive_was_enabled = False
@@ -434,18 +574,29 @@ class PlanningNode(Node):
                     state_value = 'GLOBAL_PATH_NOT_FOUND'
                 else:
                     state_value = 'GLOBAL_PATH_READY'
-                    path = Path()
-                    path.header.frame_id = self.get_parameter('global_path_frame_id').value
+                    frame = self.get_parameter('global_path_frame_id').value
+                    cached = getattr(self, '_global_path_cache', None)
+                    if (cached is None or cached[0] is not self._route_result
+                            or cached[1] != frame):
+                        path = Path()
+                        path.header.frame_id = frame
+                        # Fixed routes are immutable until the route key changes.
+                        # Rebuilding thousands of PoseStamped objects every tick
+                        # delays current-input callbacks beyond their age guard.
+                        for point in self._route_result['points']:
+                            pose = PoseStamped()
+                            pose.header = path.header
+                            pose.pose.position.x = float(point[0])
+                            pose.pose.position.y = float(point[1])
+                            pose.pose.position.z = float(point[2])
+                            pose.pose.orientation.w = 1.0
+                            path.poses.append(pose)
+                        self._global_path_cache = (self._route_result, frame, path)
+                    else:
+                        path = cached[2]
+                    # Every pose shares this header. Publishing serializes it
+                    # synchronously within the mutually exclusive planning cycle.
                     path.header.stamp = self.get_clock().now().to_msg()
-                    # Keep the entire start link; trimming belongs to local planning.
-                    for point in self._route_result['points']:
-                        pose = PoseStamped()
-                        pose.header = path.header
-                        pose.pose.position.x = float(point[0])
-                        pose.pose.position.y = float(point[1])
-                        pose.pose.position.z = float(point[2])
-                        pose.pose.orientation.w = 1.0
-                        path.poses.append(pose)
                     self.global_path_pub.publish(path)
 
                     local_result = self.local_path_planner.extract(
@@ -478,6 +629,7 @@ class PlanningNode(Node):
 
                         speed_result = self.speed_planner.plan(
                             active_local_points, previous_speed_mode=self._previous_speed_mode,
+                            previous_curve_state=self._previous_curve_state,
                         )
                         if (speed_result is not None
                                 and _finite_number(speed_result['target_speed_kmh'])
@@ -491,6 +643,24 @@ class PlanningNode(Node):
         # Hysteresis belongs to speed classification only. Invalid planning
         # input or a route change must not carry a stale mode into recovery.
         self._previous_speed_mode = speed_mode if speed_valid else None
+        self._previous_curve_state = (speed_result.get('curve_state') or None) if speed_valid else None
+
+        long_diag = dict(enabled=self._long_speed_snapshot[0],status='DISABLED',ready=False)
+        if self._long_speed_snapshot[0]:
+            if speed_valid:
+                long_result,long_diag = self._long_speed_recommendation(
+                    self._progress_arc_m,recommended_speed,self.get_clock().now().nanoseconds,
+                    local_mode=speed_mode)
+                if long_result is None:
+                    recommended_speed = 0.0
+                    speed_valid = False
+                    self._previous_speed_mode = None
+                    self._previous_curve_state = None
+                else:
+                    recommended_speed = min(recommended_speed,long_result['target_speed_kmh'])
+            else:
+                self._reset_long_plan()
+                long_diag['status'] = 'WAITING_FOR_PATH'
 
         target_error = Float32()
         target_error.data = 0.0
@@ -575,6 +745,7 @@ class PlanningNode(Node):
         self.speed_curvature_pub.publish(Float32(data=speed_curvature))
         self.speed_max_curvature_pub.publish(Float32(data=speed_max_curvature))
         self.drive_status_pub.publish(String(data=drive_status))
+        self.long_speed_plan_pub.publish(String(data=json.dumps(long_diag,allow_nan=False)))
 
 
 def main(args=None):

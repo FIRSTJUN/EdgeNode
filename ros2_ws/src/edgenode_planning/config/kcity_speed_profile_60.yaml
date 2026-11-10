@@ -1,0 +1,12 @@
+# Explicit experimental startup overlay; apply AFTER planning.yaml.
+# This permits a higher target ceiling but never starts the vehicle.
+# Prefer live_test.py --prepare --max-speed-kmh 60 for atomic live preparation.
+planning_node:
+  ros__parameters:
+    enable_drive: false
+    max_drive_speed_kmh: 60.0
+    cruise_speed_kmh: 60.0
+    curve_speed_kmh: 30.0
+    sharp_curve_speed_kmh: 25.0
+    speed_long_preview_enabled: true
+    drive_duration_sec: 120.0

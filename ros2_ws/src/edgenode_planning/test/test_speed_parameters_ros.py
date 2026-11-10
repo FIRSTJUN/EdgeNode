@@ -1,6 +1,8 @@
 """Runtime speed configuration through real ROS parameter APIs, isolated from MORAI."""
 
 import math
+import json
+from pathlib import Path
 import uuid
 from unittest.mock import Mock, patch
 
@@ -32,6 +34,7 @@ PUBLISHERS = (
     'map_match_distance', 'map_match_heading_diff', 'global_path', 'local_path',
     'local_path_index', 'local_path_progress', 'recommended_speed', 'speed_mode',
     'speed_curvature', 'speed_max_curvature', 'drive_status', 'fsm_state',
+    'long_speed_plan',
 )
 
 
@@ -347,3 +350,57 @@ def test_invalid_startup_is_safe_and_valid_runtime_snapshot_recovers(make_node):
     assert output(node, 'speed_mode') == 'CRUISE'
     assert output(node, 'recommended_speed') == 50.0
     assert output(node, 'target_speed') == 30.0
+
+
+def rescued_curve_node(make_node):
+    node = make_node(speed_preview_distance_m=20.0, curve_curvature_threshold=0.025,
+                     sharp_curvature_threshold=0.07)
+    points = json.loads((Path(__file__).parent / 'fixtures/kcity_curve_638.json').read_text())['points']
+    node.local_path_planner.extract.return_value = {
+        'points': points, 'nearest_index': 0, 'progress_arc_m': 0.0,
+    }
+    node.plan()
+    assert node._previous_curve_state
+    return node
+
+
+def test_rescued_curve_state_clears_after_match_loss(make_node):
+    node = rescued_curve_node(make_node)
+    node.map_matcher.match.return_value = None
+    node.plan()
+    assert node._previous_curve_state is None
+    assert node._previous_speed_mode is None
+    assert output(node, 'speed_mode') == 'INVALID'
+    assert output(node, 'target_speed') == 0.0
+
+
+def test_route_change_clears_curve_history_before_recalculation(make_node):
+    node = rescued_curve_node(make_node)
+    node.speed_planner = Mock(wraps=node.speed_planner)
+    assert change(node, goal_node_id='new_test_goal').successful
+    node.plan()
+    assert node.speed_planner.plan.call_args.kwargs['previous_curve_state'] is None
+
+
+def test_runtime_snapshot_replacement_clears_rescued_curve_history(make_node):
+    node = rescued_curve_node(make_node)
+    lease_start = node._drive_session_start_ns
+    assert change(node, sharp_curve_speed_kmh=8.0).successful
+    node._refresh_speed_planner()
+    assert node._previous_curve_state is None
+    assert node._previous_speed_mode is None
+    node.plan()
+    assert output(node, 'speed_mode') == 'SHARP_CURVE'
+    assert output(node, 'recommended_speed') == 8.0
+    assert output(node, 'target_speed') == 8.0
+    assert node._drive_session_start_ns == lease_start
+
+
+def test_invalid_curve_history_stops_and_clears_the_node(make_node):
+    node = rescued_curve_node(make_node)
+    node._previous_curve_state = [{'invalid': 'history'}]
+    node.plan()
+    assert node._previous_curve_state is None
+    assert node._previous_speed_mode is None
+    assert output(node, 'speed_mode') == 'INVALID'
+    assert output(node, 'target_speed') == 0.0

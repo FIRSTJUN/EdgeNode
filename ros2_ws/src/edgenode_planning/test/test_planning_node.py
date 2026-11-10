@@ -17,7 +17,8 @@ from edgenode_planning.dijkstra_planner import DijkstraPlanner
 from edgenode_planning.local_path_planner import LocalPathPlanner
 from edgenode_planning.map_matcher import MapMatcher
 from edgenode_planning.planning_fsm import PlanningFSM
-from edgenode_planning.planning_node import PlanningNode, _read_speed_planner_snapshot
+from edgenode_planning.planning_node import PlanningNode, _read_speed_planner_snapshot, _LONG_SPEED_DEFAULTS
+from edgenode_planning.longitudinal_speed_planner import SpeedPlanSettings
 from edgenode_planning.speed_planner import SpeedPlanner
 
 
@@ -45,6 +46,7 @@ class PlanningNodeTest(unittest.TestCase):
             'drive_duration_sec': 15.0,
         }
         self.route = {'points': [[0, 1, 2], [3.5, 4.5, 5.5], [6, 7, 8]]}
+        self.parameters.update(dict(_LONG_SPEED_DEFAULTS))
         self.stamp = Time(seconds=123, nanoseconds=456).to_msg()
         self.node = SimpleNamespace(
             latest_pose=None,
@@ -57,6 +59,14 @@ class PlanningNodeTest(unittest.TestCase):
             _progress_index=None,
             _progress_arc_m=None,
             _previous_speed_mode=None,
+            _previous_curve_state=None,
+            _long_speed_snapshot=tuple(v for _,v in _LONG_SPEED_DEFAULTS),
+            _long_settings=SpeedPlanSettings(),
+            _long_builder=None,
+            _long_planner=None,
+            _long_build_failed=False,
+            _ego_speed=None,
+            _long_last_clock_ns=None,
             fsm=PlanningFSM(),
             _drive_was_enabled=False,
             _drive_session_start_ns=None,
@@ -70,6 +80,8 @@ class PlanningNodeTest(unittest.TestCase):
         )
         self.node._speed_planner_snapshot = _read_speed_planner_snapshot(self.node)
         self.node._refresh_speed_planner = MethodType(PlanningNode._refresh_speed_planner, self.node)
+        self.node._reset_long_plan = MethodType(PlanningNode._reset_long_plan, self.node)
+        self.node._long_speed_recommendation = MethodType(PlanningNode._long_speed_recommendation, self.node)
         self.node.get_clock.return_value.now.return_value.to_msg.return_value = self.stamp
         self.node.get_clock.return_value.now.return_value.nanoseconds = 123_000_000_456
         self.node.dijkstra_planner.plan.return_value = self.route
@@ -83,6 +95,7 @@ class PlanningNodeTest(unittest.TestCase):
             'recommended_speed', 'speed_mode', 'speed_curvature', 'speed_max_curvature',
             'drive_status', 'fsm_state',
             'local_path_index', 'local_path_progress',
+            'long_speed_plan',
         ):
             setattr(self.node, name + '_pub', Mock())
 
@@ -345,7 +358,8 @@ class PlanningNodeTest(unittest.TestCase):
         self.assert_speed_preview(1.0, 'CRUISE', 0.0)
         self.assert_path(points)
         self.assert_path(points[:21], topic='local_path')
-        self.node.speed_planner.plan.assert_called_once_with(points[:21], previous_speed_mode=None)
+        self.node.speed_planner.plan.assert_called_once_with(
+            points[:21], previous_speed_mode=None, previous_curve_state=None)
         self.assertEqual(self.output('state'), 'GLOBAL_PATH_READY')
 
     def test_gentle_local_curve_previews_curve_speed_but_stays_stopped(self):
@@ -466,9 +480,9 @@ class PlanningNodeTest(unittest.TestCase):
             self.assert_speed_preview(1.0, 'CRUISE', 0.0)
         self.node.dijkstra_planner.plan.assert_called_once()
         self.assertEqual(self.node.speed_planner.plan.call_args_list, [
-            call(points[:21], previous_speed_mode=None),
-            call(points[1:22], previous_speed_mode='CRUISE'),
-            call(points[2:23], previous_speed_mode='CRUISE'),
+            call(points[:21], previous_speed_mode=None, previous_curve_state=None),
+            call(points[1:22], previous_speed_mode='CRUISE', previous_curve_state=None),
+            call(points[2:23], previous_speed_mode='CRUISE', previous_curve_state=None),
         ])
         for name in ('global_path', 'local_path', 'recommended_speed', 'speed_mode',
                      'speed_curvature', 'speed_max_curvature'):
@@ -845,6 +859,35 @@ class PlanningNodeTest(unittest.TestCase):
         ])
         self.assertEqual(self.output('state'), 'GLOBAL_PATH_READY')
         self.assert_stopped()
+
+    def test_fixed_global_message_reuses_geometry_and_refreshes_all_headers(self):
+        self.set_speed_route([[x, 0, 0] for x in range(31)])
+        PlanningNode.plan(self.node)
+        first = self.node.global_path_pub.publish.call_args.args[0]
+        vertices = first.poses
+        next_stamp = Time(seconds=124).to_msg()
+        self.node.get_clock.return_value.now.return_value.to_msg.return_value = next_stamp
+        PlanningNode.plan(self.node)
+        second = self.node.global_path_pub.publish.call_args.args[0]
+        self.assertIs(second, first)
+        self.assertIs(second.poses, vertices)
+        self.assertEqual(second.header.stamp, next_stamp)
+        self.assertTrue(all(p.header.stamp == next_stamp for p in second.poses))
+        self.assertEqual(self.node.global_path_pub.publish.call_count, 2)
+        self.node.dijkstra_planner.plan.assert_called_once()
+
+    def test_route_change_replaces_global_message_cache(self):
+        self.set_speed_route([[x, 0, 0] for x in range(31)])
+        PlanningNode.plan(self.node)
+        first = self.node.global_path_pub.publish.call_args.args[0]
+        self.parameters['goal_node_id'] = 'new_goal'
+        points = [[x, 1, 0] for x in range(31)]
+        self.node.dijkstra_planner.plan.return_value = {'points': points}
+        PlanningNode.plan(self.node)
+        second = self.node.global_path_pub.publish.call_args.args[0]
+        self.assertIsNot(second, first)
+        self.assert_path(points)
+        self.assertEqual(self.node.dijkstra_planner.plan.call_count, 2)
 
     def test_path_frame_and_timestamp_refresh_without_replanning(self):
         self.node.latest_pose = (12.0, -3.0, 0.0)
