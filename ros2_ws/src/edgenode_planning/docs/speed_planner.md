@@ -41,8 +41,10 @@ SHARP_CURVE에서 값이 0.035 미만까지 내려가면 바로 CRUISE로 해제
 
 ## 설정
 
-`planning.yaml`의 다음 값은 Node 시작 시 SpeedPlanner에 전달한다. 변경 후에는
-Planning Node를 재시작해야 한다. 기존 파라미터/속도 정책의 초기화 방식과 같다.
+`planning.yaml`의 다음 값은 Node 시작 시 SpeedPlanner에 전달한다. 런타임 변경은
+다음 planning cycle부터 반영하며, 설정이 바뀔 때 이전 Speed Mode를 초기화한다.
+관련 9개 값의 검증·원자적 갱신 및 적용 절차는
+[런타임 파라미터 문서](speed_planner_runtime_parameters.md)를 참고한다.
 
 | ROS 파라미터 | 기본값 | 단위 |
 |---|---|---|

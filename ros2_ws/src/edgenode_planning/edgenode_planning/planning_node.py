@@ -5,7 +5,7 @@ from rclpy.node import Node
 
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry, Path
-from rcl_interfaces.msg import ParameterDescriptor
+from rcl_interfaces.msg import ParameterDescriptor, SetParametersResult
 from std_msgs.msg import Float32, Float64, Int32, String
 
 from edgenode_planning.dijkstra_planner import DijkstraPlanner
@@ -25,6 +25,47 @@ def _finite_number(value):
 
 
 from .planning_fsm import PlanningFSM
+
+
+_SPEED_PLANNER_PARAMETERS = (
+    ('cruise_speed_kmh', 'cruise_speed_kmh'),
+    ('curve_speed_kmh', 'curve_speed_kmh'),
+    ('sharp_curve_speed_kmh', 'sharp_curve_speed_kmh'),
+    ('speed_preview_distance_m', 'preview_distance_m'),
+    ('curve_curvature_threshold', 'curve_curvature_threshold'),
+    ('sharp_curvature_threshold', 'sharp_curvature_threshold'),
+    ('speed_curvature_smoothing_window_m', 'curvature_smoothing_window_m'),
+    ('speed_curvature_persistence_m', 'curvature_persistence_m'),
+    ('speed_curvature_hysteresis', 'curvature_hysteresis'),
+)
+_SPEED_PARAMETER_NAMES = tuple(name for name, _ in _SPEED_PLANNER_PARAMETERS)
+
+
+def _read_speed_planner_snapshot(node):
+    return tuple(parameter.value for parameter in node.get_parameters(_SPEED_PARAMETER_NAMES))
+
+
+def _speed_planner_from_snapshot(snapshot):
+    return SpeedPlanner(**{
+        argument: value for (_, argument), value in zip(_SPEED_PLANNER_PARAMETERS, snapshot)
+    })
+
+
+def _speed_configuration_error(snapshot):
+    """Match SpeedPlanner's configuration contract without evaluating geometry."""
+    if not all(_finite_number(value) for value in snapshot):
+        return 'SpeedPlanner parameters must be finite numbers (not booleans)'
+    (cruise, curve, sharp, preview, curve_threshold, sharp_threshold,
+     smoothing, persistence, hysteresis) = snapshot
+    if min(cruise, curve, sharp) < 0:
+        return 'SpeedPlanner speeds must be nonnegative'
+    if min(preview, smoothing, persistence) <= 0:
+        return 'SpeedPlanner preview, smoothing and persistence distances must be positive'
+    if not 0 <= curve_threshold < sharp_threshold:
+        return 'SpeedPlanner requires 0 <= curve_curvature_threshold < sharp_curvature_threshold'
+    if hysteresis < 0:
+        return 'SpeedPlanner curvature hysteresis must be nonnegative'
+    return ''
 
 
 class PlanningNode(Node):
@@ -146,18 +187,10 @@ class PlanningNode(Node):
         )
         self.dijkstra_planner = DijkstraPlanner(mgeo_dir=mgeo_dir)
         self.local_path_planner = LocalPathPlanner()
-        self.speed_planner = SpeedPlanner(
-            cruise_speed_kmh=self.get_parameter('cruise_speed_kmh').value,
-            curve_speed_kmh=self.get_parameter('curve_speed_kmh').value,
-            sharp_curve_speed_kmh=self.get_parameter('sharp_curve_speed_kmh').value,
-            preview_distance_m=self.get_parameter('speed_preview_distance_m').value,
-            curve_curvature_threshold=self.get_parameter('curve_curvature_threshold').value,
-            sharp_curvature_threshold=self.get_parameter('sharp_curvature_threshold').value,
-            curvature_smoothing_window_m=self.get_parameter('speed_curvature_smoothing_window_m').value,
-            curvature_persistence_m=self.get_parameter('speed_curvature_persistence_m').value,
-            curvature_hysteresis=self.get_parameter('speed_curvature_hysteresis').value,
-        )
+        self._speed_planner_snapshot = _read_speed_planner_snapshot(self)
+        self.speed_planner = _speed_planner_from_snapshot(self._speed_planner_snapshot)
         self._previous_speed_mode = None
+        self.add_on_set_parameters_callback(self._validate_speed_parameters)
         self._route_key = None
         self._route_result = None
         self._progress_index = None
@@ -275,6 +308,34 @@ class PlanningNode(Node):
             'waiting for localization (drive disabled by default)'
         )
 
+    def _validate_speed_parameters(self, parameters):
+        """Validate the proposed transaction; never mutate the active planner here.
+
+        Humble invokes this before committing values, and another callback can
+        still reject the transaction after this one accepts it.
+        """
+        changes = {parameter.name: parameter.value for parameter in parameters
+                   if parameter.name in _SPEED_PARAMETER_NAMES}
+        if not changes:
+            return SetParametersResult(successful=True)
+        values = dict(zip(_SPEED_PARAMETER_NAMES, _read_speed_planner_snapshot(self)))
+        values.update(changes)
+        error = _speed_configuration_error(tuple(values[name] for name in _SPEED_PARAMETER_NAMES))
+        return SetParametersResult(successful=not error, reason=error)
+
+    def _refresh_speed_planner(self):
+        """Apply committed settings once per change, before evaluating a path.
+
+        The timer and parameter services share the default mutually-exclusive
+        callback group, so one cycle reads a complete committed snapshot.
+        """
+        snapshot = _read_speed_planner_snapshot(self)
+        if snapshot != self._speed_planner_snapshot:
+            planner = _speed_planner_from_snapshot(snapshot)
+            self.speed_planner = planner
+            self._speed_planner_snapshot = snapshot
+            self._previous_speed_mode = None
+
     def localization_callback(self, msg):
         """Store the latest pose; map matching runs only in the planning timer."""
         position = msg.pose.pose.position
@@ -292,6 +353,7 @@ class PlanningNode(Node):
         every tick. Match loss retains progress/cache but publishes no Path.
         An active route configuration change invalidates both immediately.
         """
+        self._refresh_speed_planner()
         state_value = 'WAIT_FOR_LOCALIZATION'
         status_value = 'WAIT_FOR_LOCALIZATION'
         current_link = ''

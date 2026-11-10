@@ -4,7 +4,7 @@ import json
 import math
 from pathlib import Path as FilePath
 import tempfile
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 import unittest
 from unittest.mock import Mock, call, patch
 
@@ -17,7 +17,7 @@ from edgenode_planning.dijkstra_planner import DijkstraPlanner
 from edgenode_planning.local_path_planner import LocalPathPlanner
 from edgenode_planning.map_matcher import MapMatcher
 from edgenode_planning.planning_fsm import PlanningFSM
-from edgenode_planning.planning_node import PlanningNode
+from edgenode_planning.planning_node import PlanningNode, _read_speed_planner_snapshot
 from edgenode_planning.speed_planner import SpeedPlanner
 
 
@@ -32,6 +32,14 @@ class PlanningNodeTest(unittest.TestCase):
             'local_path_search_back': 3,
             'local_path_search_forward': 10,
             'cruise_speed_kmh': 1.0,
+            'curve_speed_kmh': 0.7,
+            'sharp_curve_speed_kmh': 0.5,
+            'speed_preview_distance_m': 10.0,
+            'curve_curvature_threshold': 0.04,
+            'sharp_curvature_threshold': 0.10,
+            'speed_curvature_smoothing_window_m': 2.0,
+            'speed_curvature_persistence_m': 2.0,
+            'speed_curvature_hysteresis': 0.005,
             'enable_drive': False,
             'max_drive_speed_kmh': 1.0,
             'drive_duration_sec': 15.0,
@@ -56,9 +64,12 @@ class PlanningNodeTest(unittest.TestCase):
             _drive_session_duration_sec=None,
             _drive_last_time_ns=None,
             get_parameter=lambda name: SimpleNamespace(value=self.parameters[name]),
+            get_parameters=lambda names: [SimpleNamespace(value=self.parameters[name]) for name in names],
             get_clock=Mock(),
             get_logger=Mock(),
         )
+        self.node._speed_planner_snapshot = _read_speed_planner_snapshot(self.node)
+        self.node._refresh_speed_planner = MethodType(PlanningNode._refresh_speed_planner, self.node)
         self.node.get_clock.return_value.now.return_value.to_msg.return_value = self.stamp
         self.node.get_clock.return_value.now.return_value.nanoseconds = 123_000_000_456
         self.node.dijkstra_planner.plan.return_value = self.route
@@ -932,6 +943,7 @@ class PlanningNodeTest(unittest.TestCase):
             'create_publisher': publisher,
             'create_subscription': Mock(),
             'create_timer': timer,
+            'add_on_set_parameters_callback': Mock(),
             'get_logger': Mock(),
         }
         with patch.multiple('edgenode_planning.planning_node.Node', **node_methods):
