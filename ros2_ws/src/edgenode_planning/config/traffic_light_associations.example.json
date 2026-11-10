@@ -1,0 +1,11 @@
+{
+  "schema": 2,
+  "verified": false,
+  "route_sha256": "",
+  "stop_policy": {
+    "braking_verified": false,
+    "deceleration_mps2": 1.5,
+    "reaction_sec": 1.0
+  },
+  "associations": []
+}

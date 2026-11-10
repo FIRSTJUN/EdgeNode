@@ -1,0 +1,770 @@
+{
+  "schema": 3,
+  "mode": "ROUTE_STOPLINE_FALLBACK",
+  "fallback_enabled": true,
+  "verified": false,
+  "route_node_ids": [
+    "A119BS010245",
+    "A119BS010208"
+  ],
+  "reference_route_sha256": "c5001ff4202508387ae78abc283b4360f37a56a1b37193f70f2147c3f0143be6",
+  "reference_route_link_ids": [
+    "A219BS010380",
+    "A219BS010669",
+    "A219BS010385",
+    "A219BS010682",
+    "A219BS010383",
+    "A219BS010649",
+    "A219BS010382",
+    "A219BS010672",
+    "A219BS010398",
+    "A219BS010663",
+    "A219BS010395",
+    "A219BS010656",
+    "A219BS010393",
+    "A219BS010638",
+    "A219BS010402",
+    "A219BS010404",
+    "A219BS010469",
+    "A219BS010408",
+    "A219BS010411",
+    "A219BS010415",
+    "A219BS010419",
+    "A219BS010632",
+    "A219BS010428",
+    "A219BS010429",
+    "A219BS010607"
+  ],
+  "reference_route_node_ids": [
+    "A119BS010184",
+    "A119BS010176",
+    "A119BS010242",
+    "A119BS010169",
+    "A119BS010239",
+    "A119BS010166",
+    "A119BS010245",
+    "A119BS010172",
+    "A119BS010266",
+    "A119BS010247",
+    "A119BS010694",
+    "A119BS010174",
+    "A119BS010237",
+    "A119BS010164",
+    "A119BS010698",
+    "A119BS010699",
+    "A119BS010702",
+    "A119BS010704",
+    "A119BS010283",
+    "A119BS010709",
+    "A119BS010221",
+    "A119BS010714",
+    "A119BS010227",
+    "A119BS010294",
+    "A119BS010191",
+    "A119BS010208"
+  ],
+  "source": {
+    "crs": "EPSG:32652",
+    "local_origin_in_global": [
+      302459.942,
+      4122635.537,
+      0.0
+    ],
+    "source_directory": "/home/han/Downloads/SEC01_첨단주행시험로/HDMap_UTM52N_타원체고",
+    "sha256": {
+      "B2_SURFACELINEMARK.shp": "d64b10634e5ca7e64369cecc955ca421aee6d35926100b07d982b799b7bf9b35",
+      "B2_SURFACELINEMARK.dbf": "438f94414d516976629ef99d172d694b10c9b10426b65371565687cd4ae8c859",
+      "C1_TRAFFICLIGHT.shp": "a41a9a9a2c63ec8fcb67c9bcae7b679f541dfd9e9d6b4b0d0b453154e33d2c55",
+      "C1_TRAFFICLIGHT.dbf": "103728ad6de5f313873faed679cd6fc9c2fd2b1fedd83dbccefa9e6ac9d677c4"
+    }
+  },
+  "ego_roi": {
+    "camera_topic": "/camera/image/compressed",
+    "camera_frame_id": "Camera-1",
+    "image_size": [
+      640,
+      480
+    ],
+    "roi_xyxy_norm": [
+      0.45,
+      0.0,
+      0.7,
+      0.45
+    ],
+    "min_confidence": 0.25
+  },
+  "stop_policy": {
+    "braking_verified": false,
+    "deceleration_mps2": 1.5,
+    "reaction_sec": 1.0,
+    "reference_stop_margin_m": 5.0,
+    "approach_m": 100.0,
+    "front_offset_measured": false,
+    "basis": "Reuse existing Planning corner deceleration/reaction/buffer/preview. Margin includes unknown front offset; physical stop unvalidated."
+  },
+  "limitations": [
+    "NGII Kind530 transverse marking candidates; visual stop-line identity not certified.",
+    "Ego ROI heuristic cannot prove lane/signal ownership or arrow/turn permission.",
+    "No measured vehicle-front offset or physical braking validation; fallback is explicitly unverified.",
+    "Disjoint multiple signal heads within ROI are ambiguous; no new RED stop then.",
+    "Only configured waypoint sequence and forward route crossings are eligible."
+  ],
+  "stop_lines": [
+    {
+      "stop_line_id": "B219BS010007",
+      "stop_line_xy": [
+        [
+          36.23095851071412,
+          1144.281997800339
+        ],
+        [
+          38.004958513367455,
+          1143.3349978011101
+        ],
+        [
+          39.98595851758728,
+          1142.2789977993816
+        ]
+      ],
+      "reference_stop_arc_m": 136.20582614730117,
+      "reference_route_heading_rad": 1.052595402234513,
+      "approach_link_ids": [
+        "A219BS010380"
+      ],
+      "related_nodes": [
+        {
+          "link_id": "A219BS010380",
+          "from_node": "A119BS010184",
+          "to_node": "A119BS010176"
+        }
+      ],
+      "map_signal_candidates": [],
+      "evidence": {
+        "source_layer": "B2_SURFACELINEMARK",
+        "kind": "530",
+        "crossing_angle_deg": 88.40354897927922,
+        "direct_signal_binding_verified": false
+      }
+    },
+    {
+      "stop_line_id": "B219BS010135",
+      "stop_line_xy": [
+        [
+          15.39195847773226,
+          1210.9399977982976
+        ],
+        [
+          16.861958481487818,
+          1210.1319978004321
+        ],
+        [
+          18.441958483250346,
+          1209.2629977972247
+        ]
+      ],
+      "reference_stop_arc_m": 224.6043744228925,
+      "reference_route_heading_rad": 1.0719726172381607,
+      "approach_link_ids": [
+        "A219BS010385"
+      ],
+      "related_nodes": [
+        {
+          "link_id": "A219BS010385",
+          "from_node": "A119BS010242",
+          "to_node": "A119BS010169"
+        }
+      ],
+      "map_signal_candidates": [],
+      "evidence": {
+        "source_layer": "B2_SURFACELINEMARK",
+        "kind": "530",
+        "crossing_angle_deg": 89.78466408317787,
+        "direct_signal_binding_verified": false
+      }
+    },
+    {
+      "stop_line_id": "B219BS010005",
+      "stop_line_xy": [
+        [
+          50.26895853038877,
+          1209.2759978016838
+        ],
+        [
+          49.426958528289106,
+          1207.8299977988936
+        ],
+        [
+          48.52995852736058,
+          1206.2889977996238
+        ]
+      ],
+      "reference_stop_arc_m": 264.0683846683085,
+      "reference_route_heading_rad": -0.4877222784428621,
+      "approach_link_ids": [
+        "A219BS010383"
+      ],
+      "related_nodes": [
+        {
+          "link_id": "A219BS010383",
+          "from_node": "A119BS010239",
+          "to_node": "A119BS010166"
+        }
+      ],
+      "map_signal_candidates": [
+        {
+          "id": "C119BS010003",
+          "link_id": "A219BS010649",
+          "type_code": "11",
+          "reference_lane": "1",
+          "xy": [
+            52.755958533787634,
+            1188.4549977988936
+          ],
+          "facing_available": false,
+          "forward_from_crossing_m": 12.02026186630513,
+          "left_from_crossing_m": -15.5559046892831
+        },
+        {
+          "id": "C119BS010005",
+          "link_id": "A219BS010649",
+          "type_code": "1",
+          "reference_lane": "1",
+          "xy": [
+            55.28995853738161,
+            1203.1379977990873
+          ],
+          "facing_available": false,
+          "forward_from_crossing_m": 7.378130398828906,
+          "left_from_crossing_m": -1.3974351228868103
+        },
+        {
+          "id": "C119BS010006",
+          "link_id": "A219BS010649",
+          "type_code": "11",
+          "reference_lane": "1",
+          "xy": [
+            52.367958532704506,
+            1200.241997799836
+          ],
+          "facing_available": false,
+          "forward_from_crossing_m": 6.153937145973249,
+          "left_from_crossing_m": -5.3250617475367035
+        }
+      ],
+      "evidence": {
+        "source_layer": "B2_SURFACELINEMARK",
+        "kind": "530",
+        "crossing_angle_deg": 87.73235659848059,
+        "direct_signal_binding_verified": false
+      }
+    },
+    {
+      "stop_line_id": "B219BS010012",
+      "stop_line_xy": [
+        [
+          46.87295852758689,
+          1165.5839977995493
+        ],
+        [
+          45.107958524895366,
+          1166.538997800555
+        ],
+        [
+          43.353958520980086,
+          1167.4979977998883
+        ]
+      ],
+      "reference_stop_arc_m": 315.212701125798,
+      "reference_route_heading_rad": -2.0951720086549654,
+      "approach_link_ids": [
+        "A219BS010382"
+      ],
+      "related_nodes": [
+        {
+          "link_id": "A219BS010382",
+          "from_node": "A119BS010245",
+          "to_node": "A119BS010172"
+        }
+      ],
+      "map_signal_candidates": [],
+      "evidence": {
+        "source_layer": "B2_SURFACELINEMARK",
+        "kind": "530",
+        "crossing_angle_deg": 88.37226464946632,
+        "direct_signal_binding_verified": false
+      }
+    },
+    {
+      "stop_line_id": "B219BS010142",
+      "stop_line_xy": [
+        [
+          73.3439585660235,
+          1139.2229977999814
+        ],
+        [
+          72.52895856491523,
+          1137.6729978015646
+        ],
+        [
+          71.95895856409334,
+          1136.5769978002645
+        ],
+        [
+          71.71795856434619,
+          1136.116997799836
+        ]
+      ],
+      "reference_stop_arc_m": 360.15078635806634,
+      "reference_route_heading_rad": -0.5133622718090777,
+      "approach_link_ids": [
+        "A219BS010398"
+      ],
+      "related_nodes": [
+        {
+          "link_id": "A219BS010398",
+          "from_node": "A119BS010266",
+          "to_node": "A119BS010247"
+        }
+      ],
+      "map_signal_candidates": [],
+      "evidence": {
+        "source_layer": "B2_SURFACELINEMARK",
+        "kind": "530",
+        "crossing_angle_deg": 88.32219176371831,
+        "direct_signal_binding_verified": false
+      }
+    },
+    {
+      "stop_line_id": "B219BS010140",
+      "stop_line_xy": [
+        [
+          102.03395860840101,
+          1160.8919978020713
+        ],
+        [
+          103.54695860884385,
+          1160.0199978007004
+        ],
+        [
+          105.0569586121128,
+          1159.1489978032187
+        ]
+      ],
+      "reference_stop_arc_m": 403.95951310580045,
+      "reference_route_heading_rad": 1.0629598222539018,
+      "approach_link_ids": [
+        "A219BS010395"
+      ],
+      "related_nodes": [
+        {
+          "link_id": "A219BS010395",
+          "from_node": "A119BS010694",
+          "to_node": "A119BS010174"
+        }
+      ],
+      "map_signal_candidates": [
+        {
+          "id": "C119BS010041",
+          "link_id": "A219BS010656",
+          "type_code": "11",
+          "reference_lane": "1",
+          "xy": [
+            120.78995863272576,
+            1183.5549978008494
+          ],
+          "facing_available": false,
+          "forward_from_crossing_m": 28.949913578698535,
+          "left_from_crossing_m": -3.622123495477691
+        },
+        {
+          "id": "C119BS010042",
+          "link_id": "A219BS010656",
+          "type_code": "11",
+          "reference_lane": "1",
+          "xy": [
+            118.97495863091899,
+            1176.9219977990724
+          ],
+          "facing_available": false,
+          "forward_from_crossing_m": 22.271394652325124,
+          "left_from_crossing_m": -5.261726795121824
+        },
+        {
+          "id": "C119BS010045",
+          "link_id": "A219BS010656",
+          "type_code": "11",
+          "reference_lane": "1",
+          "xy": [
+            109.94695861916989,
+            1164.031997800339
+          ],
+          "facing_available": false,
+          "forward_from_crossing_m": 6.617922855731916,
+          "left_from_crossing_m": -3.6413241004962638
+        },
+        {
+          "id": "C119BS010046",
+          "link_id": "A219BS010656",
+          "type_code": "2",
+          "reference_lane": "1",
+          "xy": [
+            106.4689586146269,
+            1166.8089978005737
+          ],
+          "facing_available": false,
+          "forward_from_crossing_m": 7.353152248741696,
+          "left_from_crossing_m": 0.7481691245308584
+        },
+        {
+          "id": "C119BS010050",
+          "link_id": "A219BS010656",
+          "type_code": "11",
+          "reference_lane": "1",
+          "xy": [
+            113.03095862385817,
+            1168.3819978004321
+          ],
+          "facing_available": false,
+          "forward_from_crossing_m": 11.918658881098905,
+          "left_from_crossing_m": -4.220766607656484
+        }
+      ],
+      "evidence": {
+        "source_layer": "B2_SURFACELINEMARK",
+        "kind": "530",
+        "crossing_angle_deg": 89.14038926558027,
+        "direct_signal_binding_verified": false
+      }
+    },
+    {
+      "stop_line_id": "B219BS010139",
+      "stop_line_xy": [
+        [
+          105.04695860930951,
+          1236.0729977996089
+        ],
+        [
+          105.90195860998938,
+          1237.5889977985062
+        ],
+        [
+          106.76095861027716,
+          1239.10999779962
+        ]
+      ],
+      "reference_stop_arc_m": 501.1956224957202,
+      "reference_route_heading_rad": 2.6436074076731972,
+      "approach_link_ids": [
+        "A219BS010393"
+      ],
+      "related_nodes": [
+        {
+          "link_id": "A219BS010393",
+          "from_node": "A119BS010237",
+          "to_node": "A119BS010164"
+        }
+      ],
+      "map_signal_candidates": [
+        {
+          "id": "C119BS010017",
+          "link_id": "A219BS010638",
+          "type_code": "11",
+          "reference_lane": "1",
+          "xy": [
+            101.9209586023353,
+            1251.579997798428
+          ],
+          "facing_available": false,
+          "forward_from_crossing_m": 10.180385881591658,
+          "left_from_crossing_m": -10.390196598748357
+        },
+        {
+          "id": "C119BS010020",
+          "link_id": "A219BS010638",
+          "type_code": "11",
+          "reference_lane": "1",
+          "xy": [
+            101.900958603248,
+            1243.562997800298
+          ],
+          "facing_available": false,
+          "forward_from_crossing_m": 6.368585026459746,
+          "left_from_crossing_m": -3.337334540633651
+        }
+      ],
+      "evidence": {
+        "source_layer": "B2_SURFACELINEMARK",
+        "kind": "530",
+        "crossing_angle_deg": 89.11014269375427,
+        "direct_signal_binding_verified": false
+      }
+    },
+    {
+      "stop_line_id": "B219BS010024",
+      "stop_line_xy": [
+        [
+          131.42795864137588,
+          1354.2689977991395
+        ],
+        [
+          133.17695864423877,
+          1354.2169978013262
+        ],
+        [
+          134.92995864670957,
+          1354.164997799322
+        ],
+        [
+          136.69395864993567,
+          1354.1159978010692
+        ],
+        [
+          138.4589586533839,
+          1354.065997801721
+        ],
+        [
+          140.21495865558973,
+          1354.0229978007264
+        ],
+        [
+          141.9099586578668,
+          1353.9819977991283
+        ]
+      ],
+      "reference_stop_arc_m": 630.7518808115123,
+      "reference_route_heading_rad": 1.5271876278996779,
+      "approach_link_ids": [
+        "A219BS010404"
+      ],
+      "related_nodes": [
+        {
+          "link_id": "A219BS010404",
+          "from_node": "A119BS010699",
+          "to_node": "A119BS010702"
+        }
+      ],
+      "map_signal_candidates": [],
+      "evidence": {
+        "source_layer": "B2_SURFACELINEMARK",
+        "kind": "530",
+        "crossing_angle_deg": 89.0925458148282,
+        "direct_signal_binding_verified": false
+      }
+    },
+    {
+      "stop_line_id": "B219BS010144",
+      "stop_line_xy": [
+        [
+          138.84695865109097,
+          1411.3919978006743
+        ],
+        [
+          140.59495865233475,
+          1411.398997799959
+        ],
+        [
+          142.3709586551413,
+          1411.3979978002608
+        ],
+        [
+          144.0969586573192,
+          1411.4009977998212
+        ],
+        [
+          145.86295866116416,
+          1411.4009977984242
+        ],
+        [
+          147.16995866288198,
+          1411.4129978027195
+        ]
+      ],
+      "reference_stop_arc_m": 688.2332086211388,
+      "reference_route_heading_rad": 1.5720841564509118,
+      "approach_link_ids": [
+        "A219BS010408"
+      ],
+      "related_nodes": [
+        {
+          "link_id": "A219BS010408",
+          "from_node": "A119BS010704",
+          "to_node": "A119BS010283"
+        }
+      ],
+      "map_signal_candidates": [],
+      "evidence": {
+        "source_layer": "B2_SURFACELINEMARK",
+        "kind": "530",
+        "crossing_angle_deg": 89.84434311283135,
+        "direct_signal_binding_verified": false
+      }
+    },
+    {
+      "stop_line_id": "B219BS010018",
+      "stop_line_xy": [
+        [
+          131.73395863897167,
+          1459.3889978006482
+        ],
+        [
+          133.40895864157937,
+          1459.4149978002533
+        ],
+        [
+          135.08695864334004,
+          1459.4299978003837
+        ],
+        [
+          136.9209586455836,
+          1459.4379978007637
+        ],
+        [
+          138.7519586479175,
+          1459.4449978000484
+        ],
+        [
+          140.49295865063323,
+          1459.4589978004806
+        ],
+        [
+          142.22295865247725,
+          1459.4749978007749
+        ],
+        [
+          143.9799586563022,
+          1459.4879978001118
+        ],
+        [
+          145.74195865821093,
+          1459.5019978000782
+        ],
+        [
+          146.12695865886053,
+          1459.5049978001043
+        ]
+      ],
+      "reference_stop_arc_m": 736.2935479858597,
+      "reference_route_heading_rad": 1.5707963261101006,
+      "approach_link_ids": [
+        "A219BS010419"
+      ],
+      "related_nodes": [
+        {
+          "link_id": "A219BS010419",
+          "from_node": "A119BS010221",
+          "to_node": "A119BS010714"
+        }
+      ],
+      "map_signal_candidates": [
+        {
+          "id": "C119BS010027",
+          "link_id": "A219BS010632",
+          "type_code": "8",
+          "reference_lane": "2",
+          "xy": [
+            136.91895864438266,
+            1470.5069978008978
+          ],
+          "facing_available": false,
+          "forward_from_crossing_m": 11.047999997969772,
+          "left_from_crossing_m": 3.5740000138161983
+        },
+        {
+          "id": "C119BS010028",
+          "link_id": "A219BS010632",
+          "type_code": "2",
+          "reference_lane": "2",
+          "xy": [
+            140.28395864978665,
+            1470.5689978012815
+          ],
+          "facing_available": false,
+          "forward_from_crossing_m": 11.110000000657815,
+          "left_from_crossing_m": 0.20900000845465644
+        },
+        {
+          "id": "C119BS010030",
+          "link_id": "A219BS010632",
+          "type_code": "8",
+          "reference_lane": "2",
+          "xy": [
+            138.01995864586206,
+            1504.999997800216
+          ],
+          "facing_available": false,
+          "forward_from_crossing_m": 45.540999998042004,
+          "left_from_crossing_m": 2.4730000359574627
+        },
+        {
+          "id": "C119BS010031",
+          "link_id": "A219BS010632",
+          "type_code": "2",
+          "reference_lane": "2",
+          "xy": [
+            141.38795865065185,
+            1504.9679977982305
+          ],
+          "facing_available": false,
+          "forward_from_crossing_m": 45.50899999836282,
+          "left_from_crossing_m": -0.8949999688542426
+        }
+      ],
+      "evidence": {
+        "source_layer": "B2_SURFACELINEMARK",
+        "kind": "530",
+        "crossing_angle_deg": 89.5392741436235,
+        "direct_signal_binding_verified": false
+      }
+    },
+    {
+      "stop_line_id": "B219BS010013",
+      "stop_line_xy": [
+        [
+          136.90395863895537,
+          1597.1349977999926
+        ],
+        [
+          139.01495864294702,
+          1597.1659978004172
+        ],
+        [
+          141.09395864687394,
+          1597.229997800663
+        ]
+      ],
+      "reference_stop_arc_m": 874.0212265959376,
+      "reference_route_heading_rad": 1.602344044018486,
+      "approach_link_ids": [
+        "A219BS010429"
+      ],
+      "related_nodes": [
+        {
+          "link_id": "A219BS010429",
+          "from_node": "A119BS010294",
+          "to_node": "A119BS010191"
+        }
+      ],
+      "map_signal_candidates": [
+        {
+          "id": "C119BS010033",
+          "link_id": "A219BS010607",
+          "type_code": "1",
+          "reference_lane": "2",
+          "xy": [
+            138.8549586419249,
+            1602.7989977994002
+          ],
+          "facing_available": false,
+          "forward_from_crossing_m": 5.63524388355151,
+          "left_from_crossing_m": -0.017758427993805892
+        }
+      ],
+      "evidence": {
+        "source_layer": "B2_SURFACELINEMARK",
+        "kind": "530",
+        "crossing_angle_deg": 89.03377605838031,
+        "direct_signal_binding_verified": false
+      }
+    }
+  ]
+}

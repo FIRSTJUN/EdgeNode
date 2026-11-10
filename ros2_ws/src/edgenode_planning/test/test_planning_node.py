@@ -17,6 +17,8 @@ from edgenode_planning.dijkstra_planner import DijkstraPlanner
 from edgenode_planning.local_path_planner import LocalPathPlanner
 from edgenode_planning.map_matcher import MapMatcher
 from edgenode_planning.planning_fsm import PlanningFSM
+from edgenode_planning.traffic_light_gate import TrafficLightGate
+from edgenode_planning.auto_progress_recovery import AutoProgressRecovery
 from edgenode_planning.planning_node import PlanningNode
 from edgenode_planning.speed_planner import SpeedPlanner
 
@@ -33,12 +35,22 @@ class PlanningNodeTest(unittest.TestCase):
             'local_path_search_forward': 10,
             'cruise_speed_kmh': 1.0,
             'enable_drive': False,
+            'traffic_light_enabled': False,
+            'crosswalk_enabled': True,'crosswalk_activation_distance_m':40.,
+            'crosswalk_consistency_tolerance_m':2.,'crosswalk_min_score':.80,'crosswalk_max_age_sec':.5,
             'max_drive_speed_kmh': 1.0,
             'drive_duration_sec': 15.0,
+            'speed_acceleration_limit_mps2': .8,
+            'speed_deceleration_limit_mps2': 1.5,
         }
         self.route = {'points': [[0, 1, 2], [3.5, 4.5, 5.5], [6, 7, 8]]}
         self.stamp = Time(seconds=123, nanoseconds=456).to_msg()
         self.node = SimpleNamespace(
+            traffic_gate=TrafficLightGate(),traffic_status_pub=Mock(),_traffic_speed=None,
+            apply_corner_speed=lambda result, points: result,
+            _speed_slew_override=False,
+            target_speed_limiter=Mock(limit=lambda speed, now: speed),
+            maybe_auto_recover_progress=Mock(), _auto_recovery=AutoProgressRecovery(),
             latest_pose=None,
             map_matcher=Mock(),
             dijkstra_planner=Mock(),
@@ -66,11 +78,11 @@ class PlanningNodeTest(unittest.TestCase):
             'link_id': 'link_42', 'distance': 1.25, 'heading_diff': 12.5,
         }
         for name in (
-            'target_error', 'target_speed', 'state', 'current_link',
+            'corner_profile', 'target_error', 'target_speed', 'state', 'current_link',
             'map_match_status', 'map_match_distance', 'map_match_heading_diff',
             'global_path', 'local_path',
             'recommended_speed', 'speed_mode', 'speed_curvature', 'speed_max_curvature',
-            'drive_status', 'fsm_state',
+            'drive_status', 'fsm_state', 'last_safety_stop',
             'local_path_index', 'local_path_progress',
         ):
             setattr(self.node, name + '_pub', Mock())
@@ -897,6 +909,9 @@ class PlanningNodeTest(unittest.TestCase):
             'local_path_length_m': 12.0,
             'global_path_frame_id': 'custom_map',
             'enable_drive': False,
+            'traffic_light_enabled': False,
+            'crosswalk_enabled': True,'crosswalk_activation_distance_m':40.,
+            'crosswalk_consistency_tolerance_m':2.,'crosswalk_min_score':.80,'crosswalk_max_age_sec':.5,
             'cruise_speed_kmh': 0.9,
             'curve_speed_kmh': 0.6,
             'sharp_curve_speed_kmh': 0.3,
@@ -931,6 +946,7 @@ class PlanningNodeTest(unittest.TestCase):
             )),
             'create_publisher': publisher,
             'create_subscription': Mock(),
+            'create_service': Mock(),
             'create_timer': timer,
             'get_logger': Mock(),
         }
@@ -1210,6 +1226,229 @@ class PlanningNodeTest(unittest.TestCase):
         self.set_local_curvature(0.039)
         PlanningNode.plan(self.node)
         self.assertEqual(self.output('speed_mode'), 'CRUISE')
+
+    def test_continuous_corner_speed_in_full_plan_ramps_and_preserves_safety_gate(self):
+        from edgenode_planning.corner_speed_planner import SpeedSlewLimiter
+        self.parameters.update(corner_lateral_accel_mps2=1.5,
+            corner_deceleration_mps2=1.5, corner_preview_distance_m=100.,
+            corner_response_time_sec=1., corner_braking_buffer_m=5.,
+            max_drive_speed_kmh=50., cruise_speed_kmh=50., enable_drive=True)
+        self.node.speed_planner = SpeedPlanner(cruise_speed_kmh=50.)
+        self.node.target_speed_limiter = SpeedSlewLimiter()
+        self.node.apply_corner_speed = lambda result, points: PlanningNode.apply_corner_speed(
+            self.node, result, points)
+        self.set_speed_route([[float(x),0.,0.] for x in range(201)])
+        PlanningNode.plan(self.node)
+        self.assertEqual(self.output('target_speed'), 0.)
+        self.assertEqual(self.output('recommended_speed'), 50.)
+        for _ in range(100):
+            self.advance_time(.05)
+            PlanningNode.plan(self.node)
+        self.assertAlmostEqual(self.output('target_speed'), .8*5*3.6, places=4)
+        self.node.map_matcher.match.return_value = None
+        self.advance_time(.05)
+        PlanningNode.plan(self.node)
+        self.assert_stopped()
+        self.assertEqual(self.node.target_speed_limiter.speed, 0.)
+
+
+    def test_intermediate_waypoint_does_not_stop_or_reset_global_progress(self):
+        self.parameters.update(route_node_ids=['mid','end'],enable_drive=True)
+        route={'points':[[float(x),0.,0.] for x in range(101)]}
+        self.node.dijkstra_planner.plan_route.return_value=route
+        arcs=[]
+        for x in (49.5,50.,50.5):
+            self.node.latest_pose=(x,0.,0.)
+            PlanningNode.plan(self.node)
+            self.assert_drive('ACTIVE',1.)
+            arcs.append(self.node._progress_arc_m)
+            self.assertIs(self.node._route_result,route)
+            local=self.node.local_path_pub.publish.call_args.args[0]
+            self.assertGreater(local.poses[-1].pose.position.x,50.)
+            self.advance_time(.05)
+        self.assertEqual(arcs,[49.5,50.,50.5])
+        self.node.dijkstra_planner.plan_route.assert_called_once_with('link_42',['mid','end'])
+        self.node.dijkstra_planner.plan.assert_not_called()
+
+
+    def test_safety_stop_retains_duration_reason_after_manual_disable(self):
+        self.enable_straight_drive()
+        self.advance_time(15.)
+        PlanningNode.plan(self.node)
+        self.assert_drive('EXPIRED')
+        message=self.node.last_safety_stop_pub.publish.call_args.args[0].data
+        detail=json.loads(message)
+        self.assertEqual(detail['reason_code'],'DRIVE_DURATION_EXPIRED')
+        self.assertEqual(detail['elapsed_sec'],15.)
+        self.assertEqual(detail['effective_duration_sec'],15.)
+        self.assertEqual(detail['map_match_status'],'MATCHED')
+        self.assertTrue(detail['speed_ready'])
+        self.assertEqual(detail['planned_stop_target_speed_kmh'],0.)
+        self.assertTrue(detail['enable_drive'])
+        calls=self.node.last_safety_stop_pub.publish.call_count
+        self.parameters['enable_drive']=False
+        PlanningNode.plan(self.node)
+        self.assertEqual(self.output('fsm_state'),'READY')
+        self.assertEqual(self.node.last_safety_stop_pub.publish.call_count,calls)
+        self.assertEqual(self.node.last_safety_stop_pub.publish.call_args.args[0].data,message)
+
+    def test_safety_stop_distinguishes_clock_rewind_from_duration(self):
+        self.enable_straight_drive();self.advance_time(5.)
+        PlanningNode.plan(self.node)
+        self.advance_time(-1.)
+        PlanningNode.plan(self.node)
+        detail=json.loads(self.node.last_safety_stop_pub.publish.call_args.args[0].data)
+        self.assertEqual(detail['reason_code'],'CLOCK_REWIND')
+        self.assertEqual(detail['elapsed_sec'],4.)
+        self.advance_time(20.)
+        PlanningNode.plan(self.node)
+        self.assertEqual(self.node._drive_expiry_reason,'CLOCK_REWIND')
+
+    def test_expiry_snapshot_handles_simultaneous_match_or_local_path_loss(self):
+        self.enable_straight_drive();self.advance_time(15.)
+        self.node.map_matcher.match.return_value=None
+        PlanningNode.plan(self.node)
+        self.assert_drive('EXPIRED')
+        detail=json.loads(self.node.last_safety_stop_pub.publish.call_args.args[0].data)
+        self.assertEqual(detail['reason_code'],'DRIVE_DURATION_EXPIRED')
+        self.assertFalse(detail['local_path_ready'])
+        self.assertEqual(detail['local_path_points'],0)
+        self.assertIsNone(detail['map_match_distance_m'])
+
+    def test_corner_hard_limit_warning_cannot_expire_drive_session(self):
+        self.node.target_speed_limiter.safety_override=True
+        self.enable_straight_drive()
+        self.assert_drive('ACTIVE',1.)
+        self.assertFalse(self.node._drive_session_expired)
+        self.assertIn('CORNER_SPEED_HARD_LIMIT',self.node.get_logger().warning.call_args.args[0])
+        self.node.last_safety_stop_pub.publish.assert_not_called()
+
+    def test_traffic_stop_and_green_are_subordinate_to_existing_motion_gates(self):
+        self.parameters['traffic_light_enabled']=True
+        now=self.node.get_clock.return_value.now.return_value.nanoseconds
+        self.node._traffic_speed=(0.,now)
+        self.node.traffic_gate.decision=Mock(return_value=dict(enabled=True,hold=True,speed_cap_kmh=0.,reason='STOP_ENVELOPE_RED',state='RED'))
+        self.enable_straight_drive()
+        self.assertEqual(self.output('fsm_state'),'TRAFFIC_STOP')
+        self.assert_stopped()
+        self.node.traffic_gate.decision.return_value=dict(enabled=True,hold=False,speed_cap_kmh=None,reason='VERIFIED_GREEN',state='GREEN')
+        PlanningNode.plan(self.node)
+        self.assertEqual(self.output('fsm_state'),'NORMAL_DRIVE')
+        self.assertEqual(self.output('target_speed'),1.)
+        self.node.map_matcher.match.return_value=None
+        PlanningNode.plan(self.node)
+        self.assert_stopped()
+        self.assertEqual(self.output('fsm_state'),'WAIT_FOR_MAP_MATCH')
+
+    def test_traffic_green_cannot_override_drive_expiry(self):
+        self.parameters['traffic_light_enabled']=True
+        now=self.node.get_clock.return_value.now.return_value.nanoseconds
+        self.node._traffic_speed=(0.,now)
+        self.node.traffic_gate.decision=Mock(return_value=dict(enabled=True,hold=False,speed_cap_kmh=None,reason='VERIFIED_GREEN',state='GREEN'))
+        self.enable_straight_drive()
+        self.advance_time(15.)
+        PlanningNode.plan(self.node)
+        self.assertEqual(self.output('fsm_state'),'SAFETY_STOP')
+        self.assert_stopped()
+
+    def test_traffic_cap_combines_with_corner_cap_and_publishes_final_target(self):
+        self.parameters['traffic_light_enabled']=True
+        self.node._traffic_speed=(0.,self.node.get_clock.return_value.now.return_value.nanoseconds)
+        self.node.traffic_gate.decision=Mock(return_value=dict(enabled=True,hold=False,speed_cap_kmh=.5,reason='STOP_ENVELOPE_RED',state='RED'))
+        self.enable_straight_drive()
+        self.assertEqual(self.output('target_speed'),.5)
+        detail=json.loads(self.node.traffic_status_pub.publish.call_args.args[0].data)
+        self.assertEqual(detail['signal_speed_cap_kmh'],.5)
+        self.assertEqual(detail['corner_target_speed_kmh'],1.)
+        self.assertEqual(detail['final_target_speed_kmh'],.5)
+        self.node.traffic_gate.decision.return_value['speed_cap_kmh']=2.
+        PlanningNode.plan(self.node)
+        self.assertEqual(self.output('target_speed'),1.)
+
+    def test_raw_red_without_binding_logs_reason_and_does_not_global_stop(self):
+        self.parameters['traffic_light_enabled']=True
+        now=self.node.get_clock.return_value.now.return_value.nanoseconds
+        self.node.traffic_gate.observe_state('RED',now)
+        self.node._traffic_speed=(0.,now)
+        self.enable_straight_drive()
+        detail=json.loads(self.node.traffic_status_pub.publish.call_args.args[0].data)
+        self.assertEqual(detail['perception_state'],'RED')
+        self.assertEqual(detail['reason'],'ASSOCIATION_NOT_VERIFIED')
+        self.assertFalse(detail['stop_requested'])
+        self.assertEqual(self.output('target_speed'),1.)
+        line=self.node.get_logger().info.call_args.args[0]
+        for field in ('traffic=RED','stopline=none','stop_requested=false',
+                      'target_speed_before=1.00','target_speed_after=1.00','reason=ASSOCIATION_NOT_VERIFIED'):
+            self.assertIn(field,line)
+
+    def test_raw_red_when_feature_disabled_is_diagnostic_only(self):
+        now=self.node.get_clock.return_value.now.return_value.nanoseconds
+        self.node.traffic_gate.observe_state('RED',now)
+        self.enable_straight_drive()
+        detail=json.loads(self.node.traffic_status_pub.publish.call_args.args[0].data)
+        self.assertEqual(detail['perception_state'],'RED')
+        self.assertEqual(detail['reason'],'DISABLED')
+        self.assertFalse(detail['stop_requested'])
+
+    def test_actual_detector_fallback_reaches_zero_target_then_green_releases(self):
+        # ROS publishers are mocked: this never starts a vehicle or ROS node.
+        from test_route_stopline_fallback import config, sample, ROUTE, WAYPOINTS
+        self.parameters['route_node_ids']=WAYPOINTS
+        self.parameters['traffic_light_enabled']=True
+        self.parameters['enable_drive']=True
+        self.node.dijkstra_planner.plan_route.return_value=ROUTE
+        self.node.latest_pose=(95.,0.,0.)
+        self.node.map_matcher.match.return_value['heading_diff']=0.
+        self.node.traffic_gate=TrafficLightGate(config())
+        for i in range(3):
+            if i:self.advance_time(.15)
+            now=self.node.get_clock.return_value.now.return_value.nanoseconds
+            self.node._traffic_speed=(0.,now)
+            self.node.traffic_gate.observe_detector(sample(now),now)
+            PlanningNode.plan(self.node)
+            if i<2:self.assertEqual(self.output('target_speed'),1.)
+        detail=json.loads(self.node.traffic_status_pub.publish.call_args.args[0].data)
+        self.assertEqual(detail['reason'],'RED_ACTIVE_STOPLINE')
+        self.assertTrue(detail['stop_requested'])
+        self.assertEqual(detail['target_before_traffic_kmh'],1.)
+        self.assertEqual(detail['target_after_traffic_kmh'],0.)
+        self.assertEqual(self.output('fsm_state'),'TRAFFIC_STOP')
+        self.assert_stopped()
+        for _ in range(3):
+            self.advance_time(.15)
+            now=self.node.get_clock.return_value.now.return_value.nanoseconds
+            self.node._traffic_speed=(0.,now)
+            self.node.traffic_gate.observe_detector(sample(now,'green'),now)
+            PlanningNode.plan(self.node)
+        self.assertEqual(self.output('target_speed'),1.)
+        self.assertEqual(self.output('fsm_state'),'NORMAL_DRIVE')
+        detail=json.loads(self.node.traffic_status_pub.publish.call_args.args[0].data)
+        self.assertEqual(detail['reason'],'GREEN_RELEASE')
+        self.assertFalse(detail['stop_requested'])
+
+    def test_auxiliary_crosswalk_can_stop_earlier_but_missing_camera_keeps_map(self):
+        # All publishers and drive state are mocked; no real commands are sent.
+        from test_route_stopline_fallback import config, sample, ROUTE, WAYPOINTS
+        from test_crosswalk_stop_correction import status
+        self.parameters['route_node_ids']=WAYPOINTS
+        self.parameters['traffic_light_enabled']=True
+        self.parameters['enable_drive']=True
+        self.node.dijkstra_planner.plan_route.return_value=ROUTE
+        self.node.latest_pose=(94.,0.,0.)
+        self.node.map_matcher.match.return_value['heading_diff']=0.
+        for use_camera,expected in ((True,0.),(False,1.)):
+            self.node.traffic_gate=TrafficLightGate(config())
+            for _ in range(3):
+                self.advance_time(.15)
+                now=self.node.get_clock.return_value.now.return_value.nanoseconds
+                self.node._traffic_speed=(0.,now)
+                self.node.traffic_gate.observe_detector(sample(now),now)
+                if use_camera:self.node.traffic_gate.crosswalk.observe(status(now,distance=5.),now)
+                PlanningNode.plan(self.node)
+            self.assertEqual(self.output('target_speed'),expected)
+            detail=json.loads(self.node.traffic_status_pub.publish.call_args.args[0].data)
+            self.assertEqual(detail['stop_distance_source'],'CROSSWALK_CORRECTED' if use_camera else 'MGEO_FALLBACK')
+
 
 
 if __name__ == '__main__':

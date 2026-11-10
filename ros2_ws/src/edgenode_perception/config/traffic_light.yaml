@@ -1,0 +1,10 @@
+traffic_light_node:
+  ros__parameters:
+    model_path: /workspace/models/traffic_light_yolo/weights.pt
+    camera_topic: /camera/image/compressed
+    device: cpu
+    confidence: 0.4
+    image_size: 640
+    max_image_age_sec: 0.5
+    inference_hz: 5.0
+    publish_debug: true
