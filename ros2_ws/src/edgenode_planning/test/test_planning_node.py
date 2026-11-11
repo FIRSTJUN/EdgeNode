@@ -986,6 +986,7 @@ class PlanningNodeTest(unittest.TestCase):
             'create_publisher': publisher,
             'create_subscription': Mock(),
             'create_timer': timer,
+            'create_service': Mock(),
             'add_on_set_parameters_callback': Mock(),
             'get_logger': Mock(),
         }

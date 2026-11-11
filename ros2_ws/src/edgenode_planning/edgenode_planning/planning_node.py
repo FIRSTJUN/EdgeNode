@@ -9,9 +9,11 @@ from nav_msgs.msg import Odometry, Path
 from morai_ros2_msgs.msg import EgoVehicleStatus
 from rcl_interfaces.msg import ParameterDescriptor, SetParametersResult
 from std_msgs.msg import Float32, Float64, Int32, String
+from std_srvs.srv import Trigger
 
 from edgenode_planning.dijkstra_planner import DijkstraPlanner
 from edgenode_planning.local_path_planner import LocalPathPlanner
+from edgenode_planning.stopped_progress import reanchor_progress
 from edgenode_planning.map_matcher import MapMatcher
 from edgenode_planning.speed_planner import SpeedPlanner
 from edgenode_planning.longitudinal_speed_planner import (
@@ -233,6 +235,7 @@ class PlanningNode(Node):
         self._progress_index = None
         self._progress_arc_m = None
         self.latest_pose = None
+        self._pose_received_ns = None
         self._drive_was_enabled = False
         self._drive_session_start_ns = None
         self._drive_session_expired = False
@@ -344,6 +347,7 @@ class PlanningNode(Node):
         self.long_speed_plan_pub = self.create_publisher(
             String, self.get_parameter('long_speed_plan_topic').value, 10,
         )
+        self.create_service(Trigger, '~/reset_local_progress', self.reset_local_progress)
 
         # Planning loop: 20 Hz
         self.create_timer(
@@ -476,6 +480,34 @@ class PlanningNode(Node):
             1.0 - 2.0 * (q.y * q.y + q.z * q.z),
         )
         self.latest_pose = (position.x, position.y, yaw)
+        self._pose_received_ns = self.get_clock().now().nanoseconds
+
+    def reset_local_progress(self, request, response):
+        """Re-anchor only while disabled and stopped, retaining the exact route."""
+        response.success = False
+        response.message = 'requires disabled, stationary, fresh pose/speed and a nearby route projection'
+        now = self.get_clock().now().nanoseconds
+        speed = self._ego_speed
+        pose_stamp = self._pose_received_ns
+        if (self.get_parameter('enable_drive').value is not False
+                or speed is None or self.latest_pose is None or pose_stamp is None
+                or not 0 <= (now-pose_stamp)/1e9 <= .3
+                or not 0 <= speed[0] < .3
+                or not all(0 <= (now-t)/1e9 <= self._long_settings.speed_timeout_sec
+                           for t in speed[1:])
+                or self._route_result is None or self._progress_arc_m is None):
+            return response
+        projection = reanchor_progress(self._route_result['points'], *self.latest_pose,
+                                       self._progress_arc_m)
+        if projection is None:
+            return response
+        self._progress_index = projection['nearest_index']
+        self._progress_arc_m = projection['progress_arc_m']
+        self._previous_speed_mode = self._previous_curve_state = None
+        self._reset_long_plan()
+        response.success = True
+        response.message = json.dumps(projection)
+        return response
 
     def plan(self):
         """Publish routes, recommendations and guarded, time-limited commands.

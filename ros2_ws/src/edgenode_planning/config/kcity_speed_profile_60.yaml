@@ -6,7 +6,7 @@ planning_node:
     enable_drive: false
     max_drive_speed_kmh: 60.0
     cruise_speed_kmh: 60.0
-    curve_speed_kmh: 30.0
-    sharp_curve_speed_kmh: 25.0
+    curve_speed_kmh: 40.0
+    sharp_curve_speed_kmh: 30.0
     speed_long_preview_enabled: true
     drive_duration_sec: 120.0

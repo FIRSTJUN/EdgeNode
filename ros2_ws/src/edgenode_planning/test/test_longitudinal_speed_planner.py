@@ -116,7 +116,10 @@ def test_isolated_artifact_does_not_become_a_global_curve(kind):
 def test_real_turns_s_curve_roundabout_merge_keep_support(shape):
     profile = build(curvature_profile_path(shape))
     assert profile.spans
-    assert abs(profile.spans[0].entry_m-80.) < 2.
+    # The original classified turn remains located at the actual turn. The
+    # gentle chord envelope can also anticipate steering before that point.
+    classified = [span for span in profile.spans if span.level > 0]
+    assert classified and abs(classified[0].entry_m-80.) < 2.
     if any(k < 0 for k,_,_ in shape):
         assert {s.direction for s in profile.spans} == {-1,1}
     result = LongitudinalSpeedPlanner(profile,local()).plan(40.,50.,50.)

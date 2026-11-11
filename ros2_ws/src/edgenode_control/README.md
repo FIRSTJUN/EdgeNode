@@ -1,4 +1,4 @@
-# Sonata Dynamic Lookahead
+# Sonata Pure Pursuit, Dynamic Lookahead와 조향 연속성
 
 `ControlNode.status_cb()`는 `/ego_vehicle_status`의 `velocity.x/y/z`로부터
 `sqrt(vx² + vy² + vz²) * 3.6`을 계산해 `current_speed_kmh`에 저장한다.
@@ -16,19 +16,20 @@ lookahead_m = clamp(v_mps * lookahead_preview_time_sec,
 
 | measured speed (km/h) | lookahead (m) |
 | ---: | ---: |
-| 0 | 2.5 |
-| 20 | 2.5 |
+| 0 | 3.0 |
+| 20 | 3.0 |
 | 25 | 3.125 |
 | 30 | 3.75 |
 | 40 | 5.0 |
 | 50 | 6.25 |
+| 60 | 7.5 |
 | 80 이상 | 10.0 |
 
 `config/control.yaml`에 다음 파라미터를 노출한다.
 
 | parameter | 기본값 | 의미 |
 | --- | ---: | --- |
-| `lookahead_min_m` | 2.5 | 최소 거리 (m) |
+| `lookahead_min_m` | 3.0 | 최소 거리 (m) |
 | `lookahead_max_m` | 10.0 | 최대 거리 (m) |
 | `lookahead_preview_time_sec` | 0.45 | 실제 속도에 곱하는 preview 시간 (s) |
 | `lookahead_distance_m` | 2.5 | 기존 설정 호환용 시작 시 최소값 |
@@ -54,9 +55,17 @@ Pure Pursuit 계산이 성공한 주기에 전달한 lookahead를 발행한다.
 watchdog/입력 오류 또는 Pure Pursuit 실패 시 새 진단 표본을 발행하지 않는다.
 explicit stop 중에도 경로 계산이 성공하면 진단값은 발행된다.
 
-Pure Pursuit의 target selection, curvature/정규화, Sonata geometry
-(`wheelbase_m=2.84`, `max_wheel_angle_rad=0.610865`), MORAI sign/±0.70 제한,
-PID와 Planning/Localization 코드는 변경하지 않았다. Local Path horizon은 20 m다.
+Pure Pursuit의 target selection, curvature/정규화와 Sonata geometry
+(`wheelbase_m=2.84`, `max_wheel_angle_rad=0.610865`)를 유지한다.
+MORAI sign은 -1, 현재 YAML의 상한은 ±0.85다. 변환된 명령에
+`steering_filter_time_constant_sec=0.08`과 `steering_max_rate_per_sec=1.5`를 적용한다.
+필터 출력 하나만 상태로 저장하고, 스케줄러 공백의 허용 이동 시간은 100ms로 제한한다.
+명시적 정지와 watchdog 정지는 필터를 즉시 우회하고 조향 상태를 0으로 초기화한다.
+PID는 기존값을 유지하며 Local Path horizon은 20m다.
+
+코드/API 호환 기본값은 최소 lookahead 2.5m, steering 상한 .70, 필터/변화율 0(비활성)이다.
+일반 Bringup은 `control.yaml`을 읽어 위 검증 설정을 적용한다.
+실제 적용값은 `/control_node/get_parameters` 또는 `ros2 param get`으로 확인한다.
 
 ## 자동 검증
 
@@ -74,74 +83,57 @@ git -C /workspace diff --check
 실제 status 속도와 target speed의 독립성, 진단 토픽, 경로 끝 처리,
 기존/고속 target selection과 steering sign, explicit stop/PID reset을 검증한다.
 
-구현 후 검증 결과: Control 85개 + Planning 313개 = **398개 통과**
+초기 Dynamic Lookahead 도입 당시 기록: Control 85개 + Planning 313개 = **398개 통과**
 (변경 전 361개, 신규 37개). 전체 `colcon build --symlink-install`은
 **7 packages finished**로 성공했고 `git diff --check`도 통과했다.
 빌드된 설치 패키지로 격리 ROS domain/토픽을 사용한 실제 ROS 전송 smoke도
 기본값, legacy 최소값, 새 config 우선순위 **3/3 시나리오 통과**했다.
+
+## 속도 PID의 반복 제동 진단
+
+20Hz 목표속도와 30Hz 제어 주기의 조합에서 필터 없는 오차 미분은 목표값의
+계단 변화와 MORAI 실제속도의 순간 변화를 증폭한다. 감속 중 큰 양의 D항이
+가속으로 바뀌는 경우를 raw/filtered D항으로 구분할 수 있다.
+
+`speed_derivative_filter_time_constant_sec`는 D항에만 적용한다. 계수는
+`dt / (tau + dt)`이며 P/I와 Planning 목표값은 그대로 사용한다. 코드의 호환
+기본값 0은 기존 PID 계산과 같다. 목표속도 감소와 정지 명령을 평활화하지 않는다.
+현재 K-City YAML의 선택값은 `0.10`초와 `speed_pid_anti_windup_enabled=true`다.
+
+`speed_pid_anti_windup_enabled`를 켜면 실제 페달 상한에 도달한 상태에서
+같은 방향의 적분 누적을 중단한다. 반대 부호의 기존 적분은 0까지 해소할 수 있다.
+상한은 기존 `max_accel_cmd`와 `max_brake_cmd`에서 가져온다. 코드 기본값은 false다.
+명시적 정지와 watchdog 정지는 적분 및 미분 상태를 초기화하고 즉시 제동한다.
+
+`/control/speed_pid_d_raw`, `/control/speed_pid_d_filtered`, `/control/speed_pid_i`는
+정규화된 PID 노력 성분이며 `/control/speed_pid_effort`는 페달 clamp 전의 합이다.
+이들은 브레이크 압력이나 물리적인 차량 가속도 값이 아니다.
 각 시나리오에서 50 km/h status 입력 → Float32 6.25 m 진단값,
 조향 부호 및 explicit stop 명령 전송을 확인했다. MORAI 주행은 수행하지 않았다.
 
-## MORAI 재실행
+## 현재 MORAI 검증
 
-각 터미널에서 ROS와 새 `install/setup.bash`를 source한다. 기존 autonomy 프로세스를
-종료한 뒤 위 빌드 결과로 다시 실행한다.
+2026-11-11 K-City 검증은 60/40/30 정책에서 수행했다.
+Control/Planning/Localization 및 기존·신규 실험 도구 회귀는 672개 통과했고,
+Localization/Planning/Control/Bringup 4개 패키지를 빌드했다.
+실측 구간·그래프·한계는 `/workspace/local_data/kcity_604030_20261111/report_ko.md`에 있다.
+Planning 설정과 물리 감속 envelope는 [속도 프로파일 문서](../edgenode_planning/docs/kcity_speed_profile.md)를 따른다.
+
+기존 노드가 실행 중이면 중복 실행하지 않는다. 변경 코드 반영이 필요한 노드만
+`enable_drive=false`와 차량 정지를 확인한 뒤 개별 재시작한다.
+아래 도구는 기존 Planning lease/gate만 사용하며 CtrlCmd를 직접 발행하지 않는다.
+준비와 주행에 같은 상한을 지정하고, 준비 실패 뒤에는 주행하지 않는다.
 
 ```bash
-cd /workspace/ros2_ws
+cd /workspace
 source /opt/ros/humble/setup.bash
-source install/setup.bash
-ros2 launch edgenode_bringup autonomy.launch.py
+source ros2_ws/install/setup.bash
+python3 tools/kcity/live_test.py --prepare --max-speed-kmh 50
+python3 tools/kcity/live_test.py --run --seconds 120 --max-speed-kmh 50
 ```
 
-차량/센서 설정과 비교 경로, 출발 pose는 이전 실험과 동일하게 맞춘다.
-`enable_drive=false` 상태에서 아래를 실행하고, `/planning/drive_status`가
-`DISABLED`인 것을 확인한다. 속도 단계는 `20.0 → 25.0 → 30.0 → 40.0 → 50.0`이다.
-각 단계는 `max_drive_speed_kmh`로 제한한다. CRUISE/CURVE/SHARP_CURVE 설정과
-threshold는 그대로 유지하므로 실제 target은 SpeedPlanner 권고보다 높아지지 않는다.
-
-```bash
-stage_kmh=20.0
-ros2 param set /planning_node enable_drive false
-ros2 topic echo /planning/drive_status --once
-ros2 param set /planning_node max_drive_speed_kmh "$stage_kmh"
-ros2 param get /planning_node drive_duration_sec
-ros2 param get /control_node lookahead_min_m
-ros2 param get /control_node lookahead_max_m
-ros2 param get /control_node lookahead_preview_time_sec
-
-run_dir="/workspace/rosbags/dynamic_lookahead_${stage_kmh}_$(date +%Y%m%d_%H%M%S)"
-mkdir -p "$run_dir"
-ros2 param dump /control_node > "$run_dir/control_parameters.yaml"
-ros2 param dump /planning_node > "$run_dir/planning_parameters.yaml"
-ros2 param dump /localization_node > "$run_dir/localization_parameters.yaml"
-ros2 bag record -o "$run_dir/bag" \
-  /ego_vehicle_status /control/lookahead_distance \
-  /control/path_error /control/pure_pursuit_steering /ctrl_cmd \
-  /control/target_left /control/target_forward \
-  /planning/map_match_distance /planning/map_match_heading_diff \
-  /gps /Imu \
-  /planning/target_speed /planning/recommended_speed /planning/speed_mode \
-  /planning/drive_status /planning/map_match_status /planning/current_link \
-  /planning/local_path /planning/global_path /planning/local_path_progress_m \
-  /localization/odometry
-```
-
-bag recorder가 모든 토픽을 구독한 것을 확인하고 별도 터미널에서 시작한다.
-
-```bash
-ros2 param set /planning_node enable_drive true
-```
-
-기존 운행 lease는 config상 60초다. 단계 종료/중단 시
-`ros2 param set /planning_node enable_drive false`를 실행하고 정지 후 bag을 닫는다.
-다음 단계도 `DISABLED` 확인 → cap 설정 → 기록 시작 → enable 순서로 진행한다.
-lease 만료 후 재시작에도 관측된 false → true 전환이 필요하다.
-
-각 bag에서 actual speed는 status velocity의 크기 × 3.6으로 계산하고,
-actual lookahead는 `/control/lookahead_distance`, front steer는
-`/ctrl_cmd.front_steer`로 확인한다. path_error RMS/최대값, PP steering,
-front_steer 포화 비율과 진동, target_left/forward, Map Matching 거리/heading diff,
-raw GPS/IMU를 동일 경로 구간에서 이전 baseline과 비교한다.
-50 km/h 안정화가 확인되면 추가 고속화는 중단하고 S1~S13 시나리오 구현으로 넘어간다.
-실제 MORAI 주행 안정성은 이 절차로 별도 확인해야 한다.
+50km/h에서 회전교차로 검증 후 55, 60으로 단계적으로 확장한다.
+`--prepare`는 주행을 시작하지 않고, 생략한 상한은 20km/h다.
+종료·실패 모두 drive=false, target=0, 차량 정지와 제동을 확인한다.
+정지 후 진행률이 앞에 남아 준비가 거부되면 오차 기준을 완화하지 말고
+정지 상태에서 경로 진행률과 Localization 위치를 확인한다.

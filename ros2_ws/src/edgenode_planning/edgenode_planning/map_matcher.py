@@ -55,7 +55,8 @@ class MapMatcher:
     The map is read once during construction. A successful match returns a
     dictionary containing link_id, distance (m), link_heading (degrees),
     heading_diff (degrees), and score. A rejected pose returns None and keeps
-    the last successful link for continuity, as in v0.2.
+    the last successful link for continuity, as in v0.2. Abstract lane-change
+    shortcuts are excluded, matching Dijkstra's drivable-edge contract.
     """
 
     def __init__(
@@ -88,6 +89,10 @@ class MapMatcher:
         self.outgoing = {}
 
         for link in raw_links:
+            # Lazy shortcut points are not a road centreline and cannot be
+            # Dijkstra start links. Ordinary physical lane neighbours remain.
+            if link.get('lazy_init') is True or link.get('lane_ch_link_path'):
+                continue
             points = link.get('points', [])
             if len(points) < 2:
                 continue

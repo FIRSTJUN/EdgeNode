@@ -1,6 +1,6 @@
-# K-City 60/30/25 profile and bounded experiment preparation
+# K-City 60/40/30 profile and bounded experiment preparation
 
-The recommendation profile is CRUISE 60, CURVE 30 and SHARP_CURVE 25 km/h.
+The recommendation profile is CRUISE 60, CURVE 40 and SHARP_CURVE 30 km/h.
 These are upper bounds, never minimum speeds. This configuration does not
 establish that 60 km/h driving is safe on the stored K-City route.
 
@@ -8,10 +8,10 @@ establish that 60 km/h driving is safe on the stored K-City route.
 
 | Layer | Independent ceiling | Drive enabled | Global speed planner |
 | --- | --- | --- | --- |
-| `config/planning.yaml` | 20 km/h low-speed default | false | false default |
+| `config/planning.yaml` | 20 km/h low-speed default | false | true |
 | `config/kcity_speed_profile_60.yaml` startup overlay | 60 km/h | false | true |
 | Historical `local_data/kcity_live_recovery_20261110/recovery_parameters.yaml` | 20 km/h historical reproduction | false | true |
-| `live_test.py --prepare --max-speed-kmh N` | explicit N, >0 and <=60 | false | true |
+| `tools/kcity/live_test.py --prepare --max-speed-kmh N` | explicit N, >0 and <=60 | false | true |
 
 Apply the startup overlay **after** the full `planning.yaml`; it is not a
 replacement for the geometry, topics and map settings in that file. The
@@ -26,7 +26,7 @@ override that the new tool loads. Omitting the new CLI ceiling still selects 20.
 
 ## Speed composition and assumptions
 
-Local classification selects a policy limit of 60, 30 or 25 km/h. The global
+Local classification selects a policy limit of 60, 40 or 30 km/h. The global
 planner only lowers that recommendation. For each located curve span:
 
 ```text
@@ -52,12 +52,13 @@ silently raise a stricter lateral limit. These are planning assumptions, not
 measured vehicle acceleration/deceleration guarantees.
 
 For radius 5.04m, the lateral formula gives **9.90km/h**, despite the SHARP
-policy being 25. With a_lateral=1.5, curvature 0.05m⁻¹ gives 19.72km/h and
+policy being 30. With a_lateral=1.5, curvature 0.05m⁻¹ gives 19.72km/h and
 0.2m⁻¹ gives 9.86km/h. At 60km/h the nominal lateral curvature boundary is
 0.0054m⁻¹. A locally straight window may still require braking for a future curve.
 
 | Change | Required distance with the assumptions above |
 | --- | ---: |
+| 60 → 40km/h | 64.77m |
 | 60 → 30km/h | 82.78m |
 | 60 → 25km/h | 89.85m |
 | 60 → 9.90km/h | 103.41m |
@@ -130,8 +131,8 @@ workspace overlay is needed for the standard Path/Marker messages.
 These commands configure and verify while stationary. Neither enables driving:
 
 ```bash
-python3 local_data/kcity_live_recovery_20261110/live_test.py --prepare --max-speed-kmh 20
-python3 local_data/kcity_live_recovery_20261110/live_test.py --prepare --max-speed-kmh 60
+python3 tools/kcity/live_test.py --prepare --max-speed-kmh 20
+python3 tools/kcity/live_test.py --prepare --max-speed-kmh 60
 ```
 
 `--prepare` first disables and confirms stopped speed, zero target and fresh
@@ -147,7 +148,7 @@ match the prepared ceiling; omitting it selects 20 and cannot accidentally use
 a prepared 60. A low-speed bounded test, after the matching preparation:
 
 ```bash
-python3 local_data/kcity_live_recovery_20261110/live_test.py --run --seconds 120 --max-speed-kmh 20
+python3 tools/kcity/live_test.py --run --seconds 120 --max-speed-kmh 20
 ```
 
 The same interface supports an explicit higher ceiling after separate review;
@@ -172,15 +173,12 @@ ros2 param set /planning_node enable_drive false
 - Evaluate 30, then 40/50 only on reviewed straight segments, keeping all curve
   caps and monitoring actual braking distance and response delay. Higher-speed
   stage approval is separate from preparing a profile.
-- Current Localization has `gps_velocity_max_mps=15` (54km/h) as its GPS-derived
-  velocity measurement gate. Planning uses EgoStatus speed, so this is not a
-  54km/h target ceiling; rejected GPS velocity updates above it still require
-  separate localization validation before considering 60. This work does not
-  modify Localization.
-- Under a linear normalized-wheel-angle assumption, steering limit 0.7 and
-  wheelbase 2.84m imply a radius near 6.23m, larger than the fitted 5.04m curve.
-  MORAI steering calibration and observed tracking must be reviewed. Speed
-  reduction alone is not proof of geometric tracking capability.
+- Localization now uses `gps_velocity_max_mps=20` (72km/h). Its timestamp,
+  finite-value and speed outlier gates remain active. Sustained 60km/h EKF
+  speed/covariance regression is included in `test_gps_velocity.py`.
+- The measured radius at steering 0.70 was about 6.58m, larger than the
+  5.04m bend. Control YAML now uses 0.85, an 0.08s time constant and a
+  1.5 normalized-command/s slew bound. Stop commands bypass shaping.
 - The target-rise limit applies to recommendation history. Drive enable or a
   hard-cap change can expose an already higher recommendation; a smooth
   standstill-to-60 command and physical acceleration/jerk are not established.
@@ -189,5 +187,25 @@ ros2 param set /planning_node enable_drive false
   Do not equate those timestamps with advancing simulation physics. Preparation
   refuses a nonzero reported speed even if the position appears frozen.
 
-These limits are grounds to keep the source default disabled and to avoid
+These limits are grounds to keep enable_drive disabled by default and to avoid
 claiming high-speed driving readiness from configuration, tests or replay alone.
+
+## Gentle geometry below the mode thresholds
+
+The 60/40/30 values remain policy ceilings. CRUISE classification can still
+receive a lower physical speed from the global envelope. In the 430m bend,
+heading curvature of about 0.0186/m had previously been discarded because it
+was below the 0.025/m CURVE threshold; it must still constrain 60km/h driving.
+
+Distributed small heading changes supply level-zero physical evidence while
+the existing local mode thresholds, classification hysteresis and artifact
+checks remain unchanged. Four-metre chords on either side of the arc grid
+also rescue a persistent gentle tangent change that isolated-impulse rejection
+misses. This cue only accepts curvature below the CURVE threshold, requires
+the configured persistence, and excludes any complete stencil overlapping a
+confirmed out-and-return artifact. Published Global/Local Path geometry is
+unchanged. Diagnostic evidence bits are 1 (median), 2 (heading), and 4 (chord).
+
+A span whose physical/policy cap equals the cruise ceiling does not inhibit
+clear-road recovery merely by assigning a curve ID. Binding curve/braking
+constraints and the terminal stop remain active.

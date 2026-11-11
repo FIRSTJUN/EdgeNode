@@ -2,9 +2,11 @@ from launch import LaunchDescription
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 import os
+from edgenode_bringup.process_guard import assert_no_existing_autonomy
 
 
 def generate_launch_description():
+    assert_no_existing_autonomy()
     localization_cfg = os.path.join(
         get_package_share_directory('edgenode_localization'),
         'config',

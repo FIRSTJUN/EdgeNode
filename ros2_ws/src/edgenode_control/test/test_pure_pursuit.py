@@ -167,8 +167,10 @@ class PurePursuitTest(unittest.TestCase):
         elevated = [[0, 1, -100], [10, 1, 500]]
         original = [point.copy() for point in elevated]
         a, b = self.compute(flat), self.compute(elevated)
-        for key in a.keys() - {'target_point'}:
+        for key in a.keys() - {'target_point', 'raw_target_point'}:
             self.assertEqual(a[key], b[key])
+        self.assertEqual(a['raw_target_point'][:2], b['raw_target_point'][:2])
+        self.assertEqual(b['raw_target_point'], b['target_point'])
         self.assertEqual(b['target_point'], [2.5, 1, 50])
         b['target_point'][0] = 99
         self.assertEqual(elevated, original)

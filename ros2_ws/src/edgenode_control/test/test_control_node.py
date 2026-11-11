@@ -125,6 +125,72 @@ class ControlNodeTest(unittest.TestCase):
         self.assertEqual(self.parameters['max_front_steer_normalized'], 0.70)
         self.assertFalse(hasattr(self.node, 'steer_pid'))
 
+    def test_shaping_never_delays_explicit_or_watchdog_stop(self):
+        self.parameters.update(steering_filter_time_constant_sec=0.08,
+                               steering_max_rate_per_sec=2.0)
+        self.node.target_speed_cb(Float32(data=20.0))
+        command = self.command()
+        self.assertGreater(abs(command.front_steer), 0.0)
+        self.assertLessEqual(abs(command.front_steer), 0.2)
+        self.node.target_speed_cb(Float32(data=0.0))
+        self.assertEqual(self.command().front_steer, 0.0)
+        self.assertEqual(self.node.steering_smoother.command, 0.0)
+        self.node.steering_smoother.command = 0.6
+        self.node.status_stamp_ns = None
+        self.assert_safe_stop()
+
+    def test_spatial_smoothing_retains_raw_target_during_a_reversal(self):
+        self.parameters['target_smoothing_sigma_m'] = .5
+        self.node.target_speed_cb(Float32(data=20.0))
+        self.command()
+        self.assertEqual(self.node.pure_pursuit.compute.call_count, 2)
+        self.node.pure_pursuit.compute.reset_mock()
+        self.set_path([[0, -1, 2], [10, -1, 3]])
+        self.command()
+        self.assertEqual(self.node.pure_pursuit.compute.call_count, 1)
+        self.assertGreater(self.node.target_smoothing_gate.remaining_m, 0.)
+        self.assertEqual(self.publishers['/control/target_smoothing_offset'].publish.call_args.args[0].data, 0.)
+        self.node.target_speed_cb(Float32(data=0.0))
+        self.command()
+        self.assertEqual(self.node.target_smoothing_gate.remaining_m, 0.)
+        self.node.target_smoothing_gate.remaining_m = 3.
+        self.node.status_stamp_ns = None
+        self.assert_safe_stop()
+        self.assertEqual(self.node.target_smoothing_gate.remaining_m, 0.)
+        self.assertEqual(self.node.steering_smoother.command, 0.0)
+
+    def test_speed_derivative_filter_preserves_target_and_resets_on_stop(self):
+        self.parameters['speed_derivative_filter_time_constant_sec'] = .1
+        self.node.target_speed_cb(Float32(data=20.0))
+        self.command()
+        self.now += 33_333_333
+        self.node.target_speed_cb(Float32(data=19.5))
+        self.command()
+        self.assertEqual(self.node.target_speed_kmh,19.5)
+        self.assertGreater(abs(self.node.speed_pid.raw_derivative),abs(self.node.speed_pid.filtered_derivative))
+        self.node.target_speed_cb(Float32(data=0.0))
+        self.assertEqual(self.command().brake,.65)
+        self.assertEqual(self.node.speed_pid.raw_derivative,0.)
+        self.assertEqual(self.node.speed_pid.filtered_derivative,0.)
+        self.node.speed_pid.filtered_derivative=10.
+        self.node.status_stamp_ns=None
+        self.assert_safe_stop()
+        self.assertEqual(self.node.speed_pid.filtered_derivative,0.)
+
+    def test_speed_anti_windup_uses_real_actuator_limits_and_keeps_stop_priority(self):
+        self.parameters['speed_pid_anti_windup_enabled']=True
+        self.parameters['speed_derivative_filter_time_constant_sec']=.1
+        self.node.target_speed_cb(Float32(data=60.))
+        self.assertEqual(self.command().accel,.6)
+        self.assertEqual(self.node.speed_pid.integral,0.)
+        self.node.target_speed_cb(Float32(data=0.))
+        self.assertEqual(self.command().brake,.65)
+        self.assertEqual(self.node.speed_pid.integral,0.)
+        self.node.speed_pid.filtered_derivative=10.
+        self.node.status_stamp_ns=None
+        self.assert_safe_stop()
+        self.assertEqual(self.node.speed_pid.filtered_derivative,0.)
+
     def test_legacy_lookahead_parameter_supplies_minimum_at_startup(self):
         self.parameter_overrides['lookahead_distance_m'] = 3.0
         self.node = ControlNode()

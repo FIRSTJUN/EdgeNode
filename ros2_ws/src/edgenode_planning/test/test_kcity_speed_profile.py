@@ -1,4 +1,4 @@
-"""60/30/25 policy, independent hard cap, and unchanged physical limits."""
+"""60/40/30 policy, independent hard cap, and unchanged physical limits."""
 from pathlib import Path
 import math
 
@@ -13,7 +13,7 @@ from edgenode_planning.longitudinal_speed_planner import (
 from test_speed_parameters_ros import make_node, change, output, set_geometry
 from test_long_speed_parameters_ros import atomic_service, status, warm
 
-PROFILE=dict(cruise_speed_kmh=60.,curve_speed_kmh=30.,sharp_curve_speed_kmh=25.)
+PROFILE=dict(cruise_speed_kmh=60.,curve_speed_kmh=40.,sharp_curve_speed_kmh=30.)
 
 
 def test_installed_configuration_separates_profile_from_low_speed_default():
@@ -26,11 +26,11 @@ def test_installed_configuration_separates_profile_from_low_speed_default():
     assert base['enable_drive'] is high['enable_drive'] is False
     assert base['max_drive_speed_kmh']==20.
     assert high['max_drive_speed_kmh']==60.
-    assert base['speed_long_preview_enabled'] is False
+    assert base['speed_long_preview_enabled'] is True
     assert high['speed_long_preview_enabled'] is True
 
 
-@pytest.mark.parametrize('curvature,mode,policy',[(0.,'CRUISE',60.),(.05,'CURVE',30.),(.2,'SHARP_CURVE',25.)])
+@pytest.mark.parametrize('curvature,mode,policy',[(0.,'CRUISE',60.),(.05,'CURVE',40.),(.2,'SHARP_CURVE',30.)])
 @pytest.mark.parametrize('cap',[20.,30.,60.])
 def test_atomic_runtime_profile_and_independent_drive_gate(make_node,curvature,mode,policy,cap):
     # Local-only policy isolation. All outputs are mocks in private domain193.
@@ -62,7 +62,7 @@ def test_enabled_global_straight_has_sixty_recommendation_while_stationary_disab
         assert output(node,'target_speed')==0.
 
 
-@pytest.mark.parametrize('level,k,policy',[(1,.05,30.),(2,.2,25.),(2,1/5.04,25.)])
+@pytest.mark.parametrize('level,k,policy',[(1,.05,40.),(2,.2,30.),(2,1/5.04,30.)])
 def test_lateral_cap_can_be_below_each_profile_limit(level,k,policy):
     span=CurveSpan(200.,210.,level,1,k,k*10,3)
     planner=LongitudinalSpeedPlanner(RouteSpeedProfile(1000.,(span,)),SpeedPlanner(**PROFILE))

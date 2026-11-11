@@ -5,6 +5,7 @@ belongs to the future Control integration and is deliberately absent here.
 """
 
 import math
+from bisect import bisect_right
 
 
 _DEGENERATE_LENGTH_M = 1e-9
@@ -32,7 +33,8 @@ class PurePursuit:
         self.max_wheel_angle_rad = max_wheel_angle_rad
 
     def compute(self, local_path_points, vehicle_x, vehicle_y, vehicle_yaw_rad,
-                lookahead_distance_m=2.5):
+                lookahead_distance_m=2.5, target_smoothing_sigma_m=0.0,
+                target_smoothing_max_deviation_m=0.10):
         """Return target/steering diagnostics, or None for unusable input.
 
         Project onto every XY segment and use the closest projection as the
@@ -47,11 +49,14 @@ class PurePursuit:
         line distance from the vehicle, which may differ from the lookahead.
         """
         values = (vehicle_x, vehicle_y, vehicle_yaw_rad, lookahead_distance_m,
-                  self.wheelbase_m, self.max_wheel_angle_rad)
+                  self.wheelbase_m, self.max_wheel_angle_rad,
+                  target_smoothing_sigma_m, target_smoothing_max_deviation_m)
         if not all(_finite_number(value) for value in values):
             return None
         if (self.wheelbase_m <= 0 or self.max_wheel_angle_rad <= 0
                 or lookahead_distance_m <= 0):
+            return None
+        if not 0 <= target_smoothing_sigma_m <= 2.0 or not 0 <= target_smoothing_max_deviation_m <= .2:
             return None
         if not isinstance(local_path_points, (list, tuple)) or len(local_path_points) < 2:
             return None
@@ -122,6 +127,53 @@ class PurePursuit:
 
         if target is None:
             return None
+        raw_target = target.copy()
+        smoothing_offset = 0.0
+        # Spatial convolution follows the nominal raw arc, not a resampled
+        # vertex index or a timer. This makes the result invariant to the
+        # moving Local Path origin. The projection/error stay on the raw path.
+        sigma = float(target_smoothing_sigma_m)
+        if (sigma > 0 and target_smoothing_max_deviation_m > 0
+                and 3*sigma <= target_arc <= total_length-3*sigma):
+            samples, weights = [], []
+            for step in range(-12, 13):
+                arc = target_arc + step*sigma/4
+                index = min(len(lengths)-1, bisect_right(cumulative, arc)-1)
+                while index > 0 and lengths[index] == 0.0:
+                    index -= 1
+                if lengths[index] <= 0:
+                    return None
+                fraction = max(0., min(1., (arc-cumulative[index])/lengths[index]))
+                samples.append([(1-fraction)*a+fraction*b
+                                for a,b in zip(points[index],points[index+1])])
+                weights.append(math.exp(-.5*(step/4)**2))
+            total_weight = math.fsum(weights)
+            smooth_xy = [math.fsum(p[j]*(w/total_weight) for p,w in zip(samples,weights))
+                         for j in (0,1)]
+            offset_x, offset_y = smooth_xy[0]-target[0], smooth_xy[1]-target[1]
+            offset = math.hypot(offset_x, offset_y)
+            if not math.isfinite(offset):
+                return None
+            scale = min(1., target_smoothing_max_deviation_m/offset) if offset else 1.
+            # Preserve the original target when large steering is needed.
+            # Spatial rounding must not delay the tight entry/exit response.
+            raw_dx, raw_dy = target[0]-x, target[1]-y
+            raw_ld2 = raw_dx*raw_dx+raw_dy*raw_dy
+            raw_left = -math.sin(yaw)*raw_dx+math.cos(yaw)*raw_dy
+            raw_steer = abs(math.atan(self.wheelbase_m*2*raw_left/raw_ld2)/self.max_wheel_angle_rad) if raw_ld2 > 1e-12 else 1.
+            transition = max(0., min(1., (raw_steer-.55)/.15))
+            scale *= 1-transition*transition*(3-2*transition)
+            # A support that crosses the vehicle's heading ray anticipates an
+            # S transition. Retain its raw target before the steering sign
+            # actually flips, so rounding cannot delay the exit response.
+            support_left = [-math.sin(yaw)*(p[0]-x)+math.cos(yaw)*(p[1]-y)
+                            for p in samples]
+            crossing = min(max(support_left), -min(support_left))
+            crossing_gain = max(0., min(1., crossing/.02))
+            scale *= 1-crossing_gain*crossing_gain*(3-2*crossing_gain)
+            target[0] += scale*offset_x
+            target[1] += scale*offset_y
+            smoothing_offset = scale*offset
         dx, dy = target[0] - x, target[1] - y
         cos_yaw, sin_yaw = math.cos(yaw), math.sin(yaw)
         forward = cos_yaw * dx + sin_yaw * dy
@@ -141,6 +193,8 @@ class PurePursuit:
         normalized = max(-1.0, min(1.0, angle / max_angle))
         return {
             'target_point': target,
+            'raw_target_point': raw_target,
+            'target_smoothing_offset_m': smoothing_offset,
             'target_arc_m': target_arc,
             'target_distance_m': math.sqrt(ld2),
             'target_forward_m': forward,

@@ -53,11 +53,11 @@ planning_node:
     # Explicit experiment preparation may select up to 60 while drive is off.
     max_drive_speed_kmh: 20.0
     drive_duration_sec: 60.0
-    # Run live_test.py --prepare before enabling drive: the profile alone
-    # does not enable the optional global lateral/braking envelope below.
+    # Policy ceilings; the global lateral/braking envelope can lower all three.
+    # Prepare and verify a bounded trial before enabling drive.
     cruise_speed_kmh: 60.0
-    curve_speed_kmh: 30.0
-    sharp_curve_speed_kmh: 25.0
+    curve_speed_kmh: 40.0
+    sharp_curve_speed_kmh: 30.0
     speed_preview_distance_m: 10.0
     curve_curvature_threshold: 0.025
     sharp_curvature_threshold: 0.07
@@ -65,12 +65,12 @@ planning_node:
     speed_curvature_smoothing_window_m: 2.0
     speed_curvature_persistence_m: 2.0
     # Release margin in 1/m; entry thresholds above are unchanged.
-    # Default release thresholds: CURVE 0.035, SHARP_CURVE 0.095.
+    # With the thresholds above: CURVE release 0.020, SHARP release 0.065.
     speed_curvature_hysteresis: 0.005
 
-    # Experimental global-route speed envelope. Disabled pending MORAI review.
+    # Global-route envelope stays enabled with the 60/40/30 policy.
     # These are planning assumptions, not measured vehicle guarantees.
-    speed_long_preview_enabled: false
+    speed_long_preview_enabled: true
     speed_long_preview_distance_m: 80.0
     speed_plan_deceleration_mps2: 1.5
     speed_plan_reaction_time_sec: 0.5

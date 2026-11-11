@@ -249,6 +249,10 @@ class LongitudinalSpeedPlanner:
         if p.length_m-progress_m <= requested:
             constraints.append((-1,CurveSpan(p.length_m,p.length_m,0,0,0.0,0.0,0),0.0))
         for i,span,cap in constraints:
+            # A neutral curvature constraint must not inhibit clear-road
+            # recovery merely by supplying a curve_id at the cruise ceiling.
+            if i >= 0 and cap >= cruise:
+                continue
             distance = max(0.0,span.entry_m-progress_m)
             budget = self._terminal_settings if i == -1 else cfg
             required = braking_distance(actual_speed_kmh,cap,budget)

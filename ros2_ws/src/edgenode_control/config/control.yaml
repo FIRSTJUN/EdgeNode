@@ -28,11 +28,25 @@ control_node:
 
     # Pure Pursuit is LEFT-positive; MORAI commands are RIGHT-positive.
     steering_sign: -1.0
-    max_front_steer_normalized: 0.70
+    # The 5.04m K-City bend exceeds the measured ~6.58m radius at 0.70.
+    # 0.85 was validated with the lateral/braking envelope enabled.
+    max_front_steer_normalized: 0.85
+    # Shape the converted command using elapsed time, with no hidden LPF state.
+    # Explicit/watchdog stops bypass shaping and clear its history immediately.
+    steering_filter_time_constant_sec: 0.08
+    steering_max_rate_per_sec: 1.5
+    # Optional spatial target smoothing, disabled until the MORAI comparison.
+    # Raw projection/path error and published paths are retained.
+    target_smoothing_sigma_m: 0.0
+    target_smoothing_max_deviation_m: 0.10
+    target_smoothing_reversal_hold_m: 6.0
 
     speed_kp: 0.14
     speed_ki: 0.015
     speed_kd: 0.02
+    # Filter D only; the Planning target and emergency braking stay immediate.
+    speed_derivative_filter_time_constant_sec: 0.10
+    speed_pid_anti_windup_enabled: true
     speed_integral_limit: 12.0
 
     max_accel_cmd: 0.60

@@ -96,6 +96,32 @@ class MapMatcherTest(unittest.TestCase):
         self.assertIsNone(matcher.match(5, 0, 80.0001))
         self.assertIsNone(matcher.match(5, 0, 180))
 
+    def test_closer_abstract_shortcuts_never_steal_a_physical_match(self):
+        for metadata in ({'lazy_init': True}, {'lane_ch_link_path': ['A', 'B']},
+                         {'lazy_init': False, 'lane_ch_link_path': ['A', 'B']}):
+            with self.subTest(metadata=metadata):
+                matcher = self.matcher([
+                    make_link('A', [[0, 0, 0], [10, 0, 0]]),
+                    make_link('shortcut', [[0, .1, 0], [10, .1, 0]], **metadata),
+                ])
+                self.assertEqual(matcher.match(5, .1, 0)['link_id'], 'A')
+                self.assertNotIn('shortcut', matcher.links_by_id)
+
+    def test_matched_link_is_accepted_by_dijkstra_at_restart(self):
+        from edgenode_planning.dijkstra_planner import DijkstraPlanner
+        matcher = self.matcher([
+            make_link('A', [[0, 0, 0], [10, 0, 0]], 'n0', 'n1',
+                      left_lane_change_dst_link_idx='B'),
+            make_link('B', [[10, 0, 0], [20, 0, 0]], 'n1', 'n2'),
+            make_link('A-B', [[0, .1, 0], [20, .1, 0]], 'n0', 'n2', lazy_init=True),
+        ])
+        (Path(self.temp_dir.name)/'node_set.json').write_text(json.dumps([
+            {'idx': 'n'+str(i), 'point': [i*10, 0, 0]} for i in range(3)]))
+        match = matcher.match(5, .1, 0)
+        route = DijkstraPlanner(self.temp_dir.name).plan_route(match['link_id'], ['n2'])
+        self.assertEqual(route['link_ids'], ['A', 'B'])
+        self.assertEqual(route['points'], [[0, 0, 0], [10, 0, 0], [20, 0, 0]])
+
     def test_bbox_search_radius_is_configurable(self):
         matcher = self.matcher(search_radius_m=1.0)
         self.assertIsNotNone(matcher.match(5, 1, 0))

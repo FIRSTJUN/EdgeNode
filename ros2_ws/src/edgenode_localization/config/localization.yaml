@@ -45,7 +45,8 @@ localization_node:
     gps_velocity_std_mps: 0.50
     gps_velocity_min_dt_sec: 0.10
     gps_velocity_max_dt_sec: 0.50
-    gps_velocity_max_mps: 15.0
+    # 72 km/h: accepts 60 km/h plus measurement headroom, still rejects jumps.
+    gps_velocity_max_mps: 20.0
     # header stamp가 없으면 node clock 사용. 시간 기준 전환 구간의 속도는 생략.
     # gps_speed(Float32)는 dt/속도 gate를 통과할 때만 발행 (update 비활성/초기화 전에도 발행).
 

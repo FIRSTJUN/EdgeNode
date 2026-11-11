@@ -39,7 +39,7 @@ class LocalizationNode(Node):
             ('gps_velocity_std_mps', 0.50),
             ('gps_velocity_min_dt_sec', 0.10),
             ('gps_velocity_max_dt_sec', 0.50),
-            ('gps_velocity_max_mps', 15.0),
+            ('gps_velocity_max_mps', 20.0),
             ('imu_yaw_std_deg', 2.0),
             ('initial_position_std_m', 1.0),
             ('initial_yaw_std_deg', 5.0),

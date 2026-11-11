@@ -141,10 +141,11 @@ def _heading_window(trace, left, right):
     return net, total
 
 
-def _distributed_turn(positions, weights):
+def _distributed_turn(positions, weights, minimum_turn_rad=math.radians(8.0),
+                      minimum_bin_rad=math.radians(1.0)):
     """Reject an impulse even when its angle is large or its tails are long."""
     total = math.fsum(weights)
-    if total < math.radians(8.0):
+    if total < minimum_turn_rad:
         return None
     cumulative = []
     value = 0.0
@@ -159,14 +160,17 @@ def _distributed_turn(positions, weights):
     for position, weight in zip(positions, weights):
         index = math.floor(position - positions[0])
         bins[index] = bins.get(index, 0.0) + weight
-    if sum(weight >= math.radians(1.0) for weight in bins.values()) < 2:
+    if sum(weight >= minimum_bin_rad for weight in bins.values()) < 2:
         return None
     return first, last
 
 
-def _heading_evidence(trace):
+def _heading_evidence(trace, *, minimum_turn_rad=math.radians(8.0),
+                      minimum_bin_rad=math.radians(1.0), max_curvature=math.inf):
     best = {'curvature': 0.0, 'anchors': [], 'direction': 0, 'positions': []}
     if trace is None or trace['length'] < 4.0:
+        return best
+    if math.fsum(abs(x) for x in trace['turn']) < minimum_turn_rad:
         return best
     for step in range(int((trace['length'] - 4.0 + 1e-9) / _HEADING_STEP_M) + 1):
         center = 2.0 + step * _HEADING_STEP_M
@@ -178,7 +182,7 @@ def _heading_evidence(trace):
         if abs(net) / total < 0.9:
             width = 4.0
             net, total = _heading_window(trace, center - 2.0, center + 2.0)
-        if total <= 1e-9 or abs(net) / total < 0.9 or abs(net) < math.radians(8.0):
+        if total <= 1e-9 or abs(net) / total < 0.9 or abs(net) < minimum_turn_rad:
             continue
         left, right = center - width / 2.0, center + width / 2.0
         positions, weights, indices = [], [], []
@@ -189,9 +193,9 @@ def _heading_evidence(trace):
                 positions.append(trace['positions'][index])
                 weights.append(weight)
                 indices.append(index)
-        support = _distributed_turn(positions, weights) if positions else None
+        support = _distributed_turn(positions, weights, minimum_turn_rad, minimum_bin_rad) if positions else None
         curvature = abs(net) / width
-        if support is not None and curvature > best['curvature']:
+        if support is not None and best['curvature'] < curvature < max_curvature:
             first, last = support
             best = {'curvature': curvature, 'direction': 1 if net >= 0 else -1,
                     'anchors': [list(trace['xy'][index + 1]) for index in indices[first:last + 1]],
@@ -341,6 +345,44 @@ def _track_curve(points, trace, cue, previous_state, base_level, cue_level, curr
     return max([current_level] + [event['strength'] for event in active]), active
 
 
+def _gentle_chord_support(trace, regions, threshold, persistence_m):
+    """Retain a real tangent change that the impulse rejection cannot resolve.
+
+    Four-metre chords span the driving geometry rather than adjacent dense
+    vertices. Only gentle curvature below the mode threshold is added; the
+    existing sharp-curve evidence and caps remain authoritative. A complete
+    stencil touching a confirmed out-and-return artifact is excluded.
+    """
+    if trace is None:
+        return []
+    offset = round(4.0/_HEADING_STEP_M)
+    xy, grid = trace['xy'], trace['grid']
+    values=[]
+    for i in range(offset,len(xy)-offset):
+        s=grid[i]
+        a,b,c=xy[i-offset],xy[i],xy[i+offset]
+        denominator=math.dist(a,b)*math.dist(b,c)*math.dist(a,c)
+        k=(2*((b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0]))/denominator
+           if denominator>1e-12 else 0.)
+        if (not 1e-6 <= abs(k) < threshold
+                or any(s-4.0<=end and s+4.0>=start for start,end in regions)):
+            k=0.
+        values.append((s,k))
+    result=[];first=None
+    for i in range(len(values)+1):
+        k=values[i][1] if i<len(values) else 0.
+        direction=1 if k>0 else -1 if k<0 else 0
+        old_direction=(1 if values[first][1]>0 else -1) if first is not None else 0
+        if first is not None and direction!=old_direction:
+            if values[i-1][0]-values[first][0]+_HEADING_STEP_M>=persistence_m-1e-9:
+                for s,value in values[first:i]:
+                    result.append((s-_HEADING_STEP_M/2,s+_HEADING_STEP_M/2,
+                                   0,abs(value),old_direction,4))
+            first=None
+        if direction and first is None:first=i
+    return result
+
+
 def curve_support(points, planner):
     """Locate support in a validated <=20m context, without temporal state.
 
@@ -387,13 +429,27 @@ def curve_support(points, planner):
                         result.append((boundaries[j],boundaries[j+1],level,
                                        abs(k),1 if k > 0 else -1,1))
                 first = None
-    if cue['positions'] and cue['curvature'] >= max(1e-6,planner.curve_curvature_threshold):
-        ps = [s for s in cue['positions'] if not any(a <= s <= b for a,b in regions)]
+    # Heading evidence can rescue a genuine gentle bend whose isolated vertex
+    # turns disappear in the median. Physics applies below the mode threshold
+    # too; otherwise a 60km/h CRUISE can bypass the lateral envelope entirely.
+    gentle = _heading_evidence(trace,minimum_turn_rad=math.radians(2.0),
+                               minimum_bin_rad=math.radians(.25),
+                               max_curvature=planner.curve_curvature_threshold)
+    # At 60km/h, even 2.5deg over 8m reaches the 1.5m/s^2 budget.
+    # This extra cue only supplies level-zero physics (>=~28km/h here).
+    # Discrete mode classification, its 8deg cue, and outlier checks stay intact.
+    for evidence in [cue]+([gentle] if gentle != cue else []):
+        if not evidence['positions'] or evidence['curvature'] < 1e-6:
+            continue
+        ps = [s for s in evidence['positions'] if not any(a <= s <= b for a,b in regions)]
         if ps:
             result.append((max(0.0,min(ps)-_HEADING_STEP_M/2),
                            min(arcs[-1],max(ps)+_HEADING_STEP_M/2),
-                           2 if cue['curvature'] >= planner.sharp_curvature_threshold else 1,
-                           cue['curvature'],cue['direction'],2))
+                           2 if evidence['curvature'] >= planner.sharp_curvature_threshold
+                           else 1 if evidence['curvature'] >= planner.curve_curvature_threshold else 0,
+                           evidence['curvature'],evidence['direction'],2))
+    result.extend(_gentle_chord_support(trace,regions,planner.curve_curvature_threshold,
+                                        planner.curvature_persistence_m))
     return result
 
 

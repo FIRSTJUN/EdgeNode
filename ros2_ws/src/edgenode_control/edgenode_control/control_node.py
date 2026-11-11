@@ -10,6 +10,8 @@ from morai_ros2_msgs.msg import CtrlCmd, EgoVehicleStatus
 from edgenode_control.dynamic_lookahead import calculate_lookahead_distance
 from edgenode_control.pure_pursuit import PurePursuit
 from edgenode_control.steering_command import to_morai_front_steer
+from edgenode_control.steering_smoother import SteeringSmoother
+from edgenode_control.target_smoothing_gate import TargetSmoothingGate
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -24,28 +26,65 @@ class PID:
         self.integral_limit = abs(integral_limit)
         self.integral = 0.0
         self.prev_error = None
+        self.raw_derivative = 0.0
+        self.filtered_derivative = 0.0
 
     def reset(self):
         self.integral = 0.0
         self.prev_error = None
+        self.raw_derivative = 0.0
+        self.filtered_derivative = 0.0
 
-    def update(self, error: float, dt: float) -> float:
+    def update(self, error: float, dt: float,
+               derivative_filter_time_constant_sec: float = 0.0, *, output_limits=None):
+        """Filter only the error derivative; preserve P/I and the safety target.
+
+        A zero time constant retains the legacy calculation exactly. The
+        previous filtered derivative is the sole filter state and resets with
+        the PID, so no delayed braking command survives a stop.
+        """
+        tau = derivative_filter_time_constant_sec
+        try:
+            valid = all(not isinstance(v, bool) and isinstance(v, (int, float))
+                        and math.isfinite(v) for v in (error, dt, tau))
+        except OverflowError:
+            valid = False
+        if not valid or not 0 <= tau <= 2.0:
+            return None
+        if output_limits is not None:
+            if (not isinstance(output_limits,(tuple,list)) or len(output_limits)!=2
+                    or not all(isinstance(v,(int,float)) and not isinstance(v,bool)
+                               and math.isfinite(v) for v in output_limits)
+                    or not output_limits[0]<0<output_limits[1]):
+                return None
         if dt <= 1e-6:
             dt = 1e-3
 
-        self.integral += error * dt
-        self.integral = clamp(
-            self.integral, -self.integral_limit, self.integral_limit)
+        next_integral = clamp(self.integral+error*dt,-self.integral_limit,self.integral_limit)
 
         derivative = 0.0
         if self.prev_error is not None:
             derivative = (error - self.prev_error) / dt
         self.prev_error = error
+        self.raw_derivative = derivative
+        self.filtered_derivative = (derivative if tau == 0.0 else
+            self.filtered_derivative + dt / (tau + dt) * (derivative-self.filtered_derivative))
+        if output_limits is not None:
+            effort=self.kp*error+self.ki*next_integral+self.kd*self.filtered_derivative
+            pushing=(effort>output_limits[1] and error>0 or effort<output_limits[0] and error<0)
+            if pushing:
+                # Freeze accumulation into saturation, but let opposite-sign
+                # history unwind to zero rather than retain a throttle bias.
+                if self.integral*error<0:
+                    next_integral=math.copysign(max(0.,abs(self.integral)-abs(error*dt)),self.integral)
+                else:
+                    next_integral=self.integral
+        self.integral=next_integral
 
         return (
             self.kp * error +
             self.ki * self.integral +
-            self.kd * derivative
+            self.kd * self.filtered_derivative
         )
 
 
@@ -84,9 +123,16 @@ class ControlNode(Node):
             ('lookahead_preview_time_sec', 0.45),
             ('steering_sign', -1.0),
             ('max_front_steer_normalized', 0.70),
+            ('steering_filter_time_constant_sec', 0.0),
+            ('steering_max_rate_per_sec', 0.0),
+            ('target_smoothing_sigma_m', 0.0),
+            ('target_smoothing_max_deviation_m', 0.10),
+            ('target_smoothing_reversal_hold_m', 6.0),
             ('speed_kp', 0.14),
             ('speed_ki', 0.015),
             ('speed_kd', 0.02),
+            ('speed_derivative_filter_time_constant_sec', 0.0),
+            ('speed_pid_anti_windup_enabled', False),
             ('speed_integral_limit', 12.0),
             ('max_accel_cmd', 0.60),
             ('max_brake_cmd', 0.80),
@@ -120,6 +166,8 @@ class ControlNode(Node):
             float(self.get_parameter('speed_kd').value),
             float(self.get_parameter('speed_integral_limit').value),
         )
+        self.steering_smoother = SteeringSmoother()
+        self.target_smoothing_gate = TargetSmoothingGate()
 
         self.create_subscription(
             Float32, self.get_parameter('target_error_topic').value,
@@ -154,6 +202,12 @@ class ControlNode(Node):
 
         self.lookahead_distance_pub = self.create_publisher(
             Float32, '/control/lookahead_distance', 10)
+        self.target_smoothing_offset_pub = self.create_publisher(
+            Float32, '/control/target_smoothing_offset', 10)
+        self.speed_pid_d_raw_pub = self.create_publisher(Float32, '/control/speed_pid_d_raw', 10)
+        self.speed_pid_d_filtered_pub = self.create_publisher(Float32, '/control/speed_pid_d_filtered', 10)
+        self.speed_pid_effort_pub = self.create_publisher(Float32, '/control/speed_pid_effort', 10)
+        self.speed_pid_i_pub = self.create_publisher(Float32, '/control/speed_pid_i', 10)
 
         rate = max(1.0, float(self.get_parameter('control_rate_hz').value))
         self.create_timer(1.0 / rate, self.control_loop)
@@ -240,6 +294,7 @@ class ControlNode(Node):
             return
 
         # Pure Pursuit is LEFT-positive; MORAI sign conversion happens here.
+        sigma = self.get_parameter('target_smoothing_sigma_m').value
         result = self.pure_pursuit.compute(
             self.local_path_points, *self.latest_pose,
             lookahead_distance_m=lookahead_distance_m,
@@ -248,10 +303,24 @@ class ControlNode(Node):
             self.publish_safe_stop()
             self.speed_pid.reset()
             return
+        if sigma != 0.0:
+            allow = self.target_smoothing_gate.update(result['steering_normalized'],
+                self.current_speed_kmh/3.6*max(0.,min(dt,.1)),
+                self.get_parameter('target_smoothing_reversal_hold_m').value)
+            if allow is None:
+                self.publish_safe_stop(); self.speed_pid.reset(); return
+            if allow:
+                result = self.pure_pursuit.compute(self.local_path_points, *self.latest_pose,
+                    lookahead_distance_m=lookahead_distance_m,
+                    target_smoothing_sigma_m=sigma,
+                    target_smoothing_max_deviation_m=self.get_parameter('target_smoothing_max_deviation_m').value)
+                if result is None:
+                    self.publish_safe_stop(); self.speed_pid.reset(); return
         # Record the arc lookahead passed to Pure Pursuit, not target XY range.
         lookahead_msg = Float32()
         lookahead_msg.data = float(lookahead_distance_m)
         self.lookahead_distance_pub.publish(lookahead_msg)
+        self.target_smoothing_offset_pub.publish(Float32(data=float(result['target_smoothing_offset_m'])))
 
         path_error_msg = Float32()
         path_error_msg.data = float(result['nearest_distance_m'])
@@ -284,13 +353,39 @@ class ControlNode(Node):
             accel = 0.0
             brake = 0.65
             front_steer = 0.0
+            pedal = 0.0
+            self.steering_smoother.reset()
+            self.target_smoothing_gate.reset()
         else:
+            front_steer = self.steering_smoother.update(
+                front_steer, dt,
+                self.get_parameter('steering_filter_time_constant_sec').value,
+                self.get_parameter('steering_max_rate_per_sec').value,
+                self.get_parameter('max_front_steer_normalized').value,
+            )
+            if front_steer is None:
+                self.publish_safe_stop()
+                self.speed_pid.reset()
+                return
             # Longitudinal PID in km/h -> normalized pedal command.
             speed_error = self.target_speed_kmh - self.current_speed_kmh
-            pedal = self.speed_pid.update(speed_error, dt)
-
+            derivative_tau = self.get_parameter('speed_derivative_filter_time_constant_sec').value
             max_accel = float(self.get_parameter('max_accel_cmd').value)
             max_brake = float(self.get_parameter('max_brake_cmd').value)
+            anti_windup = self.get_parameter('speed_pid_anti_windup_enabled').value
+            if not isinstance(anti_windup,bool):
+                self.publish_safe_stop()
+                self.speed_pid.reset()
+                return
+            if anti_windup:
+                pedal=self.speed_pid.update(speed_error,dt,derivative_tau,output_limits=(-max_brake,max_accel))
+            else:
+                pedal = (self.speed_pid.update(speed_error, dt) if derivative_tau == 0.0 else
+                         self.speed_pid.update(speed_error, dt, derivative_tau))
+            if pedal is None or not math.isfinite(pedal):
+                self.publish_safe_stop()
+                self.speed_pid.reset()
+                return
 
             accel = clamp(pedal, 0.0, max_accel)
             brake = clamp(-pedal, 0.0, max_brake)
@@ -305,8 +400,18 @@ class ControlNode(Node):
         cmd.velocity = 0.0
         cmd.acceleration = 0.0
         self.ctrl_pub.publish(cmd)
+        self.speed_pid_d_raw_pub.publish(Float32(data=float(self.speed_pid.kd*self.speed_pid.raw_derivative)))
+        self.speed_pid_d_filtered_pub.publish(Float32(data=float(self.speed_pid.kd*self.speed_pid.filtered_derivative)))
+        self.speed_pid_effort_pub.publish(Float32(data=float(pedal)))
+        self.speed_pid_i_pub.publish(Float32(data=float(self.speed_pid.ki*self.speed_pid.integral)))
 
     def publish_safe_stop(self):
+        self.steering_smoother.reset()
+        self.target_smoothing_gate.reset()
+        self.speed_pid_d_raw_pub.publish(Float32(data=0.0))
+        self.speed_pid_d_filtered_pub.publish(Float32(data=0.0))
+        self.speed_pid_effort_pub.publish(Float32(data=0.0))
+        self.speed_pid_i_pub.publish(Float32(data=0.0))
         cmd = CtrlCmd()
         cmd.header.stamp = self.get_clock().now().to_msg()
         cmd.longl_cmd_type = 1

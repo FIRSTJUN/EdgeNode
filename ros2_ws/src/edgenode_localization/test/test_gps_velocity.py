@@ -18,7 +18,8 @@ from edgenode_localization.localization_node import LocalizationNode
 class TestGPSVelocity(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        rclpy.init(args=[])
+        # Regression nodes must never join the running MORAI autonomy graph.
+        rclpy.init(args=[], domain_id=194)
 
     @classmethod
     def tearDownClass(cls):
@@ -80,7 +81,7 @@ class TestGPSVelocity(unittest.TestCase):
             (99_999_999, 0.5, False), (500_000_001, 2.5, False),
             (0, 0.0, False), (-100_000_000, 0.5, False),
             (200_000_000, 0.0, True), (200_000_000, 3.0, True),
-            (200_000_000, 3.001, False),
+            (200_000_000, 4.0, True), (200_000_000, 4.001, False),
         ]
         for dt_ns, distance, accepted in cases:
             with self.subTest(dt_ns=dt_ns, distance=distance):
@@ -107,6 +108,28 @@ class TestGPSVelocity(unittest.TestCase):
         self.assertEqual(self.node.gps_odometry_publisher.publish.call_count, 1)
         self.gps(1.0, 0.0, 1_200_000_000)
         self.assertEqual(self.speeds(), [5.0])
+
+    def test_sixty_kmh_updates_velocity_and_preserves_finite_covariance(self):
+        self.node.ekf.initialize(0.0, 0.0, 0.0)
+        for i in range(100):
+            self.node.ekf.predict(gyro_z=0.0, dt=0.2)
+            self.gps(i * (60.0 / 3.6) * 0.2, 0.0,
+                     1_000_000_000 + i * 200_000_000)
+        self.assertEqual(len(self.speeds()), 99)
+        self.assertAlmostEqual(self.speeds()[-1], 60.0 / 3.6, places=5)
+        self.assertAlmostEqual(self.node.ekf.get_state()[3], 60.0 / 3.6, places=2)
+        covariance = self.node.ekf.get_covariance()
+        self.assertTrue(np.isfinite(covariance).all())
+        self.assertGreaterEqual(np.linalg.eigvalsh(covariance).min(), 0.0)
+
+    def test_configured_legacy_gate_still_rejects_sixty_kmh(self):
+        self.node.gps_velocity_max_mps = 15.0
+        self.node.ekf.initialize(0.0, 0.0, 0.0)
+        self.gps(0.0, 0.0, 1_000_000_000)
+        with patch.object(self.node.ekf, 'update_velocity') as update:
+            self.gps((60.0 / 3.6) * 0.2, 0.0, 1_200_000_000)
+        update.assert_not_called()
+        self.assertEqual(self.speeds(), [])
 
     def test_nonfinite_derived_speed_is_rejected(self):
         self.node.ekf.initialize(0.0, 0.0, 0.0)
