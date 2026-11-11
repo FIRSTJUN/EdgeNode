@@ -37,10 +37,10 @@ def run(speed=3.,side='left',radius=math.inf,origin=(0.,0.),yaw=0.,lateral_error
         heading_error=0.,periods=(.05,),delay_steps=0,brake_to_default=False,
         disappear=False,interrupt_confirmation=False,duration=110.,
         reference_horizon_m=50.,observation_range_m=None):
-    lanes,area,point,obstacle=world(side,radius=radius,origin=origin,yaw=yaw)
+    lanes, point, obstacle =world(side,radius=radius,origin=origin,yaw=yaw)
     config=production_config()
     if not brake_to_default:config=replace(config,avoid_speed_kmh=speed)
-    planner=StaticObstaclePlanner(lanes,drivable_area=area,config=config)
+    planner=StaticObstaclePlanner(lanes,config=config)
     local=LocalPathPlanner();pp=PurePursuit(config.wheelbase_m,config.max_wheel_angle_rad)
     original=lanes.links['O0']['points']+lanes.links['O1']['points'][1:]
     obstacles=[obstacle()];static_obstacles=tuple(tuple(p) for p in obstacle())
@@ -73,7 +73,7 @@ def run(speed=3.,side='left',radius=math.inf,origin=(0.,0.),yaw=0.,lateral_error
                 for x,y in static_obstacles)<=observation_range_m
             observations=obstacles if visible and not (disappear and now>1.) else []
             result=planner.plan(reference['points'],observations,
-                measurement,speed_kmh=velocity*3.6,actual_curvature=measured_turn,
+                measurement,speed_kmh=velocity*3.6,actual_curvature=measured_turn,now_sec=now,global_reference=original,
                 current_link_id='O0' if (planner.pair is None or planner.pair.original_index.project(measurement)<50.) else 'A1',
                 route_link_ids=['O0','O1'])
             timings.append((time.perf_counter()-started)*1000);plans+=1
@@ -82,7 +82,7 @@ def run(speed=3.,side='left',radius=math.inf,origin=(0.,0.),yaw=0.,lateral_error
                 if id(planner.selected.entry_path) not in entry_objects:
                     max_planned_curvature=max(max_planned_curvature,max(map(abs,curvatures(planner.selected.points))))
                 entry_objects.add(id(planner.selected.entry_path))
-                if planner.state=='RETURN':return_objects.add(id(planner.selected.return_path))
+                if planner.state=='RETURN' and planner.selected.return_path:return_objects.add(id(planner.selected.return_path))
             next_plan+=periods[(plans-1)%len(periods)]
             if result['blocked']:
                 failure=dict(reason=result['reason'],pose=pose,t=now,
@@ -111,7 +111,7 @@ def run(speed=3.,side='left',radius=math.inf,origin=(0.,0.),yaw=0.,lateral_error
         actual_curvature=math.tan(wheel_angle)/config.wheelbase_m
         next_pose=bicycle_step(pose,actual_curvature,velocity*dt)
         swept=swept_body(planner.body,pose,next_pose)
-        inside=area.covers(swept)
+        inside=None
         clearance=polygon_distance(swept,static_obstacles)
         min_clearance=min(min_clearance,clearance)
         index=PolylineIndex(active_path);s=index.project(pose[:2]);reference=sample(active_path,s)
@@ -123,8 +123,8 @@ def run(speed=3.,side='left',radius=math.inf,origin=(0.,0.),yaw=0.,lateral_error
         rows.append(dict(t=now,pose=pose,next_pose=next_pose,state=result['state'],
             speed_kmh=velocity*3.6,curvature=actual_curvature,steering=applied,
             inside=inside,body_clearance_m=clearance,wheel_rate_radps=wheel_rate))
-        if not inside or clearance<=config.obstacle_margin_m:
-            failure=dict(reason='ACTUAL_DRIVABLE_AREA' if not inside else 'ACTUAL_BODY_COLLISION',pose=next_pose,t=now+dt);break
+        if clearance<=config.obstacle_margin_m:
+            failure=dict(reason='ACTUAL_BODY_COLLISION',pose=next_pose,t=now+dt);break
         pose=next_pose;measurements.append(pose);turn_history.append(actual_curvature);distance+=velocity*dt
         if brake_to_default and result.get('speed_cap_kmh') is not None:
             target=result['speed_cap_kmh']/3.6

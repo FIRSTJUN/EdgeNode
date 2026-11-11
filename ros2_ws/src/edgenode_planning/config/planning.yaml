@@ -75,19 +75,16 @@ planning_node:
     s4_sensor_max_source_age_sec: 0.6
     s4_sensor_future_tolerance_sec: 0.05
 
-    # Generic avoidance uses verified external road cells only. Empty means
-    # unknown boundary: candidates remain diagnostic and avoidance stops.
-    avoidance_boundary_file: ""
-    # No reviewed real-map release exists. S4 rejects nonempty files without
-    # this exact operator-approved pin and an exact MGeo revision binding.
-    avoidance_boundary_approved_sha256: ""
+    # Four independent stages; return is planned after timed safe hold.
     avoidance_observation_timeout_sec: 0.6
     avoidance_transition_lengths_m: [12.0, 16.0, 20.0]
     avoidance_prediction_distance_m: 80.0
     avoidance_obstacle_margin_m: 0.25
+    avoidance_observation_padding_m: 0.05
     avoidance_reference_clearance_m: 1.20
     avoidance_return_margin_m: 0.5
-    avoidance_road_margin_m: 0.0
+    avoidance_hold_duration_s: 3.0
+    avoidance_hold_clearance_m: 1.0
     avoidance_avoid_speed_kmh: 3.0
     avoidance_deceleration_mps2: 2.0
     avoidance_reaction_time_s: 0.3

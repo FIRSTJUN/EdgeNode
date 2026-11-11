@@ -1,7 +1,7 @@
 # S4 Stage 4: distance admission and separate previews
 
 This stage does not authorize real avoidance. `enable_drive=false` remains in
-both normal and S4 configurations. No real DrivableArea, crossing authorization
+both normal and S4 configurations. No real crossing authorization
 or sensor range evidence is generated. Normal mode's Dijkstra, original 20 m
 local extraction, Pure Pursuit, PID, and speed settings remain unchanged.
 
@@ -103,7 +103,7 @@ road curvature and operating scope; forward distance alone is insufficient.
 Unknown/occluded parts cannot be called free. Verify the effective running
 producer/Control parameters against these files before approving evidence;
 this offline file binding does not attest another process's runtime overrides.
-A sensor report never substitutes for separate real-map DrivableArea approval
+A sensor report never substitutes for MGeo lane-change permission
 or explicit lane crossing approval. Test reports are synthetic temporary
 fixtures, not deployable map/sensor approval artifacts.
 

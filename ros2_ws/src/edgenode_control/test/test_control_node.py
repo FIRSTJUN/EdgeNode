@@ -103,6 +103,18 @@ class ControlNodeTest(unittest.TestCase):
         self.assertEqual(self.node.speed_pid.integral, 0.0)
         self.assertIsNone(self.node.speed_pid.prev_error)
 
+    def test_opt_in_steering_slew_retains_immediate_stop(self):
+        self.parameters['steering_slew_limit_radps']=.6
+        self.set_path([(0.,0.,0.),(5.,2.,0.),(10.,4.,0.)])
+        self.node.control_loop()
+        first=self.publisher.publish.call_args.args[0].front_steer
+        self.assertLessEqual(abs(first)*self.parameters['max_wheel_angle_rad'],.6*.1+1e-9)
+        self.node.target_speed_kmh=0.
+        self.now+=33_333_333;self.node.control_loop()
+        cmd=self.publisher.publish.call_args.args[0]
+        self.assertEqual(cmd.front_steer,0.)
+        self.assertGreater(cmd.brake,0.)
+
     def test_constructor_creates_new_subscriptions_and_default_parameters(self):
         self.subscriptions.assert_any_call(
             Path, '/planning/local_path', self.node.local_path_cb, 10,

@@ -186,3 +186,20 @@ def test_near_front_npc_keeps_cluster_and_footprint(config, distance):
     assert cluster.point_count == 64
     np.testing.assert_allclose(cluster.center_xyz, [distance, 0.0, -0.472], atol=1e-12)
     assert len(cluster.footprint_xy()) == 8
+
+
+
+def test_oriented_wall_footprint_contains_returns_without_filling_nearby_lane():
+    import numpy as np
+    from edgenode_perception.lidar_obstacles import oriented_bounds,LidarCluster
+    direction=np.array((.8,.6));normal=np.array((-.6,.8))
+    points=np.array([s*direction+w*normal for s in range(21) for w in (-.1,.1)])
+    corners=oriented_bounds(points)
+    cluster=LidarCluster((0.,0.,0.),tuple(points.min(axis=0)),tuple(points.max(axis=0)),len(points),corners)
+    footprint=cluster.footprint_xy()
+    assert len(footprint)==8
+    # The long observed wall is 0.2 m thick, independent of sensor yaw.
+    local=(np.array(corners)@normal)
+    assert local.max()-local.min()<.201
+    for p in points:
+        assert all(np.cross(np.array(b)-a,p-a)>=-1e-9 for a,b in zip(np.array(corners),np.roll(corners,-1,axis=0)))

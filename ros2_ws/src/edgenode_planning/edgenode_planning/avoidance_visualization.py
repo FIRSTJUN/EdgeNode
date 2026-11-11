@@ -53,7 +53,7 @@ def candidate_markers(result, stamp, previous_ids=()):
     if reference:
         p=reference[0];state.pose.position.x=float(p[0]);state.pose.position.y=float(p[1]);state.pose.position.z=2.
     state.color.r,state.color.g,state.color.b=(1.,.3,.1) if result['blocked'] else (.2,1.,.4)
-    state.text=f'{result["state"]} lane={result.get("selected_lane","")} {result.get("reason","")}'
+    state.text=f'{result.get("stage",result["state"])} lane={result.get("selected_lane","")} {result.get("reason","")}'
     markers.append(state)
     for index in set(previous_ids)-active:
         m=Marker();m.header.frame_id='map';m.header.stamp=stamp

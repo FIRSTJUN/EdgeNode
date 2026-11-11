@@ -21,3 +21,13 @@ def to_morai_front_steer(steering_normalized, steering_sign=-1.0,
     if not math.isfinite(command):
         return None
     return max(-max_front_steer_normalized, min(max_front_steer_normalized, command))
+
+
+def limit_steering_change(requested,previous,rate,dt):
+    """Bound wheel-angle change; zero rate preserves the existing command."""
+    if (any(isinstance(v,bool) or not isinstance(v,(int,float)) or not math.isfinite(v)
+            for v in (requested,previous,rate,dt)) or rate<0 or dt<=0):
+        return None
+    if rate==0:return requested
+    step=rate*dt
+    return previous+max(-step,min(step,requested-previous))

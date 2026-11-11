@@ -23,7 +23,7 @@ PLANNING_TOPICS=('target_error','target_speed','state','current_link','map_match
     'drive_status','fsm_state','runtime_cruise_speed','runtime_curve_speed','runtime_sharp_curve_speed',
     'runtime_max_drive_speed','obstacles','avoidance_state','avoidance_debug','lattice_candidate_markers',
     'original_lane_center','left_lane_center','right_lane_center','avoidance_selected_path',
-    'avoidance_return_path','reset_avoidance')
+    'avoidance_return_path','avoidance_stage','reset_avoidance')
 
 
 @pytest.fixture
@@ -44,7 +44,7 @@ def node(route_editor_map, request):
         for name in list(value.__dict__):
             if name.endswith('_pub'):setattr(value,name,Mock())
         value._avoidance_path_publishers={name:Mock() for name in value._avoidance_path_publishers}
-        lanes,area,point,obstacle=world()
+        lanes, point, obstacle =world()
         value.avoidance_planner=StaticObstaclePlanner(lanes)
         value.dijkstra_planner.plan=Mock(return_value=dict(points=lanes.links['O0']['points']+
             lanes.links['O1']['points'][1:],link_ids=['O0','O1']))
@@ -57,7 +57,7 @@ def node(route_editor_map, request):
         value.latest_pose=(0.,0.,0.);value.latest_speed_kmh=3.
         value.latest_pose_stamp_ns=1
         value.latest_pose_received_ns=value.get_clock().now().nanoseconds
-        value.test_area=area;value.test_obstacle=obstacle
+        value.test_obstacle=obstacle
         yield value
     finally:
         if value is not None:value.destroy_node()
@@ -92,26 +92,9 @@ def test_no_obstacle_keeps_original_global_and_local_path_without_boundary_data(
     assert output(node,'global_path').poses
 
 
-def test_unknown_boundary_produces_candidates_diagnostics_empty_path_and_emergency(node):
-    arm_isolated_node(node);detect(node);node.plan()
-    debug=json.loads(output(node,'avoidance_debug').data)
-    assert output(node,'avoidance_state').data=='BLOCKED'
-    assert debug['reason']=='ROAD_BOUNDARY_UNAVAILABLE'
-    assert debug['candidates'] and all(c['rejection'] for c in debug['candidates'])
-    assert not output(node,'local_path').poses
-    assert output(node,'target_speed').data==0.
-    assert output(node,'fsm_state').data=='EMERGENCY_STOP'
-    markers=output(node,'candidate').markers
-    assert any(m.points for m in markers) and any('ROAD_BOUNDARY_UNAVAILABLE' in m.text for m in markers)
-    global_before=output(node,'global_path')
-    detect(node,[],stamp=2.);node.plan()
-    assert output(node,'target_speed').data==0.
-    assert [p.pose.position for p in output(node,'global_path').poses]==[p.pose.position for p in global_before.poses]
-    node.dijkstra_planner.plan.assert_called_once()
 
 
 def test_verified_synthetic_road_selects_only_local_avoidance_and_caps_high_speed_request(node):
-    node.avoidance_planner.drivable_area=node.test_area
     node.set_parameters([Parameter('local_path_length_m',value=50.)])
     detect(node,node.test_obstacle());node.plan()  # Initial geometry validation while disarmed.
     node.latest_pose_received_ns=node.get_clock().now().nanoseconds
@@ -121,6 +104,10 @@ def test_verified_synthetic_road_selects_only_local_avoidance_and_caps_high_spee
     # closed-loop benchmarks record actual execution time without this mock.
     with patch('edgenode_planning.planning_node.time.perf_counter',return_value=0.):
         arm_isolated_node(node);node.plan()
+        for _ in range(3):
+            node.latest_pose_stamp_ns+=1
+            node.latest_pose_received_ns=node.get_clock().now().nanoseconds
+            node.plan()
         assert output(node,'avoidance_state').data=='AVOID_ENTRY'
         assert output(node,'target_speed').data==3.
         assert output(node,'fsm_state').data=='OBSTACLE_AVOID'
@@ -169,22 +156,20 @@ def test_invalid_obstacle_observation_is_not_silently_converted_to_free_space(no
 
 
 def test_reset_requires_disabled_drive_and_cannot_erase_hazard_while_armed(node):
-    detect(node);node.plan();assert node.avoidance_planner.state=='BLOCKED'
+    detect(node);node.plan();assert node.avoidance_planner.state=='DETECT'
     arm_isolated_node(node)
     response=node.reset_avoidance(Trigger.Request(),Trigger.Response())
-    assert not response.success and node.avoidance_planner.state=='BLOCKED'
+    assert not response.success and node.avoidance_planner.state=='DETECT'
     node.set_parameters([Parameter('enable_drive',value=False)])
     response=node.reset_avoidance(Trigger.Request(),Trigger.Response())
     assert response.success and node.avoidance_planner.state=='NORMAL'
-    node.plan();assert node.avoidance_planner.state=='BLOCKED'
+    node.plan();assert node.avoidance_planner.state=='DETECT'
 
 
-@pytest.mark.parametrize('known_road',[False,True])
-def test_route_edit_cannot_erase_committed_path_obstacle_memory_or_latched_stop(node,known_road):
-    if known_road:node.avoidance_planner.drivable_area=node.test_area
+def test_route_edit_cannot_erase_committed_path_obstacle_memory_or_latched_stop(node):
     node.set_parameters([Parameter('local_path_length_m',value=50.)])
     detect(node,node.test_obstacle());node.plan()
-    assert node.avoidance_planner.state==('AVOID_ENTRY' if known_road else 'BLOCKED')
+    assert node.avoidance_planner.state=='DETECT'
     remembered=node.avoidance_planner.remembered
     detect(node,[],stamp=2.)
     node.set_parameters([Parameter('goal_node_id',value='E')]);node.plan()
@@ -203,7 +188,7 @@ def test_normal_cruise_is_not_permanently_reduced_and_match_loss_breaks_confirma
 
 
 def test_safety_parameters_are_read_only_and_cannot_be_loosened_by_live_updates(node):
-    results=node.set_parameters([Parameter('avoidance_road_margin_m',value=-1.)])
+    results=node.set_parameters([Parameter('avoidance_obstacle_margin_m',value=-1.)])
     assert not results[0].successful
 
 
@@ -222,7 +207,6 @@ def test_degenerate_footprint_remains_latched_after_fresh_empty_observation(node
 
 
 def test_candidate_search_stops_before_computation_and_requires_distinct_fresh_odometry(node):
-    node.avoidance_planner.drivable_area=node.test_area
     node.latest_speed_kmh=0.
     node.set_parameters([Parameter('local_path_length_m',value=50.)])
     arm_isolated_node(node)
@@ -246,7 +230,6 @@ def test_candidate_search_stops_before_computation_and_requires_distinct_fresh_o
 
 
 def test_slow_armed_cycle_cannot_publish_a_motion_path_computed_on_stale_pose(node):
-    node.avoidance_planner.drivable_area=node.test_area
     node.set_parameters([Parameter('local_path_length_m',value=50.)])
     detect(node,node.test_obstacle());node.plan()
     node.latest_pose_received_ns=node.get_clock().now().nanoseconds
@@ -278,3 +261,40 @@ def test_baseline_without_s4_mode_ignores_sensor_health_and_keeps_normal_speed(n
     assert output(node, 'target_speed').data == 20.
     assert [p.pose.position for p in output(node, 'local_path').poses] == original
     node.dijkstra_planner.plan.assert_called_once()
+
+
+def test_stationary_ekf_roundoff_is_not_reverse_motion(node):
+    msg=Odometry();msg.header.frame_id='map';msg.pose.pose.orientation.w=1.
+    msg.header.stamp=node.get_clock().now().to_msg();msg.twist.twist.linear.x=-1e-10
+    node.localization_callback(msg)
+    assert node.latest_speed_kmh==0.
+
+
+def test_native_morai_measured_steering_drives_rollout_curvature(node):
+    from morai_ros2_msgs.msg import EgoVehicleStatus
+    node._use_ego_status=True
+    msg=EgoVehicleStatus();msg.front_steer_angle=.7;msg.velocity.x=.5
+    node.ego_status_callback(msg)
+    expected=-math.tan(math.radians(.7))/node.avoidance_planner.config.wheelbase_m
+    assert node.latest_turn_curvature==pytest.approx(expected)
+    assert node.latest_speed_kmh==pytest.approx(1.8)
+    odom=Odometry();odom.header.frame_id='map';odom.pose.pose.orientation.w=1.
+    odom.header.stamp=node.get_clock().now().to_msg();odom.twist.twist.linear.x=.01
+    odom.twist.twist.angular.z=.004
+    node.localization_callback(odom)
+    assert node.latest_turn_curvature==pytest.approx(expected)
+    assert node.latest_speed_kmh==pytest.approx(1.8)
+
+
+def test_validation_interlock_retains_independent_detection_stage(node):
+    node.set_parameters([Parameter('local_path_length_m',value=50.)])
+    with patch('edgenode_planning.planning_node.time.perf_counter',return_value=0.):
+        arm_isolated_node(node);detect(node,node.test_obstacle());node.plan()
+        assert output(node,'avoidance_state').data=='VALIDATING'
+        assert output(node,'avoidance_stage').data=='DETECT'
+        debug=json.loads(output(node,'avoidance_debug').data)
+        assert debug['stage']=='DETECT' and debug['generated_transition_count']==0
+        assert not output(node,'local_path').poses
+        node.plan()
+        assert output(node,'avoidance_stage').data=='AVOID_ENTRY'
+        assert node.avoidance_planner.return_commits==0

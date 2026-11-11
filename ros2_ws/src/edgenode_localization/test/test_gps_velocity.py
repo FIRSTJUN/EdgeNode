@@ -47,6 +47,19 @@ class TestGPSVelocity(unittest.TestCase):
     def speeds(self):
         return [call.args[0].data for call in self.node.gps_speed_publisher.publish.call_args_list]
 
+    def test_duplicate_or_backward_imu_does_not_publish_fresh_odometry(self):
+        self.node.ekf.initialize(0.,0.,0.)
+        msg=Imu();msg.orientation.w=1.;msg.header.stamp.sec=1
+        self.node.imu_callback(msg)
+        before=self.node.odometry_publisher.publish.call_count
+        self.node.imu_callback(msg)
+        msg.header.stamp.sec=0;msg.header.stamp.nanosec=900_000_000
+        self.node.imu_callback(msg)
+        self.assertEqual(self.node.odometry_publisher.publish.call_count,before)
+        msg.header.stamp.sec=1;msg.header.stamp.nanosec=20_000_000
+        self.node.imu_callback(msg)
+        self.assertEqual(self.node.odometry_publisher.publish.call_count,before+1)
+
     def test_distance_magnitude_header_time_and_callback_order(self):
         self.node.ekf.initialize(0.0, 0.0, math.pi)
         self.gps(0.0, 0.0, 1_000_000_000)

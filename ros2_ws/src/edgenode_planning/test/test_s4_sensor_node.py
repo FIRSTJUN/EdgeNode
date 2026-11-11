@@ -40,9 +40,20 @@ def assert_stop(node):
     assert node.avoidance_planner.state == 'BLOCKED'
 
 
-def test_never_received_is_latched_even_while_disarmed(node, clock):
-    node.plan(); assert_stop(node)
-    assert node.avoidance_planner.reason == 'S4_SENSOR_SENSOR_STATUS_NEVER_RECEIVED'
+def assert_hold(node):
+    assert output(node, 'target_speed').data == 0.
+    assert not output(node, 'local_path').poses
+    assert node.avoidance_planner.state != 'BLOCKED'
+    assert node._sensor_pause is not None
+
+
+def test_never_received_holds_then_latches_if_wait_exceeds_recovery_window(node, clock, monkeypatch):
+    steady = [clock.ns]
+    monkeypatch.setattr('edgenode_planning.planning_node.time.monotonic_ns', lambda: steady[0])
+    node.plan(); assert_hold(node)
+    steady[0] += 2_001_000_000
+    node.sensor_watchdog(); node.plan(); assert_stop(node)
+    assert node.avoidance_planner.reason == 'S4_SENSOR_RECOVERY_TIMEOUT'
     assert output(node, 'fsm_state').data == 'EMERGENCY_STOP'
     assert not node.get_parameter('enable_drive').value
 
@@ -56,15 +67,16 @@ def test_valid_empty_preserves_global_and_normal_local_geometry(node, clock):
     assert json.loads(output(node, 's4_sensor_state').data)['ready']
 
 
-def test_valid_obstacle_reaches_existing_boundary_gate(node, clock):
+def test_valid_obstacle_reaches_detection_stage(node, clock):
     points = node.test_obstacle(21., 25.)
     feed(node, clock, points=points)
     assert not node.sensor_guard.reason(clock.ns)
-    node.plan(); assert_stop(node)
-    assert node.avoidance_planner.reason == 'ROAD_BOUNDARY_UNAVAILABLE'
+    node.plan()
+    assert node.avoidance_planner.state=='DETECT'
+    assert not node.avoidance_planner.candidates
 
 
-@pytest.mark.parametrize('state', ['INVALID_INPUT', 'PROCESSING_ERROR', 'STALE_INPUT',
+@pytest.mark.parametrize('state', ['INVALID_INPUT', 'PROCESSING_ERROR',
                                   'DUPLICATE_FRAME', 'OUT_OF_ORDER', 'FUTURE_STAMP'])
 def test_sensor_failure_stops_before_next_planning_cycle_and_stays_latched(node, clock, state):
     feed(node, clock); node.plan()
@@ -79,16 +91,16 @@ def test_sensor_failure_stops_before_next_planning_cycle_and_stays_latched(node,
     assert node.avoidance_planner.reason == original_reason
 
 
-def test_watchdog_stops_without_new_cloud_or_status_and_recovery_needs_reset(node, clock):
+def test_watchdog_holds_without_new_data_and_disarmed_reset_requires_fresh_data(node, clock):
     feed(node, clock); node.plan()
     clock.ns += 601_000_000
-    node.sensor_watchdog(); assert_stop(node)
+    node.sensor_watchdog(); assert_hold(node)
     response = node.reset_avoidance(Trigger.Request(), Trigger.Response())
     assert not response.success
     clock.ns += 1_000_000
     node.latest_pose_received_ns = clock.ns
     feed(node, clock, seq=2, frame=2)
-    node.plan(); assert_stop(node)
+    node.plan(); assert_hold(node)
     response = node.reset_avoidance(Trigger.Request(), Trigger.Response())
     assert response.success
     node.plan()
@@ -115,7 +127,7 @@ def test_malformed_status_and_unpaired_obstacles_cannot_look_like_empty_road(nod
 def test_s4_gate_cannot_be_disabled_at_runtime(node, clock):
     result = node.set_parameters([Parameter('s4_sensor_validation_enabled', value=False)])
     assert not result[0].successful
-    node.plan(); assert_stop(node)
+    node.plan(); assert_hold(node)
 
 
 def test_armed_mock_outputs_stop_on_failure_and_reset_is_rejected(node, clock):
@@ -141,7 +153,7 @@ def test_expiry_during_speed_planning_is_checked_again_before_motion_gate(node, 
         clock.ns += 601_000_000
         return result
     monkeypatch.setattr(node.speed_planner, 'plan', slow)
-    node.plan(); assert_stop(node)
+    node.plan(); assert_hold(node)
     assert output(node, 'fsm_state').data == 'EMERGENCY_STOP'
 
 

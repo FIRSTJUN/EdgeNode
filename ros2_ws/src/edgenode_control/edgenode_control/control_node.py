@@ -9,7 +9,7 @@ from morai_ros2_msgs.msg import CtrlCmd, EgoVehicleStatus
 
 from edgenode_control.dynamic_lookahead import calculate_lookahead_distance
 from edgenode_control.pure_pursuit import PurePursuit
-from edgenode_control.steering_command import to_morai_front_steer
+from edgenode_control.steering_command import to_morai_front_steer, limit_steering_change
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -84,6 +84,7 @@ class ControlNode(Node):
             ('lookahead_preview_time_sec', 0.45),
             ('steering_sign', -1.0),
             ('max_front_steer_normalized', 0.70),
+            ('steering_slew_limit_radps', 0.0),
             ('speed_kp', 0.14),
             ('speed_ki', 0.015),
             ('speed_kd', 0.02),
@@ -103,6 +104,7 @@ class ControlNode(Node):
         self.current_speed_kmh = 0.0
         self.local_path_points = []
         self.latest_pose = None
+        self._last_front_steer = 0.
         # None means never received; a receive time of zero is valid in ROS time.
         self.target_speed_stamp_ns = None
         self.local_path_stamp_ns = None
@@ -295,6 +297,16 @@ class ControlNode(Node):
             accel = clamp(pedal, 0.0, max_accel)
             brake = clamp(-pedal, 0.0, max_brake)
 
+        slew_rate=float(self.get_parameter('steering_slew_limit_radps').value)
+        if self.target_speed_kmh>0.05 and slew_rate!=0.:
+            angle_scale=float(self.get_parameter('max_wheel_angle_rad').value)
+            limited=limit_steering_change(front_steer*angle_scale,
+                self._last_front_steer*angle_scale,
+                slew_rate,dt)
+            if limited is None:
+                self.publish_safe_stop();self.speed_pid.reset();return
+            front_steer=limited/angle_scale
+        self._last_front_steer=front_steer
         cmd = CtrlCmd()
         cmd.header.stamp = self.get_clock().now().to_msg()
         cmd.longl_cmd_type = 1
@@ -307,6 +319,7 @@ class ControlNode(Node):
         self.ctrl_pub.publish(cmd)
 
     def publish_safe_stop(self):
+        self._last_front_steer=0.
         cmd = CtrlCmd()
         cmd.header.stamp = self.get_clock().now().to_msg()
         cmd.longl_cmd_type = 1

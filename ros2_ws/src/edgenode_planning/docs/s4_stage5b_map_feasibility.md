@@ -1,9 +1,11 @@
+> 과거 구현의 실험 기록입니다. 현재 단계형 FSM과 실행 방법은 `static_obstacle_avoidance.md`를 따릅니다. 별도 도로 경계 검사는 삭제되었습니다.
+
 # S4 Stage 5B — K-City 전체 원본 지도 검증
 
 검사일: 2026-11-09 (Asia/Seoul). 기준 브랜치 `s4-finish`, HEAD `7845817`.
 
 **최종 선택은 2번: 추가 지도 파일·속성 자료가 필요하다.** 현재 자료로 승인 가능한
-DrivableArea 후보는 0개다. 원본에 관측된 경계·시설선과 긴 차로 구조는 있으므로,
+과거 도로 경계 검사 후보는 0개다. 원본에 관측된 경계·시설선과 긴 차로 구조는 있으므로,
 그 자료를 대상으로 추가 검증을 할 근거는 있다. 추가 자료의 실제 보유·제공 가능성은
 확인되지 않았다. 확보 후에도 안전 검증과 외부 승인이 필요하다.
 
@@ -196,7 +198,7 @@ freshness 문제는 별도로 해결해야 한다. 이번 단계에서 센서 �
 원본 ZIP·HDMap·MGeo 44개 파일도 해시가 동일하다. 새 판독기는 기존 UTM52N 판독기와
 10개 레이어 전 레코드의 속성·기하가 정확히 일치한다.
 
-`enable_drive=false`, 빈 `avoidance_boundary_file`/승인 pin, 기존 Dijkstra·PP·PID·Lattice와
+`enable_drive=false`, 빈 과거 경계 파일/승인 설정, 기존 Dijkstra·PP·PID·Lattice와
 정상 글로벌 패스 기준선을 유지했다. 실제 MORAI 구동 및 commit/push는 하지 않았다.
 
 ## 10. 오프라인 재현
@@ -219,4 +221,4 @@ ROS_DOMAIN_ID=187 ROS_LOCALHOST_ONLY=1 PYTHONDONTWRITEBYTECODE=1 \
 ```
 
 도구는 원본 디렉터리 안으로의 출력을 거부한다. 모든 결과는 분석 artifact이며
-DrivableArea loader에 넣을 수 있는 스키마를 만들지 않는다.
+과거 도로 경계 검사 loader에 넣을 수 있는 스키마를 만들지 않는다.

@@ -16,7 +16,9 @@ class LidarObstacleConfig:
     roi_min_y: float = -4.0
     roi_max_y: float = 4.0
     ground_z_threshold: float = -1.0
+    oriented_footprints: bool = False
     near_origin_radius_m: float = 0.3
+    self_mask_min_x: float = -2.4
     self_mask_max_x: float = 2.0
     self_mask_half_width_y: float = 0.8
     cluster_distance_m: float = 0.8
@@ -27,7 +29,9 @@ class LidarObstacleConfig:
     def __post_init__(self):
         for field in fields(self):
             value = getattr(self, field.name)
-            if field.name == 'min_cluster_points':
+            if field.name == 'oriented_footprints':
+                if type(value) is not bool:raise ValueError('oriented_footprints must be boolean')
+            elif field.name == 'min_cluster_points':
                 if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                     raise ValueError('min_cluster_points must be a positive integer')
             elif (isinstance(value, bool) or not isinstance(value, (int, float))
@@ -35,6 +39,8 @@ class LidarObstacleConfig:
                 raise ValueError(f'{field.name} must be finite')
         if self.roi_min_x >= self.roi_max_x or self.roi_min_y >= self.roi_max_y:
             raise ValueError('ROI minima must be less than maxima')
+        if self.self_mask_min_x >= self.self_mask_max_x:
+            raise ValueError('self mask minima must be less than maxima')
         if self.cluster_distance_m <= 0.0:
             raise ValueError('cluster_distance_m must be positive')
         if self.near_origin_radius_m < 0.0 or self.self_mask_half_width_y < 0.0:
@@ -53,7 +59,8 @@ def filter_points(points, config):
     xyz = xyz[(xyz[:, 0] >= config.roi_min_x) & (xyz[:, 0] <= config.roi_max_x)
               & (xyz[:, 1] >= config.roi_min_y) & (xyz[:, 1] <= config.roi_max_y)]
     xyz = xyz[xyz[:, 2] > config.ground_z_threshold]
-    self_mask = ((xyz[:, 0] < config.self_mask_max_x)
+    self_mask = ((xyz[:, 0] > config.self_mask_min_x)
+                 & (xyz[:, 0] < config.self_mask_max_x)
                  & (np.abs(xyz[:, 1]) < config.self_mask_half_width_y))
     return xyz[~self_mask]
 
@@ -66,14 +73,30 @@ class LidarCluster:
     min_xy: tuple
     max_xy: tuple
     point_count: int
+    oriented_corners_xy: tuple = ()
 
     def footprint_xy(self):
-        """Four corners and four edge midpoints of the sensor-local XY AABB."""
+        """Four corners and four edge midpoints of a containing XY box."""
+        if self.oriented_corners_xy:
+            corners=self.oriented_corners_xy
+            return tuple(p for a,b in zip(corners,corners[1:]+corners[:1])
+                         for p in (a,((a[0]+b[0])/2,(a[1]+b[1])/2)))
         x0, y0 = self.min_xy
         x1, y1 = self.max_xy
         xm, ym = (x0 + x1) / 2.0, (y0 + y1) / 2.0
         return ((x0, y0), (xm, y0), (x1, y0), (x1, ym),
                 (x1, y1), (xm, y1), (x0, y1), (x0, ym))
+
+
+def oriented_bounds(xy):
+    """PCA box containing every observed XY point, including diagonal walls."""
+    center=xy.mean(axis=0);relative=xy-center
+    _,vectors=np.linalg.eigh(relative.T@relative)
+    axis=vectors[:,-1];axes=np.array((axis,(-axis[1],axis[0]))).T
+    local=relative@axes;low=local.min(axis=0);high=local.max(axis=0)
+    corners=np.array(((low[0],low[1]),(high[0],low[1]),
+                      (high[0],high[1]),(low[0],high[1])))@axes.T+center
+    return tuple(tuple(float(v) for v in row) for row in corners)
 
 
 def detect_clusters(points, config):
@@ -105,6 +128,7 @@ def detect_clusters(points, config):
                 min_xy=tuple(np.min(selected[:, :2], axis=0)),
                 max_xy=tuple(np.max(selected[:, :2], axis=0)),
                 point_count=len(component),
+                oriented_corners_xy=oriented_bounds(selected[:,:2]) if config.oriented_footprints else (),
             ))
     return clusters
 

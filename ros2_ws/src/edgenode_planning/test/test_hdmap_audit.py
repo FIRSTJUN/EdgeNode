@@ -5,14 +5,13 @@ import struct
 import pytest
 
 from edgenode_planning.hdmap_audit import boundary_screen, marking_definition, read_layer, audit
-from edgenode_planning.avoidance_geometry import load_drivable_area
 
 
 def feature(points, *, parts=None):
     return dict(parts=[tuple(points)] if parts is None else parts)
 
 
-def test_even_perfect_synthetic_lines_are_diagnostic_not_drivable_area():
+def test_even_perfect_synthetic_lines_remain_diagnostic():
     center = [(0., 0., 0.), (10., 0., 0.)]
     left = [feature([(0., 2., 0.), (10., 2., 0.)])]
     right = [feature([(0., -2., 0.), (10., -2., 0.)])]
@@ -119,10 +118,3 @@ def test_known_pair_and_unmatched_pair_are_distinguished_without_guessing(real_a
     assert unknown['mgeo_link_types'] == ['1', '1']
     assert 'SPECIAL_OR_UNKNOWN_LANE_TYPE_NOT_VERIFIED' in unknown['reasons']
     assert not known['approved'] and not unknown['approved']
-
-
-def test_diagnostic_report_cannot_be_loaded_as_a_runtime_boundary(real_audit, tmp_path):
-    import json
-    path = tmp_path / 'diagnostic.json'; path.write_text(json.dumps(real_audit))
-    with pytest.raises(ValueError):load_drivable_area(path)
-    with pytest.raises(ValueError):load_drivable_area(path, approved_sha256='')

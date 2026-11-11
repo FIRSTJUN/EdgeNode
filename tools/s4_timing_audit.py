@@ -83,13 +83,9 @@ def load(source_root):
 
 def instrument(spans,m):
     for name,label in [('_normal_hazards','02_hazard_validation'),('_remember','02_obstacle_merge'),
-        ('_generate','03_candidate_generation'),('_body_safety','04_vehicle_collision'),
+        ('_generate_entry','03_candidate_generation'),('_generate_return','03_return_generation'),('_body_safety','04_vehicle_collision'),
         ('_path_safety','06_path_constraints'),('_rollout','06_control_rollout'),('plan','03_lattice_plan')]:
         spans.wrap(m['static_obstacle_planner'].StaticObstaclePlanner,name,label)
-    spans.wrap(m['avoidance_geometry'].DrivableArea,'covers','05_drivable_area')
-    spans.wrap(m['avoidance_geometry'],'_half_plane','05_polygon_clipping')
-    if hasattr(m['avoidance_geometry'],'_split_half_plane'):
-        spans.wrap(m['avoidance_geometry'],'_split_half_plane','05_polygon_clipping')
     for name,label in [('swept_body','04_swept_body'),('polygon_distance','04_obstacle_distance'),
                        ('obstacle_polygons','02_obstacle_conversion'),('curvatures','06_curvature'),
                        ('reference_cost','07_candidate_cost'),('control_local_path','08_control_path'),
@@ -119,7 +115,7 @@ def make_case(loop,m,case):
     scene=loop.Scene(name=case['name'],radius_m=case.get('radius',0.),side=case.get('side','left'))
     road=loop.Road(scene);pose=(*road.point(5.1,0.)[:2],5.1/scene.radius_m if scene.radius_m else 0.)
     config=replace(loop.AvoidanceConfig(),transition_lengths_m=tuple(case.get('lengths',(12.,16.,20.))))
-    planner=loop.StaticObstaclePlanner(road.network,drivable_area=road.area,config=config)
+    planner=loop.StaticObstaclePlanner(road.network,config=config)
     groups=list(road.obstacles)
     for i in range(case.get('obstacles',1)-1):
         groups.append(road.obstacle(15.+i*.6,1.,.5,0.,lateral=-10.-i*.8))

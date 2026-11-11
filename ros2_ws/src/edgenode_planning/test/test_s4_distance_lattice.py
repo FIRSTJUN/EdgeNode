@@ -7,8 +7,8 @@ from avoidance_world import world
 
 
 def make(**kwargs):
-    lanes, area, point, obstacle = world(**kwargs)
-    planner = StaticObstaclePlanner(lanes, drivable_area=area)
+    lanes, point, obstacle = world(**kwargs)
+    planner = StaticObstaclePlanner(lanes)
     reference = [point(float(x), 0.) for x in range(21)]
     preview = [point(float(x), 0.) for x in range(81)]
     model = DistanceSafety(DistancePolicy(), planner.config, planner.body)
@@ -41,6 +41,7 @@ def test_entry_reserve_and_verified_observation_limit_reject_early_known_obstacl
     result = p.plan(reference, [obstacle()], (0., 0., 0.), speed_kmh=3., current_link_id='O0',
         route_link_ids=['O0', 'O1'], hazard_reference=preview, entry_reserve_m=m['entry_reserve_m'],
         stopping_required_m=m['stopping_required_m'], entry_observation_m=21.19)
+    result=p.plan(reference,[],(0.,0.,0.),speed_kmh=3.,current_link_id='O0',route_link_ids=['O0','O1'],hazard_reference=preview,entry_reserve_m=m['entry_reserve_m'],entry_observation_m=21.19)
     assert result['blocked'] and not result['points']
     assert any(c.rejection == 'ENTRY_OBSERVATION_DISTANCE' for c in result['candidates'])
     assert all(c.rejection for c in result['candidates'])
@@ -50,6 +51,7 @@ def test_unverified_candidate_curvature_scope_is_not_treated_as_straight_observa
     p, reference, preview, obstacle, model = make()
     result = p.plan(reference, [obstacle()], (0., 0., 0.), speed_kmh=3., current_link_id='O0',
         route_link_ids=['O0', 'O1'], hazard_reference=preview, observation_curvature_limit=.001)
+    result=p.plan(reference,[],(0.,0.,0.),speed_kmh=3.,current_link_id='O0',route_link_ids=['O0','O1'],hazard_reference=preview,observation_curvature_limit=.001)
     assert result['blocked'] and not result['points']
     assert any(c.rejection == 'OBSERVATION_CURVATURE_SCOPE' for c in result['candidates'])
 
@@ -61,14 +63,14 @@ def test_long_preview_never_synthesizes_missing_adjacent_support():
     p.network.valid.remove('A1')
     result = p.plan(reference, [obstacle()], (0., 0., 0.), speed_kmh=3., current_link_id='O0',
         route_link_ids=['O0', 'O1'], hazard_reference=preview)
-    assert result['blocked'] and all(c.rejection for c in result['candidates'])
+    assert result['state']=='DETECT'
+    result=p.plan(reference,[],(0.,0.,0.),speed_kmh=3.,current_link_id='O0',route_link_ids=['O0','O1'],hazard_reference=preview)
+    assert result['state']=='AVOID_ENTRY' and not result['return_path']
 
 
-def test_return_requires_full_actual_map_support():
-    p, reference, preview, obstacle, model = make()
-    # Late obstacle requires a return beyond the genuine lane-pair extent.
-    result = p.plan(reference, [obstacle(74., 78.)], (0., 0., 0.), speed_kmh=3., current_link_id='O0',
-        route_link_ids=['O0', 'O1'], hazard_reference=preview)
-    assert result['blocked']
-    assert any(c.rejection in ('RETURN_UNAVAILABLE', 'INSUFFICIENT_ADJACENT_SUPPORT')
-               for c in result['candidates'])
+def test_future_return_support_is_not_an_entry_precondition():
+    p,reference,preview,obstacle,_=make()
+    kwargs=dict(speed_kmh=3.,current_link_id='O0',route_link_ids=['O0','O1'],hazard_reference=preview)
+    assert p.plan(reference,[obstacle(74.,78.)],(0.,0.,0.),**kwargs)['state']=='DETECT'
+    result=p.plan(reference,[],(0.,0.,0.),**kwargs)
+    assert result['state']=='AVOID_ENTRY' and not result['return_path']

@@ -1,3 +1,5 @@
+> 과거 구현의 실험 기록입니다. 현재 단계형 FSM과 실행 방법은 `static_obstacle_avoidance.md`를 따릅니다. 별도 도로 경계 검사는 삭제되었습니다.
+
 # S4 Stage 5C 계산시간과 센서 신선도 검증
 
 검사일 2026-11-09 UTC. 브랜치 `s4-finish`, 기준 HEAD
@@ -5,7 +7,7 @@
 
 **계산시간 개선과 기존 동작 보존은 확인했다. 실제 시간의 곡선 폐루프 및 ROS 주기
 신선도 문제는 해결 완료로 판정하지 않는다.** 0.6초 제한을 유지했다.
-실제 MORAI, 실제 K-City DrivableArea, 실제 LiDAR 관측 승인은 이번 결과에 포함되지 않는다.
+실제 MORAI, 실제 K-City 과거 도로 경계 검사, 실제 LiDAR 관측 승인은 이번 결과에 포함되지 않는다.
 
 | 구분 | 판정과 근거 |
 |---|---|
@@ -23,7 +25,7 @@
 `static_obstacle_planner.py` 네 파일이다. 추가 내용은 시간 계측·비교 도구,
 합성 하네스의 별도 measured 모드, 기준 결과 fixture, 신규 테스트와 이 문서다.
 
-- DrivableArea의 불변 convex cell에 16m 격자 인덱스를 붙였다. 기존 AABB 검사에
+- 과거 도로 경계 검사의 불변 convex cell에 16m 격자 인덱스를 붙였다. 기존 AABB 검사에
   도달할 수 없는 셀만 검색에서 제외한다. 원래 셀 순서, 실제 polygon subtraction,
   holes, 경계 접촉·면적 EPS는 유지한다. 큰 셀/질의는 전체 검사로 돌아간다.
   셀별 4,096 bin, 총 65,536 entry 한도로 인덱스 생성을 제한한다.
@@ -42,7 +44,7 @@
   신규 시험이 있다. 지도는 기존처럼 로드 후 읽기 전용이며 live 파일 재로딩을 새로
   지원한 것은 아니다. 동일 형상 키의 body 판정은 지도 topology를 캐시하지 않는다.
 
-후보 수/전환 길이/비용/선택 순서, FULL BODY collision, 실제 DrivableArea 포함 검사,
+후보 수/전환 길이/비용/선택 순서, FULL BODY collision, 실제 과거 도로 경계 검사 포함 검사,
 곡률·횡가속도·조향·조향 변화율, 복귀 지원 거리 검사를 생략하거나 근사화하지 않았다.
 조기 승인, threshold 변경, 지도 외삽, 후보 수 축소를 도입하지 않았다.
 
@@ -64,7 +66,7 @@ speed plan → 최종 센서·거리 검사 → target publication이다. 운영
 | 2 장애물 검증·변환 | 02_hazard_validation, 02_obstacle_merge, 02_obstacle_conversion, 02_obstacle_callback |
 | 3 후보 생성 | 03_candidate_generation, 03_transition, 03_center_sampling, 03_lattice_plan |
 | 4 차량 형상 충돌 | 04_vehicle_collision, 04_swept_body, 04_obstacle_distance |
-| 5 경계 | 05_drivable_area, 05_polygon_clipping |
+| 5 경계 | 삭제된 경계 측정, 05_polygon_clipping |
 | 6 곡률·조향 | 06_path_constraints, 06_curvature, 06_control_rollout (운영 PP 포함) |
 | 7 평가·선택 | 07_candidate_cost, 07_speed_plan; min/정렬 등 선택 잔여 시간은 03_lattice_plan exclusive |
 | 8 최종 Local Path | 08_control_path; ROS 메시지 생성·발행 잔여는 10_planning_callback exclusive |

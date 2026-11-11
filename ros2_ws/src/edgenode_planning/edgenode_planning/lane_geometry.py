@@ -169,7 +169,7 @@ class LaneNetwork:
     def permission_reason(self, original_id, side):
         """Topology alone is never positive permission in the S4 mode.
 
-        Require both outward and reserved return permissions. This is only a
+        Check only this directed crossing. Return is checked in STEP 4. This is a
         metadata gate; it does not certify line crossing or road containment.
         """
         if side not in ('left', 'right') or original_id not in self.valid:
@@ -178,10 +178,8 @@ class LaneNetwork:
         target_id = original.get(side + '_lane_change_dst_link_idx')
         if target_id not in self.valid:
             return 'NO_VALID_ADJACENT_LANE'
-        reverse = 'right' if side == 'left' else 'left'
         default = None if self.require_explicit_permission else True
-        values = (original.get('can_move_' + side + '_lane', default),
-                  self.links[target_id].get('can_move_' + reverse + '_lane', default))
+        values = (original.get('can_move_' + side + '_lane', default),)
         if any(value is False for value in values):
             return 'LANE_CHANGE_FORBIDDEN'
         if any(value is not True for value in values):

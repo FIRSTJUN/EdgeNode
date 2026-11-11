@@ -8,11 +8,11 @@ from avoidance_world import world
 
 
 def network(*, strict=True):
-    lanes, area, point, obstacle = world()
+    lanes, point, obstacle = world()
     for link in lanes.links.values():
         link['link_type'] = '6'  # Explicit ordinary-lane metadata, synthetic only.
     lanes.require_explicit_permission = strict
-    return lanes, area, point, obstacle
+    return lanes, point, obstacle
 
 
 def allow(links, original='O0', adjacent='A0'):
@@ -21,7 +21,7 @@ def allow(links, original='O0', adjacent='A0'):
 
 
 def test_missing_permission_keeps_legacy_neighbor_but_blocks_s4():
-    lanes, _, _, _ = network(strict=False)
+    lanes, _, _ = network(strict=False)
     assert lanes.neighbor('O0', 'left') == 'A0'
     lanes.require_explicit_permission = True
     assert lanes.neighbor('O0', 'left') is None
@@ -31,23 +31,25 @@ def test_missing_permission_keeps_legacy_neighbor_but_blocks_s4():
 @pytest.mark.parametrize('value', [None, 1, 0, 'true', 'false', [], {}])
 @pytest.mark.parametrize('which', ['outward', 'return'])
 def test_only_literal_true_is_positive_permission(value, which):
-    lanes, _, _, _ = network()
+    lanes, _, _ = network()
     allow(lanes.links)
     record, field = (('O0', 'can_move_left_lane') if which == 'outward'
                      else ('A0', 'can_move_right_lane'))
     lanes.links[record][field] = value
-    assert lanes.neighbor('O0', 'left') is None
-    assert lanes.permission_reason('O0', 'left') == 'UNKNOWN_LANE_CHANGE_PERMISSION'
+    direction='left' if which=='outward' else 'right'
+    source='O0' if which=='outward' else 'A0'
+    assert lanes.neighbor(source,direction) is None
+    assert lanes.permission_reason(source,direction) == 'UNKNOWN_LANE_CHANGE_PERMISSION'
 
 
 def test_explicit_denial_wins_over_unknown_return():
-    lanes, _, _, _ = network()
+    lanes, _, _ = network()
     lanes.links['O0']['can_move_left_lane'] = False
     assert lanes.permission_reason('O0', 'left') == 'LANE_CHANGE_FORBIDDEN'
 
 
 def test_explicit_true_still_requires_reciprocal_topology_and_direction():
-    lanes, _, _, _ = network(); allow(lanes.links)
+    lanes, _, _ = network(); allow(lanes.links)
     assert lanes.neighbor('O0', 'left') == 'A0'
     lanes.links['A0']['right_lane_change_dst_link_idx'] = 'O1'
     assert lanes.neighbor('O0', 'left') is None
@@ -55,14 +57,14 @@ def test_explicit_true_still_requires_reciprocal_topology_and_direction():
 
 @pytest.mark.parametrize('kind', ['1', '4', '5', 'unknown', None])
 def test_explicit_true_does_not_authorize_intersection_or_unverified_lane_type(kind):
-    lanes, _, _, _ = network(); allow(lanes.links)
+    lanes, _, _ = network(); allow(lanes.links)
     lanes.links['O0']['link_type'] = kind
     assert lanes.neighbor('O0', 'left') is None
     assert lanes.permission_reason('O0', 'left') == 'UNVERIFIED_LANE_TYPE'
 
 
 def test_each_successor_requires_its_own_permission_without_extrapolation():
-    lanes, _, _, _ = network(); allow(lanes.links)
+    lanes, _, _ = network(); allow(lanes.links)
     pair = lanes.pair('O0', 'left', ['O0', 'O1'])
     assert pair.ids == [('O0', 'A0')]
     allow(lanes.links, 'O1', 'A1')
@@ -70,29 +72,31 @@ def test_each_successor_requires_its_own_permission_without_extrapolation():
 
 
 def test_synthetic_verified_road_does_not_override_unknown_crossing_permission():
-    lanes, area, point, obstacle = network()
-    planner = StaticObstaclePlanner(lanes, drivable_area=area)
+    lanes, point, obstacle = network()
+    planner = StaticObstaclePlanner(lanes)
     reference = [point(i, 0.) for i in range(81)]
     result = planner.plan(reference, [obstacle()], (0., 0., 0.), speed_kmh=3.,
                           current_link_id='O0', route_link_ids=['O0', 'O1'])
+    assert result['state']=='DETECT'
+    result=planner.plan(reference,[],(0.,0.,0.),speed_kmh=3.,current_link_id='O0',route_link_ids=['O0','O1'])
     assert result['blocked'] and not result['points']
-    assert result['reason'] == 'NO_VALID_ADJACENT_LANE'
+    assert result['reason']=='NO_VALID_ADJACENT_LANE'
     assert planner.plan(reference, [], (0., 0., 0.))['blocked']
 
 
-def test_positive_permission_never_substitutes_for_real_road_boundary():
-    lanes, _, point, obstacle = network()
-    allow(lanes.links); allow(lanes.links, 'O1', 'A1')
-    planner = StaticObstaclePlanner(lanes)
-    result = planner.plan([point(i, 0.) for i in range(81)], [obstacle()],
-                          (0., 0., 0.), speed_kmh=3., current_link_id='O0', route_link_ids=['O0', 'O1'])
-    assert result['blocked'] and not result['points']
-    assert result['reason'] == 'ROAD_BOUNDARY_UNAVAILABLE'
+def test_directed_mgeo_permission_allows_entry_without_a_return_reservation():
+    lanes,point,obstacle=network()
+    allow(lanes.links);allow(lanes.links,'O1','A1')
+    planner=StaticObstaclePlanner(lanes)
+    reference=[point(i,0.) for i in range(81)]
+    assert planner.plan(reference,[obstacle()],(0.,0.,0.),speed_kmh=3.)['state']=='DETECT'
+    result=planner.plan(reference,[],(0.,0.,0.),speed_kmh=3.,current_link_id='O0',route_link_ids=['O0','O1'])
+    assert result['state']=='AVOID_ENTRY' and not result['return_path']
 
 
 def test_obstacle_free_baseline_geometry_is_unchanged_in_both_policies():
     for strict in (False, True):
-        lanes, _, point, _ = network(strict=strict)
+        lanes, point, _ = network(strict=strict)
         planner = StaticObstaclePlanner(lanes)
         reference = [point(i, 0.) for i in range(21)]
         result = planner.plan(reference, [], (0., 0., 0.))
@@ -125,7 +129,7 @@ def test_planning_mode_wires_permission_policy_at_startup(route_editor_map, stri
             node = PlanningNode()
         assert node.avoidance_planner.network.require_explicit_permission is strict
         assert not node.get_parameter('enable_drive').value
-        assert node.get_parameter('avoidance_boundary_approved_sha256').value == ''
+        assert node.get_parameter('avoidance_hold_duration_s').value==3.
     finally:
         if node is not None: node.destroy_node()
         rclpy.shutdown()

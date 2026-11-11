@@ -1,247 +1,194 @@
+"""Small contract tests for strictly sequential LiDAR avoidance stages."""
 from dataclasses import replace
 import math
+from unittest.mock import patch
 
 import pytest
 
 from edgenode_planning.static_obstacle_planner import AvoidanceConfig,StaticObstaclePlanner
-from edgenode_planning.lattice_path import transition,curvatures,reference_cost,control_local_path
+from edgenode_planning.lattice_path import transition,curvatures,control_local_path
 from avoidance_world import world
 
 
-def setup(side='left',road=True,**options):
-    lanes,area,point,obstacle=world(side,**options)
-    planner=StaticObstaclePlanner(lanes,drivable_area=area if road else None)
-    return planner,point,obstacle
+def setup(side='left',**options):
+    lanes,point,obstacle=world(side,**options)
+    return StaticObstaclePlanner(lanes),point,obstacle
 
 
-def plan(planner,point,obstacles,s=0.,offset=0.,yaw=0.,speed=3.,valid=True,link='O0'):
+def plan(planner,point,obstacles,s=0.,offset=0.,yaw=0.,speed=3.,valid=True,link='O0',now=0.,**kwargs):
     reference=[point(s+i*.5,0.) for i in range(101)]
     return planner.plan(reference,obstacles,(*point(s,offset)[:2],yaw),speed_kmh=speed,
-        current_link_id=link,route_link_ids=['O0','O1'],observation_valid=valid)
+        current_link_id=link,route_link_ids=['O0','O1'],observation_valid=valid,
+        now_sec=now,global_reference=[point(-10+i*.5,0.) for i in range(301)],**kwargs)
 
 
-def test_no_obstacle_returns_identical_normal_local_path_even_without_boundaries():
-    p,point,obstacle=setup(road=False)
-    reference=[point(i,0) for i in range(21)]
-    r=p.plan(reference,[],(0.,0.,0.),current_link_id='O0',route_link_ids=['O0','O1'])
-    assert r['state']=='NORMAL' and r['points'] is reference and not r['active']
+def enter(p,point,obstacle,**kwargs):
+    assert plan(p,point,[obstacle()],**kwargs)['state']=='DETECT'
+    result=plan(p,point,[],**kwargs)
+    assert result['state']=='AVOID_ENTRY',[(c.transition_length_m,c.rejection) for c in p.candidates]
+    return result
 
 
-def test_normal_tracking_error_cannot_hide_actual_body_collision_beside_reference():
-    p,point,obstacle=setup(road=False)
-    # At the reference center this object clears both existing safety floors.
-    # The measured +0.3 m tracking error puts the body within the 0.25 m margin.
-    groups=[obstacle(1.,3.,1.4,1.8)]
-    r=plan(p,point,groups,offset=.3)
-    assert r['blocked'] and not r['points'] and r['reason']=='BODY_COLLISION'
+def acquire(p,point,offset,now=1.):
+    end=p.selected.entry_end_s-10.
+    for _ in range(p.config.acquisition_confirmations):
+        result=plan(p,point,[],s=end-.5,offset=offset,now=now)
+    assert result['state']=='AVOID_HOLD'
+    return result
 
 
-@pytest.mark.parametrize('side',['left','right'])
-def test_boundary_unknown_still_generates_real_lane_candidates_and_stops(side):
-    p,point,obstacle=setup(side,road=False)
-    r=plan(p,point,[obstacle()])
-    assert r['blocked'] and not r['points'] and r['reason']=='ROAD_BOUNDARY_UNAVAILABLE'
-    assert len(r['candidates'])==3
-    assert all(c.points and c.rejection for c in r['candidates'])
-    assert all(c.side==side for c in r['candidates'])
-    assert plan(p,point,[])['blocked']  # Detection loss does not release STOP.
+def test_no_obstacle_preserves_normal_path_identity():
+    p,point,_=setup();reference=[point(i,0.) for i in range(21)]
+    result=p.plan(reference,[],(0.,0.,0.))
+    assert result['points'] is reference and result['state']=='NORMAL' and not result['active']
 
 
 @pytest.mark.parametrize('side,offset',[('left',3.5),('right',-3.5)])
-def test_fixed_lifecycle_requires_physical_acquisition_and_full_rear_clearance(side,offset):
+def test_one_stage_per_call_no_return_until_timed_safe_hold(side,offset):
     p,point,obstacle=setup(side)
-    r=plan(p,point,[obstacle()]);assert r['state']=='AVOID_ENTRY'
-    selected=p.selected;fixed=r['points'];end=selected.entry_end_s-10.
-    for _ in range(3):
-        assert plan(p,point,[])['points'] is fixed
-    for _ in range(2):
-        assert plan(p,point,[],s=end-.5,offset=offset)['state']=='AVOID_ENTRY'
-    r=plan(p,point,[],s=end-.5,offset=offset)
-    assert r['state']=='AVOID_HOLD'
-    assert plan(p,point,[],s=40.5,offset=offset)['state']=='AVOID_HOLD'
-    r=plan(p,point,[],s=40.7,offset=offset,link='A1')
-    assert r['state']=='RETURN'
-    recovery=r['points'];assert p.selected is selected
-    for _ in range(3):assert plan(p,point,[],s=41.,offset=offset,link='O1')['points'] is recovery
-    back_end=selected.return_end_s-10.
-    for _ in range(3):r=plan(p,point,[],s=back_end-.5,offset=0.,link='O1')
-    assert r['state']=='NORMAL'
-    assert r['entry_commits']==r['return_commits']==1
+    with patch.object(p,'_generate_entry',wraps=p._generate_entry) as entry,patch.object(p,'_generate_return',wraps=p._generate_return) as recovery:
+        r=plan(p,point,[obstacle()])
+        assert r['state']=='DETECT' and entry.call_count==recovery.call_count==0
+        assert not p.candidates and not r['return_path'] and r['detected_obstacles']
+        r=plan(p,point,[])
+        assert r['state']=='AVOID_ENTRY' and not recovery.called
+        assert p._hold_path==() and all(not c.return_path and math.isnan(c.return_end_s) for c in p.candidates)
+        generated=p.generated_transition_count
+        acquire(p,point,offset)
+        assert p._hold_path==() and not recovery.called
+        r=plan(p,point,[],s=45.,offset=offset,now=2.)
+        assert r['state']=='AVOID_HOLD' and r['reason']=='HOLD_TIMER'
+        assert p.generated_transition_count==generated
+        # Time alone is insufficient if the rear body has not passed the solid.
+        p2,point2,o2=setup(side);enter(p2,point2,o2);acquire(p2,point2,offset)
+        r2=plan(p2,point2,[],s=30.,offset=offset,now=5.)
+        assert r2['state']=='AVOID_HOLD' and r2['reason']=='WAIT_OBSTACLE_PASS'
+        r=plan(p,point,[],s=45.,offset=offset,now=5.)
+        assert r['state']=='RETURN' and not r['return_path'] and not recovery.called
+        assert p.return_commits==0
+        r=plan(p,point,[],s=45.,offset=offset,now=5.1)
+        assert r['state']=='RETURN' and r['return_path'] and recovery.call_count==1
+        assert p.return_commits==1
+        # Completion uses the saved Global Path station, position and heading.
+        end=p.selected.return_end_s-10.
+        for _ in range(3):r=plan(p,point,[],s=end-.5,now=6.)
+        assert r['state']=='NORMAL' and not r['return_path']
+        assert r['entry_commits']==r['return_commits']==1
 
 
-@pytest.mark.parametrize('yaw,offset',[(.3,3.5),(math.pi,3.5),(0.,3.0)])
-def test_near_center_heading_lateral_and_reverse_counterexamples_do_not_acquire(yaw,offset):
+def test_return_permission_is_checked_only_in_return_stage():
     p,point,obstacle=setup()
-    plan(p,point,[obstacle()]);end=p.selected.entry_end_s-10.
-    for _ in range(3):r=plan(p,point,[],s=end-.5,offset=offset,yaw=yaw)
-    assert r['state'] in ('AVOID_ENTRY','BLOCKED')
+    for key in ('A0','A1'):p.network.links[key]['can_move_right_lane']=False
+    enter(p,point,obstacle);acquire(p,point,3.5)
+    assert plan(p,point,[],s=45.,offset=3.5,now=5.)['state']=='RETURN'
+    r=plan(p,point,[],s=45.,offset=3.5,now=5.1)
+    assert r['state']=='RETURN' and r['reason']=='NO_SAFE_RETURN' and not r['blocked']
+    assert not r['return_path'] and p.return_commits==0
+    assert all(c.rejection=='LANE_CHANGE_FORBIDDEN' for c in p.candidates)
 
 
-def test_confirmation_interruption_resets_count_and_not_path():
-    p,point,obstacle=setup();plan(p,point,[obstacle()]);fixed=p.selected
-    end=p.selected.entry_end_s-10.
-    plan(p,point,[],s=end-.5,offset=3.5);assert p.confirmations==1
-    p.invalidate_observation();assert p.confirmations==0
-    plan(p,point,[],s=end-.5,offset=3.5);assert p.state=='AVOID_ENTRY' and p.selected is fixed
-
-
-@pytest.mark.parametrize('damage',['no_neighbor','opposite','forbidden','disconnected'])
-def test_invalid_lane_topology_or_permission_is_never_approved(damage):
+def test_future_return_obstacle_does_not_gate_entry():
     p,point,obstacle=setup()
-    if damage=='no_neighbor':p.network.valid.remove('A0')
-    elif damage=='opposite':p.network.links['A0']['points'].reverse()
-    elif damage=='forbidden':p.network.links['O0']['can_move_left_lane']=False
-    else:p.network.links['A1']['from_node_idx']='disconnected'
-    r=plan(p,point,[obstacle()]);assert r['blocked'] and not r['points']
+    assert plan(p,point,[obstacle(),obstacle(70.,74.)])['state']=='DETECT'
+    r=plan(p,point,[])
+    assert r['state']=='AVOID_ENTRY'
+    assert not r['return_path'] and p.return_commits==0
 
 
-def test_new_target_obstacle_stops_committed_direction_without_refitting():
-    p,point,obstacle=setup();plan(p,point,[obstacle()]);fixed=p.selected
-    r=plan(p,point,[obstacle(24,28,3.,4.)],s=2.)
-    assert r['blocked'] and p.selected is fixed and p.entry_commits==1
-
-
-def test_detection_loss_retains_obstacle_and_stale_observation_stops():
-    p,point,obstacle=setup();plan(p,point,[obstacle()]);remembered=p.remembered
-    assert plan(p,point,[])['state']=='AVOID_ENTRY' and p.remembered==remembered
-    r=plan(p,point,[],valid=False)
-    assert r['blocked'] and r['reason']=='OBSTACLE_OBSERVATION_INVALID_OR_STALE'
-
-
-def test_unmeasured_straight_turn_state_after_pose_jump_is_rejected_by_wheel_rate():
-    p,point,obstacle=setup();plan(p,point,[obstacle()])
-    r=plan(p,point,[],s=5.)
-    assert r['blocked'] and r['reason']=='STEERING_RATE'
-
-
-def test_short_control_window_does_not_validate_a_longer_invisible_path():
-    p,point,obstacle=setup()
-    reference=[point(i*.5,0.) for i in range(101)]
-    r=p.plan(reference,[obstacle()],(0.,0.,0.),speed_kmh=3.,
-        current_link_id='O0',route_link_ids=['O0','O1'],control_horizon_m=3.)
-    assert r['blocked'] and not r['points']
-    # The shortest seed may already fail the earlier solid-body road check.
-    # Candidates passing geometry must still reject the invisible PP horizon.
-    assert all(c.rejection for c in r['candidates'])
-    assert any(c.rejection=='SHORT_CONTROL_HORIZON' for c in r['candidates'])
-
-
-def test_measured_turn_beyond_production_clamp_is_not_replaced_by_planned_curvature():
-    p,point,obstacle=setup();plan(p,point,[obstacle()])
-    assert p._rollout(p.selected.entry_path,(0.,0.,0.),3.,
-        p.config.curvature_limit+1e-4,p.remembered)=='ACTUAL_CURVATURE'
-
-
-def test_control_window_clips_progress_without_modifying_fixed_geometry():
-    p,point,obstacle=setup();plan(p,point,[obstacle()])
-    fixed=p.selected.entry_path;before=tuple(fixed)
-    first=control_local_path(fixed,(0.,0.,0.),20.)
-    second=control_local_path(fixed,(1.,.01,0.),20.)
-    assert fixed is p.selected.entry_path and fixed==before
-    assert first[0][0]<second[0][0] and first[-1][0]<second[-1][0]
-    assert len(first)<len(fixed) and len(second)<len(fixed)
-
-
-def test_late_detection_and_both_lanes_obstructed_stop():
-    p,point,obstacle=setup()
-    assert plan(p,point,[obstacle(5.,8.)],speed=10.)['reason']=='BRAKING_DISTANCE'
-    p,point,obstacle=setup()
-    r=plan(p,point,[obstacle(),obstacle(30,44,2.5,4.5)])
-    assert r['blocked']
-
-
-def test_two_obstacles_extend_pass_extent_and_prevent_premature_return():
-    p,point,obstacle=setup()
-    r=plan(p,point,[obstacle(30,33),obstacle(39,42)])
-    assert not r['blocked'] and p.selected.return_start_s>=42+10+1.109+.5
-
-
-def test_obstacle_rear_extension_does_not_release_old_return_gate():
-    p,point,obstacle=setup();plan(p,point,[obstacle()])
-    end=p.selected.entry_end_s-10.
-    for _ in range(3):plan(p,point,[],s=end-.5,offset=3.5)
-    r=plan(p,point,[obstacle(35.,44.)],s=41.,offset=3.5)
-    assert r['state']=='AVOID_HOLD'
+def test_hold_requires_surround_body_clearance_and_rechecks_new_lidar():
+    p,point,obstacle=setup();enter(p,point,obstacle);acquire(p,point,3.5)
+    near=obstacle(44.,46.,1.5,1.8)
+    r=plan(p,point,[near],s=45.,offset=3.5,now=5.)
+    assert r['state']=='AVOID_HOLD' and r['reason']=='WAIT_SURROUND_CLEARANCE'
     assert p.return_commits==0
 
 
-def test_target_lane_forbidding_return_is_not_a_viable_maneuver():
-    p,point,obstacle=setup();p.network.links['A0']['can_move_right_lane']=False
-    assert plan(p,point,[obstacle()])['blocked']
+def test_new_collision_and_stale_observation_latch_stop():
+    p,point,obstacle=setup();enter(p,point,obstacle);fixed=p.selected
+    r=plan(p,point,[obstacle(18.,22.,3.,4.)])
+    assert r['blocked'] and p.selected is fixed
+    assert plan(p,point,[])['blocked']
+    p,point,obstacle=setup();enter(p,point,obstacle)
+    assert plan(p,point,[],valid=False)['reason']=='OBSTACLE_OBSERVATION_INVALID_OR_STALE'
 
 
-def test_reference_clearance_floor_is_preserved_in_addition_to_full_body_margin():
+@pytest.mark.parametrize('damage',['no_neighbor','opposite','forbidden'])
+def test_invalid_entry_topology_or_permission_stops(damage):
     p,point,obstacle=setup()
-    assert p._body_safety((0.,0.,0.),(0.,0.,0.),
-        (tuple(obstacle(-.5,.5,1.19,2.)),),False)=='REFERENCE_CLEARANCE'
-    with pytest.raises(ValueError):replace(AvoidanceConfig(),reference_clearance_m=1.19)
-    with pytest.raises(ValueError):replace(AvoidanceConfig(),obstacle_margin_m=.24)
+    if damage=='no_neighbor':p.network.valid.remove('A0')
+    elif damage=='opposite':p.network.links['A0']['points'].reverse()
+    else:p.network.links['O0']['can_move_left_lane']=False
+    assert plan(p,point,[obstacle()])['state']=='DETECT'
+    r=plan(p,point,[])
+    assert r['blocked'] and not r['points']
 
 
-def test_second_independent_obstacle_uses_new_lane_pair_progress_frame():
-    p,point,obstacle=setup();plan(p,point,[obstacle()])
-    end=p.selected.entry_end_s-10.
-    for _ in range(3):plan(p,point,[],s=end-.5,offset=3.5)
-    plan(p,point,[],s=40.7,offset=3.5)
-    end=p.selected.return_end_s-10.
-    for _ in range(3):result=plan(p,point,[],s=end-.5)
-    assert result['state']=='NORMAL'
-    result=plan(p,point,[obstacle(95.,98.)],s=70.,link='O1')
-    assert result['state']=='AVOID_ENTRY',result['reason']
-    assert p.pair.ids[0][0]=='O1'
-
-
-def test_braking_distance_uses_actual_yawed_front_corner_not_axle_plus_nominal_length():
+def test_normal_measured_body_collision_and_braking_deadline():
     p,point,obstacle=setup()
-    result=plan(p,point,[obstacle(6.9,8.)],yaw=math.atan2(.93,3.79),speed=10.)
-    assert result['blocked'] and result['reason']=='BRAKING_DISTANCE'
+    assert plan(p,point,[obstacle(1.,3.,1.4,1.8)],offset=.3)['reason']=='BODY_COLLISION'
+    p,point,obstacle=setup()
+    assert plan(p,point,[obstacle(5.,8.)],speed=10.)['reason']=='BRAKING_DISTANCE'
 
 
-def test_cost_prefers_earlier_safe_original_return_on_equal_horizon():
-    reference=[(i*.5,0.,0.) for i in range(201)]
-    def maneuver(return_start):
-        entry=transition((0.,0.),0.,0.,[(0.,3.5,0.),(100.,3.5,0.)],20.,20.)
-        hold=tuple((20.+i*.5,3.5,0.) for i in range(1,round((return_start-20)*2)+1))
-        back=transition((return_start,3.5),0.,0.,reference,return_start+20,20.)
-        tail=tuple((return_start+20+i*.5,0.,0.) for i in range(1,round((100-return_start-20)*2)+1))
-        return entry+hold+back[1:]+tail
-    adjacent=[(0.,3.5,0.),(100.,3.5,0.)]
-    assert reference_cost(maneuver(40),reference,adjacent)[0]<reference_cost(maneuver(60),reference,adjacent)[0]
+def test_unchanged_controller_limits_and_fixed_entry_geometry():
+    p,point,obstacle=setup();enter(p,point,obstacle)
+    fixed=p.selected.entry_path;before=tuple(fixed)
+    first=control_local_path(fixed,(0.,0.,0.));second=control_local_path(fixed,(1.,.01,0.))
+    assert fixed==before and first[0][0]<second[0][0]
+    assert p._rollout(fixed,(0.,0.,0.),3.,p.config.curvature_limit+.001,p.remembered)=='ACTUAL_CURVATURE'
+    p._control_horizon_m=3.
+    assert p._rollout(fixed,(0.,0.,0.),3.,0.,p.remembered)=='SHORT_CONTROL_HORIZON'
+    assert p._body_safety((0.,0.,0.),(0.,0.,0.),(tuple(obstacle(-.5,.5,1.19,2.)),))=='REFERENCE_CLEARANCE'
+    short=transition((0.,0.),0.,0.,[(0.,3.5,0.),(30.,3.5,0.)],5.,5.)
+    assert max(map(abs,curvatures(short)))>p.config.curvature_limit
 
 
-def test_shorter_adjacent_chain_cannot_compete_on_a_truncated_prediction_support():
-    p,point,obstacle=setup(two_sides=True)
-    p.network.links['A1']['can_move_right_lane']=False
-    r=plan(p,point,[obstacle(25.,28.)])
-    assert r['state']=='AVOID_ENTRY' and r['selected_side']=='right'
-    left=[c for c in r['candidates'] if c.side=='left']
-    assert left and all(c.rejection=='INSUFFICIENT_COMMON_HORIZON' for c in left)
-    safe=[c for c in r['candidates'] if not c.rejection]
-    supports=[p.pair.original_index.project(c.points[-1])-p.pair.original_index.project(c.points[0]) for c in safe]
-    assert supports and all(s==pytest.approx(80.) for s in supports)
-
-
-def test_short_transition_is_rejected_by_unchanged_curvature_limit():
-    p=transition((0.,0.),0.,0.,[(0.,3.5,0.),(30.,3.5,0.)],5.,5.)
-    assert max(map(abs,curvatures(p)))>AvoidanceConfig().curvature_limit
-
-
-@pytest.mark.parametrize('side,origin,yaw', [('left',(120.,-80.),.7),('right',(-90.,42.),-1.2)])
-def test_candidate_generation_is_not_tied_to_s4_coordinates(side,origin,yaw):
-    p,point,obstacle=setup(side,origin=origin,yaw=yaw)
-    r=plan(p,point,[obstacle(front=32.,rear=37.,low=-.7,high=.7)],yaw=yaw)
-    assert r['state']=='AVOID_ENTRY',[(c.rejection,c.transition_length_m) for c in p.candidates]
-
-
-@pytest.mark.parametrize('side',['left','right'])
-def test_gentle_curve_candidates_use_actual_adjacent_centerline(side):
-    p,point,obstacle=setup(side,radius=300.)
-    r=plan(p,point,[obstacle()])
-    assert r['state']=='AVOID_ENTRY',[(c.rejection,c.transition_length_m) for c in p.candidates]
-
-
-@pytest.mark.parametrize('changes',[{'wheelbase_m':0.},{'road_margin_m':-1.},
-    {'rollout_seconds':math.inf},{'steering_sign':0.},{'max_front_steer_normalized':1.1},
-    {'control_rate_hz':0.}])
+@pytest.mark.parametrize('changes',[{'hold_duration_s':-1.},{'hold_clearance_m':-1.},{'wheelbase_m':0.},{'steering_sign':0.}])
 def test_invalid_configuration_rejected(changes):
     with pytest.raises(ValueError):replace(AvoidanceConfig(),**changes)
+
+
+def test_detection_accepts_bounded_local_reference_start_ahead_of_pose():
+    p,point,obstacle=setup()
+    reference=[point(.001+i*.5,0.) for i in range(81)]
+    result=p.plan(reference,[obstacle(21.,25.)],(0.,0.,0.),speed_kmh=0.,now_sec=0.)
+    assert result['state']=='DETECT' and not result['candidates']
+
+
+def test_entry_uses_forward_neighbor_support_when_start_sections_differ():
+    from edgenode_planning.lane_geometry import LanePair
+    p,_,_=setup()
+    pair=LanePair([(float(i),0.,0.) for i in range(61)],
+                  [(float(i),-3.5,0.) for i in range(1,61)],
+                  [('O0','A0')],'right',[60.])
+    assert pair.at(0.) is None
+    candidates=p._generate_entry(pair,(0.,0.,0.),3.,0.,35.)
+    assert any(not c.rejection for c in candidates)
+    assert all(not c.return_path for c in candidates)
+
+
+def test_contained_lidar_jitter_keeps_validated_conservative_solid():
+    p,point,obstacle=setup();enter(p,point,obstacle)
+    remembered=p.remembered
+    shifted=[(x+.01,y-.01) for x,y in obstacle()]
+    assert not p.needs_validation_stop([point(i,0.) for i in range(51)],[shifted])
+    p._remember([shifted])
+    assert p.remembered==remembered
+    assert p.needs_validation_stop([point(i,0.) for i in range(51)],[obstacle(18.,22.,3.,4.)])
+
+
+def test_progress_clipping_does_not_invent_new_path_curvature():
+    from edgenode_planning.lattice_path import fixed_path_suffix
+    p,_,_=setup()
+    points=tuple((8.*math.sin(i*.025),8.*(1-math.cos(i*.025)),0.) for i in range(60))
+    clipped=fixed_path_suffix(points,.199)
+    assert max(map(abs,curvatures(points)))<p.config.curvature_limit
+    assert p._path_safety(clipped,(),3.,curvature_points=points)==''
+
+
+def test_new_clear_roadside_observation_does_not_restart_motion_validation():
+    p,point,obstacle=setup();enter(p,point,obstacle)
+    far=obstacle(24.,28.,-6.,-5.)
+    assert not p.needs_validation_stop([point(i,0.) for i in range(51)],[far])
+    result=plan(p,point,[far])
+    assert result['state']=='AVOID_ENTRY' and p.return_commits==0

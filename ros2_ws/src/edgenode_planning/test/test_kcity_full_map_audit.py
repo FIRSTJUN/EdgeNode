@@ -12,7 +12,6 @@ import pytest
 sys.path.insert(0,str(Path(__file__).resolve().parents[4]/'tools'))
 from kcity_full_map_audit import (adjacent_chains, load_layers, member_name,
     coordinate_comparison,read_archive,read_dbf,read_shapes,read_workbook,scan_candidates,validate_output)
-from edgenode_planning.avoidance_geometry import load_drivable_area
 
 
 def headers(kind, body):
@@ -157,7 +156,6 @@ def test_complete_observed_lane_markings_never_authorize_a_surface_or_crossing(s
     else:assert rows[0]['sampled_support_ratio']==1.
     path=tmp_path/'diagnostic.json';path.write_text(json.dumps(rows[0]))
     assert 'cells' not in rows[0]
-    with pytest.raises(ValueError):load_drivable_area(path)
 
 
 def test_outputs_cannot_write_into_source_or_symlinked_source(tmp_path):

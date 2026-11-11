@@ -42,12 +42,8 @@ def matrix():
             add(f'B_{shape}_{speed:g}', experiment='B', radius_m=radius,
                 initial_speed_kmh=speed)
     for speed in (3., 10., 20.):
-        add(f'A_boundary_missing_{speed:g}', initial_speed_kmh=speed,
-            obstacle_front_m=35., fault='boundary_missing')
         add(f'A_permission_missing_{speed:g}', initial_speed_kmh=speed,
             obstacle_front_m=35., fault='permission_missing')
-        add(f'A_narrow_road_{speed:g}', initial_speed_kmh=speed,
-            obstacle_front_m=35., fault='no_space', lane_width_m=3.)
         add(f'A_wall_{speed:g}', initial_speed_kmh=speed,
             obstacle_front_m=35., fault='wall')
         add(f'A_late_detection_{speed:g}', initial_speed_kmh=speed,
@@ -57,7 +53,6 @@ def matrix():
     add('A_short_control_window_3', control_horizon_m=5.)
     add('A_compute_timeout_3', fault='compute_timeout')
     add('A_return_obstruction_3', fault='return_obstruction')
-    add('A_boundary_lost_on_return_3', fault='boundary_lost_on_return')
     add('A_tight_curve_100m_3', radius_m=100.)
     return cases
 
@@ -93,8 +88,6 @@ def plot_result(result, path):
     world, rows = result['world'], result['rows']
     fig, axes = plt.subplots(2, 2, figsize=(13, 9))
     xy = axes[0, 0]
-    for key in ('road_low', 'road_high'):
-        points = world[key]; xy.plot(*zip(*points), color='black', linewidth=.8)
     xy.plot([p[0] for p in world['original']], [p[1] for p in world['original']],
             '--', color='gray', linewidth=.7, label='original global path')
     for obstacle in world['obstacles']:
@@ -102,7 +95,7 @@ def plot_result(result, path):
     for selected in result.get('selected_geometry', []):
         xy.plot([p[0] for p in selected['points']], [p[1] for p in selected['points']],
                 color='orange', linewidth=1., label='fixed validated lattice')
-    colors = {'NORMAL':'tab:blue', 'AVOID_ENTRY':'tab:orange', 'AVOID_HOLD':'tab:green',
+    colors = {'NORMAL':'tab:blue', 'DETECT':'tab:cyan', 'AVOID_ENTRY':'tab:orange', 'AVOID_HOLD':'tab:green',
               'RETURN':'tab:purple', 'BLOCKED':'tab:red'}
     for phase, color in colors.items():
         points = [r for r in rows if r['state'] == phase]
@@ -125,10 +118,8 @@ def plot_result(result, path):
     axes[0,1].plot(t, [r['brake'] for r in rows], label='production brake command')
     axes[0,1].legend(fontsize=7)
     axes[1,0].plot(t, [r['obstacle_clearance_m'] for r in rows], label='swept body clearance (m)')
-    axes[1,0].plot(t, [r['road_margin_m'] for r in rows], label='outer road margin (m)')
     axes[1,0].plot(t, [r['lateral_error_m'] for r in rows], label='path error (m)')
     axes[1,0].axhline(.25, color='gray', linestyle=':', linewidth=.8)
-    axes[1,0].set_ylim(-.1, min(5., max(r['road_margin_m'] for r in rows)+1.))
     axes[1,0].legend(fontsize=7)
     axes[1,1].plot(t, [r['wheel_rad'] for r in rows], label='physical wheel (rad)')
     axes[1,1].plot(t, [r['wheel_rate_radps'] for r in rows], label='physical wheel rate (rad/s)')
@@ -148,7 +139,7 @@ def plot_result(result, path):
 
 def summary(result, expected):
     keys = ('success', 'blocked', 'safe_model_stop', 'reason', 'failure_phase',
-            'min_obstacle_clearance_m', 'min_road_margin_m', 'max_lateral_error_m',
+            'min_obstacle_clearance_m', 'max_lateral_error_m',
             'max_wheel_rad', 'max_wheel_rate_radps', 'max_requested_wheel_rate_radps',
             'max_cpu_compute_s', 'cpu_budget_overruns', 'modeled_budget_overruns',
             'cpu_freshness_budget_exceedances', 'stop_time_s', 'stop_distance_m',

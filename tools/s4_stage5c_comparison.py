@@ -60,7 +60,7 @@ def main():
     # Timing and source metadata are intentionally excluded from semantic tests.
     fields=('success','safe_model_stop','full_fsm_sequence','global_path_return','mission_stop_at_s',
         'stopped_at_s','stop_hold_s','blocked','failure_phase','reason','transitions','planning_fsm',
-        'candidates','min_obstacle_clearance_m','min_road_margin_m','max_lateral_error_m','max_yaw_error_rad',
+        'candidates','min_obstacle_clearance_m','max_lateral_error_m','max_yaw_error_rad',
         'max_wheel_rad','max_wheel_rate_radps','max_requested_wheel_rate_radps','steering_rate_limited_steps',
         'max_speed_kmh','max_avoidance_speed_kmh','return_error_m','return_heading_rad','post_return_duration_s',
         'stop_time_s','stop_distance_m','blocked_pose','final_pose','final_speed_kmh','modeled_budget_overruns',
@@ -82,7 +82,7 @@ def main():
             d=read(file)
             measured.append(dict(version=version,name=file.parent.name,success=d['success'],blocked=d['blocked'],
                 reason=d['reason'],safe_stop=d['safe_model_stop'],min_clearance_m=d['min_obstacle_clearance_m'],
-                min_boundary_m=d['min_road_margin_m'],max_tracking_m=d['max_lateral_error_m'],
+                max_tracking_m=d['max_lateral_error_m'],
                 stop_distance_m=d['stop_distance_m'],stop_time_s=d['stop_time_s'],stop_hold_s=d['stop_hold_s'],
                 max_source_age_s=d['max_observation_age_s'],
                 completed_stale_cycles=sum(bool(r.get('freshness_reason_at_completion')) for r in d['planning_rows']),

@@ -39,8 +39,9 @@ def test_long_preview_preserves_normal_twenty_metre_output_and_route_progress(no
 
 def test_hazard_outside_control_window_is_checked_without_publishing_preview(node, clock):
     feed(node, clock, points=node.test_obstacle(32., 36.))
-    node.plan(); assert_stop(node)
-    assert node.avoidance_planner.reason == 'ROAD_BOUNDARY_UNAVAILABLE'
+    node.plan()
+    assert node.avoidance_planner.state=='DETECT'
+    assert not node.avoidance_planner.candidates
     assert output(node, 'global_path').poses
 
 
@@ -54,8 +55,7 @@ def test_actual_speed_envelope_before_and_after_detection(node, clock, speed, bl
         assert_stop(node)
         assert node.avoidance_planner.reason == 'S4_DISTANCE_OBSERVATION_STOPPING_DISTANCE'
     elif detected:
-        assert_stop(node)
-        assert node.avoidance_planner.reason == 'ROAD_BOUNDARY_UNAVAILABLE'
+        assert node.avoidance_planner.state=='DETECT'
     else:
         assert node.avoidance_planner.state == 'NORMAL'
 
@@ -74,7 +74,6 @@ def test_unreviewed_route_scope_is_blocked(node, clock):
 
 
 def test_delayed_detection_cannot_be_repaired_by_immediately_lowering_target(node, clock):
-    node.avoidance_planner.drivable_area = node.test_area
     node.latest_speed_kmh = 10.
     feed(node, clock, points=node.test_obstacle(10., 14.))
     node.plan(); assert_stop(node)

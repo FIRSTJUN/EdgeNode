@@ -40,6 +40,7 @@ class SensorReadiness:
         self.clock_fault = False
         self.status = self.status_received_ns = self.matched = None
         self.frames = {}
+        self.ready_statuses = {}
         self.failure = ''
         self.steady_time_ns = steady_time_ns
         self.status_steady_ns = None
@@ -109,6 +110,7 @@ class SensorReadiness:
             if restarted:
                 self.retired_sessions.add(self.session_id)
                 self.frames.clear()
+                self.ready_statuses.clear()
             self.session_id = session
             self.status_seq = 0
             self.fault_seq = 0
@@ -136,6 +138,10 @@ class SensorReadiness:
         if status['state'] not in READY:
             self.failure = status['state']
         else:
+            key=(status['source_stamp_ns'],status['obstacle_digest'])
+            self.ready_statuses[key]=status
+            while len(self.ready_statuses)>16:
+                del self.ready_statuses[next(iter(self.ready_statuses))]
             self._match()
         return ('SENSOR_RESTARTED' if restarted else
                 'SENSOR_FAULT_HISTORY' if recovered_fault else self.failure)
@@ -144,15 +150,21 @@ class SensorReadiness:
         status = self.status
         if status is None or status['state'] not in READY:
             return
-        found = self.frames.get((status['source_stamp_ns'], status['obstacle_digest']))
-        if found is None:
+        # DDS streams can stay one frame apart: status N+1 may arrive before
+        # array N. Keep their recent identities and select the newest COMPLETE
+        # pair, rather than trying only the latest heartbeat's frame.
+        complete=[(candidate,self.frames[key]) for key,candidate in self.ready_statuses.items()
+                  if key in self.frames]
+        if not complete:
             return
-        points, received_ns, steady_ns = found
+        status,(points,received_ns,steady_ns)=max(complete,key=lambda row:row[0]['frame_seq'])
         if len(points) != status['cluster_count'] * 8:
             self.failure = 'SENSOR_CLUSTER_COUNT_MISMATCH'
             return
         if self.matched is not None:
             previous = self.matched[0]
+            if status['frame_seq'] < previous['frame_seq']:
+                return
             if status['frame_seq'] == previous['frame_seq']:
                 if (status['source_stamp_ns'], status['obstacle_digest']) != (
                         previous['source_stamp_ns'], previous['obstacle_digest']):

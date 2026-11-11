@@ -27,6 +27,8 @@ control_node:
     # Pure Pursuit is LEFT-positive; MORAI commands are RIGHT-positive.
     steering_sign: -1.0
     max_front_steer_normalized: 0.70
+    # Zero preserves baseline PP output; the S4 MORAI launch uses 0.6 rad/s.
+    steering_slew_limit_radps: 0.0
 
     speed_kp: 0.14
     speed_ki: 0.015

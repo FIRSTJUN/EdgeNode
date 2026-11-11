@@ -36,8 +36,8 @@ def report(reproduce=False):
                 k: result[k] for k in ('success', 'phases', 'failure', 'controller_config')}
         data['cold_candidate_samples'] = []
         for speed in (3., 10., 20., 50.):
-            lanes, area, point, obstacle = world()
-            p = StaticObstaclePlanner(lanes, drivable_area=area)
+            lanes, point, obstacle = world()
+            p = StaticObstaclePlanner(lanes)
             reference = [point(float(x), 0.) for x in range(51)]
             started = time.perf_counter()
             result = p.plan(reference, [obstacle()], (0., 0., 0.), speed_kmh=speed,

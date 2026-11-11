@@ -259,6 +259,11 @@ class LocalizationNode(Node):
             and uses_header_stamp == self._last_imu_uses_header_stamp
         ):
             dt = (stamp_ns - self._last_imu_stamp_ns) / 1e9
+        if dt is not None and dt <= 0.0:
+            # Do not republish duplicate/backward odometry as fresh input.
+            self.get_logger().warning(f'IMU dt={dt:.6f}s: 중복/과거 프레임 생략',
+                                      throttle_duration_sec=5.0)
+            return
         # 중복/과거 stamp로 적분 기준을 되돌려 같은 구간을 중복 적분하지 않는다.
         # 시간 기준 전환 또는 긴 공백 후에는 현재 stamp를 새 기준으로 사용한다.
         if dt is None or dt > 0.0:

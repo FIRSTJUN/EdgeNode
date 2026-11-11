@@ -106,7 +106,7 @@ class LidarObstacleNode(Node):
         self.centers_pub = self.create_publisher(
             PoseArray, self.get_parameter('cluster_centers_topic').value, 10)
         sensor_qos = QoSProfile(
-            history=HistoryPolicy.KEEP_LAST, depth=5,
+            history=HistoryPolicy.KEEP_LAST, depth=1,
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
         )

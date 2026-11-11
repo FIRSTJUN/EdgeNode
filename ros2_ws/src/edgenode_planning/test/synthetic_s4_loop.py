@@ -19,7 +19,7 @@ import yaml
 
 from edgenode_control.control_node import ControlNode, PID
 from edgenode_control.pure_pursuit import PurePursuit
-from edgenode_planning.avoidance_geometry import DrivableArea, polygon_distance, swept_body
+from edgenode_planning.avoidance_geometry import polygon_distance, swept_body
 from edgenode_planning.lane_geometry import LaneNetwork, PolylineIndex, arc, sample
 from edgenode_planning.lattice_path import control_local_path, curvatures
 from edgenode_planning.local_path_planner import LocalPathPlanner
@@ -93,18 +93,6 @@ class Road:
         for key in self.route_ids:
             self.reference.extend(links[key]['points'] if not self.reference else links[key]['points'][1:])
         self.index = PolylineIndex(self.reference)
-        low, high = min(0., self.offset)-scene.lane_width_m/2, max(0., self.offset)+scene.lane_width_m/2
-        if scene.fault == 'no_space':
-            low, high = -scene.lane_width_m/2, scene.lane_width_m/2
-        steps = np.linspace(-20., scene.road_end_m, math.ceil((scene.road_end_m+20)/2)+1)
-        self.low = [self.point(float(s), low)[:2] for s in steps]
-        self.high = [self.point(float(s), high)[:2] for s in steps]
-        cells = ((self.low[0], self.low[-1], self.high[-1], self.high[0]),) if not scene.radius_m else tuple(
-            (a, b, d, c) for a, b, c, d in zip(self.low, self.low[1:], self.high, self.high[1:]))
-        self.area = DrivableArea(cells, 'SYNTHETIC_STAGE5A_EXPLICIT_EDGES_NOT_KCITY_NOT_DEPLOYABLE')
-        boundary = np.asarray(self.low + list(reversed(self.high)), dtype=float)
-        self.edges_a, self.edges_b = boundary, np.roll(boundary, -1, axis=0)
-        self.original_hash = hashlib.sha256(json.dumps(self.reference).encode()).hexdigest()
         self.obstacles = [self.obstacle(scene.obstacle_front_m, scene.obstacle_length_m,
                                        scene.obstacle_width_m, scene.obstacle_yaw_rad)]
         if scene.fault == 'wall':
@@ -139,17 +127,7 @@ class Road:
                 return key
         return self.route_ids[-1]
 
-    def margin(self, polygon, inside):
-        # Exact distance between the outer scene boundary and swept polygon:
-        # both endpoint-to-segment directions; internal cell seams excluded.
-        p = np.asarray(polygon); q = np.roll(p, -1, axis=0)
-        def distances(points, a, b):
-            v = b-a; length = np.maximum((v*v).sum(axis=-1), 1e-20)
-            w = points[:, None, :]-a[None, :, :]
-            u = np.clip((w*v[None, :, :]).sum(axis=-1)/length[None, :], 0., 1.)
-            return float(np.sqrt(((w-u[:, :, None]*v[None, :, :])**2).sum(axis=-1)).min())
-        value = min(distances(p, self.edges_a, self.edges_b), distances(self.edges_a, p, q))
-        return value if inside else -value
+
 
 
 class Sink:
@@ -226,9 +204,7 @@ def simulate(scene):
     config = AvoidanceConfig(**{key: values[key] for key in fields})
     policy = DistancePolicy(control_horizon_m=scene.control_horizon_m)
     road = Road(scene)
-    planner = StaticObstaclePlanner(road.network,
-        drivable_area=road.area if scene.experiment == 'A' and scene.fault != 'boundary_missing' else None,
-        config=config)
+    planner = StaticObstaclePlanner(road.network,config=config)
     # Synthetic interfaces only. Operational JSON loaders still reject these.
     evidence = ObservationEvidence(scene.usable_virtual_range_m, 20., config.curvature_limit,
         tuple(road.route_ids), 'SYNTHETIC_VIRTUAL_SENSOR_NOT_REAL_LIDAR') if scene.experiment == 'A' else None
@@ -263,7 +239,7 @@ def simulate(scene):
     pending_stamp = None; fresh_stamps = set(); last_candidate_key = None
     blocked_at = blocked_station = None; blocked_pose = None; blocked_reason = blocked_phase = ''
     returned_at = entry_at = None; tracking_injected = False; stall_injected = False
-    min_clearance = min_road = math.inf; max_tracking = max_yaw_error = max_wheel = max_rate = 0.
+    min_clearance = math.inf; max_tracking = max_yaw_error = max_wheel = max_rate = 0.
     max_requested_rate = max_avoid_speed = 0.
     max_speed = scene.initial_speed_kmh
     max_source_age = 0.; previous_request_wheel = vehicle.wheel
@@ -312,8 +288,6 @@ def simulate(scene):
             # obstacle may still be passed entirely in the adjacent lane.
             road.obstacles.append(road.obstacle(road.station(vehicle.pose)+14., 4., 1., 0.))
             return_fault_injected = True
-        if scene.fault == 'boundary_lost_on_return' and planner.state == 'RETURN' and not return_fault_injected:
-            planner.drivable_area = None; return_fault_injected = True
         # Producer and Planning share deterministic virtual time. Incoming data
         # are queued while a modeled Planning callback is busy, as in a single
         # threaded executor. No thread/ROS process/hardware is created.
@@ -414,6 +388,7 @@ def simulate(scene):
                     path=();target=0.
                 phase_before=planner.state
                 result=planner.plan(normal['points'],groups,vehicle.pose,speed_kmh=vehicle.v*3.6,
+                    now_sec=now,global_reference=road.reference,
                     actual_curvature=vehicle.curvature,current_link_id=road.current_link(vehicle.pose),
                     route_link_ids=road.route_ids,observation_valid=True,control_horizon_m=policy.control_horizon_m,
                     hazard_reference=preview,entry_reserve_m=distance['entry_reserve_m'],
@@ -442,17 +417,13 @@ def simulate(scene):
                 if key != last_candidate_key:
                     candidates.append(dict(t=now,measured_speed_kmh=vehicle.v*3.6,
                         rows=[dict(side=c.side,length_m=c.transition_length_m,rejection=c.rejection,
-                                   entry_end_s=c.entry_end_s,return_start_s=c.return_start_s,return_end_s=c.return_end_s,
-                                   return_control_reserve_m=getattr(c,'return_control_reserve_m',None),
-                                   return_preview_extension_m=getattr(c,'return_preview_extension_m',None))
+                                   entry_end_s=c.entry_end_s,return_start_s=c.return_start_s,return_end_s=c.return_end_s)
                               for c in planner.candidates]));last_candidate_key=key
                 if planner.selected is not None and not selected_geometry:
                     selected_geometry.append(dict(t=now,side=planner.selected.side,points=planner.selected.points,
                         entry_path=planner.selected.entry_path,return_path=planner.selected.return_path,
                         entry_end_s=planner.selected.entry_end_s,return_start_s=planner.selected.return_start_s,
-                        return_end_s=planner.selected.return_end_s,
-                        return_control_reserve_m=getattr(planner.selected,'return_control_reserve_m',None),
-                        return_preview_extension_m=getattr(planner.selected,'return_preview_extension_m',None)))
+                        return_end_s=planner.selected.return_end_s))
                 pending=dict(result=result,normal=normal['points'],ready_at=now+model,cpu_s=cpu,model_s=model,
                              new_validation=new,stamp=ns,phase_before=phase_before,timing_row=planning_rows[-1])
                 record_transition(now)
@@ -469,9 +440,8 @@ def simulate(scene):
         first=vehicle.pose;vehicle.step(cmd,now,dt,config);second=vehicle.pose
         total_distance += math.dist(first[:2],second[:2])
         sweep=swept_body(planner.body,first,second)
-        inside=road.area.covers(sweep);margin=road.margin(sweep,inside)
         clearance=min(polygon_distance(sweep,o) for o in road.obstacles)
-        min_road=min(min_road,margin);min_clearance=min(min_clearance,clearance)
+        min_clearance=min(min_clearance,clearance)
         tracking=yaw_error=0.
         if len(control.local_path_points)>=2:
             idx=PolylineIndex(control.local_path_points); row=sample(control.local_path_points,idx.project(first[:2]))
@@ -484,10 +454,10 @@ def simulate(scene):
             target_speed_kmh=control.target_speed_kmh,speed_kmh=vehicle.v*3.6,accel=cmd.accel,brake=cmd.brake,
             requested_wheel_rad=request,wheel_rad=vehicle.wheel,wheel_rate_radps=vehicle.rate,
             lateral_error_m=tracking,yaw_error_rad=yaw_error,obstacle_clearance_m=clearance,
-            road_margin_m=margin,inside_road=inside,local_path_empty=not bool(control.local_path_points)))
+            local_path_empty=not bool(control.local_path_points)))
         history.append((now+dt,vehicle.pose))
-        if not inside or clearance<=config.obstacle_margin_m:
-            block('MODEL_ROAD_DEPARTURE' if not inside else 'MODEL_BODY_COLLISION',now+dt)
+        if clearance<=config.obstacle_margin_m:
+            block('MODEL_BODY_COLLISION',now+dt)
             break
         if stop_started_at is not None and vehicle.v<.01:
             if stopped_at is None: stopped_at=now+dt
@@ -496,8 +466,8 @@ def simulate(scene):
     final_station=road.index.project(vehicle.pose[:2]); original=sample(road.reference,final_station)
     return_error=math.dist(vehicle.pose[:2],original[0][:2])
     return_heading=abs(math.atan2(math.sin(vehicle.pose[2]-math.atan2(original[1][1],original[1][0])),math.cos(vehicle.pose[2]-math.atan2(original[1][1],original[1][0]))))
-    safe=min_clearance>config.obstacle_margin_m and min_road>=-1e-8
-    full=phases==['NORMAL','AVOID_ENTRY','AVOID_HOLD','RETURN','NORMAL']
+    safe=min_clearance>config.obstacle_margin_m
+    full=phases==['NORMAL','DETECT','AVOID_ENTRY','AVOID_HOLD','RETURN','NORMAL']
     success=bool(full and returned_at is not None and rows[-1]['t']-returned_at>=scene.post_return_s-dt
                  and return_error<=config.acquisition_lateral_m and return_heading<=config.acquisition_heading_rad
                  and safe and max_tracking<=config.tracking_limit_m)
@@ -518,7 +488,7 @@ def simulate(scene):
             rows[-1]['t']+dt-stopped_at if stopped_at is not None else 0.),
         blocked=blocked_at is not None,failure_phase=blocked_phase or ('INCOMPLETE_LIFECYCLE' if not success else ''),
         reason=blocked_reason or ('' if success else 'SIMULATION_DURATION'),transitions=transitions,planning_fsm=fsm_transitions,
-        candidates=candidates,min_obstacle_clearance_m=min_clearance,min_road_margin_m=min_road,
+        candidates=candidates,min_obstacle_clearance_m=min_clearance,
         max_lateral_error_m=max_tracking,max_yaw_error_rad=max_yaw_error,max_wheel_rad=max_wheel,
         max_wheel_rate_radps=max_rate,max_requested_wheel_rate_radps=max_requested_rate,
         steering_rate_limited_steps=vehicle.rate_limited_steps,max_speed_kmh=max_speed,max_avoidance_speed_kmh=max_avoid_speed,
@@ -534,5 +504,5 @@ def simulate(scene):
         max_observation_age_s=max_source_age,planning_cycles=len(timings),validating_cycles=validations,sensor_dropout_at_s=sensor_drop_at,
         global_reference_sha256=route_hash_before,rows=rows,planning_rows=planning_rows,
         selected_geometry=selected_geometry,rollout_failures=rollout_failures,
-        world=dict(original=road.reference,road_low=road.low,road_high=road.high,obstacles=road.obstacles))
+        world=dict(original=road.reference,obstacles=road.obstacles))
     return result

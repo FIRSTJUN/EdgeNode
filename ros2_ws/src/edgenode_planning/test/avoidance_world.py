@@ -1,8 +1,7 @@
-"""Synthetic ground-truth road, not a production MGeo boundary inference."""
+"""Small synthetic MGeo lane network and LiDAR footprints."""
 from types import SimpleNamespace
 import math
 
-from edgenode_planning.avoidance_geometry import DrivableArea
 from edgenode_planning.lane_geometry import LaneNetwork
 
 
@@ -31,17 +30,8 @@ def world(side='left', radius=math.inf, origin=(0.,0.), yaw=0., two_sides=False)
             links[record['idx']]=record
     lanes=LaneNetwork(SimpleNamespace(links_by_id=links,
         graph={'x':[dict(link_id=name) for name in links]}))
-    low,high=min(offsets.values())-1.75,max(offsets.values())+1.75
-    # These are scene-defined true road edges; the planner receives them via
-    # the same injected DrivableArea interface future surveyed maps will use.
-    if math.isinf(radius):
-        cells=((point(-10,low)[:2],point(140,low)[:2],point(140,high)[:2],point(-10,high)[:2]),)
-    else:
-        cells=tuple((point(s,low)[:2],point(s+2,low)[:2],point(s+2,high)[:2],point(s,high)[:2])
-                    for s in range(-10,140,2))
-    area=DrivableArea(cells,'synthetic ground-truth road (offline only)')
     def obstacle(front=35.,rear=39.,low=-.5,high=.5):
         mid=(front+rear)/2
         return [point(s,d)[:2] for s,d in ((front,low),(mid,low),(rear,low),(rear,(low+high)/2),
             (rear,high),(mid,high),(front,high),(front,(low+high)/2))]
-    return lanes,area,point,obstacle
+    return lanes,point,obstacle

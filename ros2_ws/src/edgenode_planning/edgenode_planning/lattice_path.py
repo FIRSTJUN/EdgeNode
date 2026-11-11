@@ -122,8 +122,7 @@ class LatticeCandidate:
     rejection: str = ''
     entry_path: tuple = ()
     return_path: tuple = ()
-    return_control_reserve_m: float = 0.
-    return_preview_extension_m: float = 0.
+    kinematic_points: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -144,8 +143,8 @@ def reference_cost(points, reference, adjacent, weights=CostWeights(), *, projec
     """Distance integrals normalized over a COMMON prediction support.
 
     Positive reference/adjacent costs disfavor extended neighboring-lane travel.
-    Safety never enters a weighted sum. Two switches are charged for a complete
-    obstacle maneuver; fixed-direction commitment supplies hysteresis.
+    Safety never enters a weighted sum. Each candidate represents one directed transition; fixed-direction
+    commitment supplies hysteresis.
     """
     if projection_cache is not None:
         context=(id(reference),id(adjacent),tuple(map(tuple,reference)),tuple(map(tuple,adjacent)))
@@ -161,11 +160,11 @@ def reference_cost(points, reference, adjacent, weights=CostWeights(), *, projec
     for p in points:
         key=tuple(p);cached=projection_cache.get(key) if projection_cache is not None else None
         if cached is None:
-            row = sample(reference,index.project(p),index.lengths)
+            row = sample(reference,max(0.,min(index.lengths[-1],index.project(p))),index.lengths)
             if row is None:
                 raise ValueError('cost reference range')
             distance=math.dist(p[:2],row[0][:2])
-            target=sample(adjacent,target_index.project(p),target_index.lengths)
+            target=sample(adjacent,max(0.,min(target_index.lengths[-1],target_index.project(p))),target_index.lengths)
             if target is None:
                 raise ValueError('cost adjacent reference range')
             cached=(distance,math.dist(p[:2],target[0][:2])<distance)
