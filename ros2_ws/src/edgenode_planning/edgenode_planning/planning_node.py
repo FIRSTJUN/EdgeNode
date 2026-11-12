@@ -36,6 +36,7 @@ from .static_obstacle_planner import AvoidanceConfig, StaticObstaclePlanner
 from .lattice_path import CostWeights, control_local_path, curvatures
 from .avoidance_visualization import candidate_markers, diagnostic
 from .sensor_readiness import SensorReadiness
+from .return_search import ReturnSearch
 from .s4_distance_safety import DistancePolicy, DistanceSafety, load_evidence
 from .lane_geometry import arc
 
@@ -252,6 +253,7 @@ class PlanningNode(Node):
         self.latest_pose_received_ns = None
         self._validation_pending_stamp_ns = None
         self._validation_fresh_stamps = set()
+        self._return_search = ReturnSearch()
         self._candidate_marker_ids = set()
         self._candidate_cache=None
         self._diagnostic_path_cache={}
@@ -396,6 +398,10 @@ class PlanningNode(Node):
             'waiting for localization (drive disabled by default)'
         )
 
+    def destroy_node(self):
+        self._return_search.close()
+        return super().destroy_node()
+
     def reset_avoidance(self, request, response):
         response.success = self.get_parameter('enable_drive').value is not True
         guard = getattr(self, 'sensor_guard', None)
@@ -408,6 +414,7 @@ class PlanningNode(Node):
             response.message = 'validated S4 observation and stopping distance required before reset'
             return response
         if response.success:
+            self._return_search.cancel()
             self._sensor_pause=None
             self._sensor_pause_offset_ns=0
             self._sensor_resume_validation=False
@@ -508,6 +515,7 @@ class PlanningNode(Node):
                 and _finite_number(self.latest_speed_kmh) and abs(self.latest_speed_kmh)<=.2)
 
     def stop_for_safety(self, reason):
+        self._return_search.cancel()
         self._finish_sensor_pause()
         self._sensor_resume_validation=False
         # A recovered producer must never clear an existing avoidance latch.
@@ -824,7 +832,16 @@ class PlanningNode(Node):
                         global_path=cached[1]
                         # Pose headers share this header object from creation.
                         global_path.header.stamp=path.header.stamp
-                    self.global_path_pub.publish(global_path)
+                    # A fixed full mission is display/reference data. Its ROS
+                    # serialization can dominate the 10 Hz safety callback on
+                    # K-City's long route even when Python poses are cached.
+                    # S4 refreshes it at 1 Hz (immediately on route changes);
+                    # local control paths and safety inputs keep their rate.
+                    published=getattr(self,'_global_path_published_ns',None)
+                    if (getattr(self,'sensor_guard',None) is None or cached is None or cached[0]!=key
+                            or published is None or now_ns<published or now_ns-published>=1_000_000_000):
+                        self.global_path_pub.publish(global_path)
+                        self._global_path_published_ns=now_ns
 
                     local_result = self.local_path_planner.extract(
                         self._route_result['points'], x, y,
@@ -907,7 +924,8 @@ class PlanningNode(Node):
                                     actual_curvature=self.latest_turn_curvature,current_link_id=current_link,
                                     route_link_ids=self._route_result.get('link_ids',()),observation_valid=observation_valid,
                                     control_horizon_m=control_horizon,now_sec=(now_ns-self._sensor_pause_offset_ns)/1e9,
-                                    global_reference=self._route_result.get('points',active_local_points), **s4_kwargs)
+                                    global_reference=self._route_result.get('points',active_local_points),
+                                    return_search=self._return_search, **s4_kwargs)
                             if (not isinstance(avoidance_result,dict) or
                                     not isinstance(avoidance_result.get('blocked'),bool) or
                                     'points' not in avoidance_result or 'state' not in avoidance_result):
@@ -927,7 +945,12 @@ class PlanningNode(Node):
                         elapsed=time.perf_counter()-validation_start
                         avoidance_result['validation_elapsed_ms']=elapsed*1000.
                         if not avoidance_result['blocked'] and enable_drive and (avoidance_result.get('active') or self._sensor_resume_validation):
-                            if validation_stop or elapsed>.05:
+                            # A verified fixed path still receives body, motion
+                            # and PP checks every cycle. CPU time over 50 ms is
+                            # not a new path/hazard and must not restart the
+                            # three-pose interlock. Actual stale inputs are
+                            # rejected by the unchanged sensor gates below.
+                            if validation_stop:
                                 self._validation_pending_stamp_ns=stamp if stamp is not None else -1
                                 self._validation_fresh_stamps.clear()
                             pending=self._validation_pending_stamp_ns

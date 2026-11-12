@@ -15,9 +15,9 @@ import time
 
 import rclpy
 from rclpy.node import Node
-from rclpy.parameter import Parameter
+from rclpy.parameter import Parameter, parameter_value_to_python
 from rclpy.qos import qos_profile_sensor_data
-from rcl_interfaces.srv import SetParameters
+from rcl_interfaces.srv import SetParameters, ListParameters, GetParameters
 from std_srvs.srv import Trigger
 from std_msgs.msg import String, Float32
 from nav_msgs.msg import Path as NavPath
@@ -64,6 +64,7 @@ class Trial(Node):
         self.route_ids = []
         self.phase_updates = []
         self.capture_phases = False
+        self.events = None
         for topic, kind in [('/planning/avoidance_state', String), ('/planning/avoidance_stage', String),
                 ('/planning/avoidance_debug', String), ('/planning/s4_sensor_state', String),
                 ('/perception/lidar_status', String), ('/planning/state', String),
@@ -71,9 +72,12 @@ class Trial(Node):
                 ('/planning/fsm_state', String), ('/planning/target_speed', Float32),
                 ('/control/path_error', Float32), ('/ctrl_cmd', CtrlCmd),
                 ('/ego_vehicle_status', EgoVehicleStatus), ('/collision_data', CollisionData),
-                ('/object_status', ObjectStatusList), ('/planning/global_path', NavPath)]:
+                ('/object_status', ObjectStatusList), ('/planning/global_path', NavPath),
+                ('/planning/local_path', NavPath), ('/planning/avoidance_return_path', NavPath)]:
             self.create_subscription(kind, topic, lambda m, t=topic: self.receive(t, m), qos_profile_sensor_data)
         self.setter = self.create_client(SetParameters, '/planning_node/set_parameters')
+        self.parameter_names = self.create_client(ListParameters, '/planning_node/list_parameters')
+        self.parameter_values = self.create_client(GetParameters, '/planning_node/get_parameters')
         self.resetter = self.create_client(Trigger, '/planning/reset_avoidance')
         self.pose_pub = self.create_publisher(MultiEgoSetting, '/multi_ego_setting', 1)
 
@@ -93,6 +97,12 @@ class Trial(Node):
                           speed=math.hypot(o.velocity.x, o.velocity.y, o.velocity.z)*3.6)
                      for o in msg.npc_list+msg.obstacle_list]
         elif isinstance(msg, NavPath):
+            if topic != '/planning/global_path':
+                value = dict(count=len(msg.poses), stamp_ns=msg.header.stamp.sec*10**9+msg.header.stamp.nanosec,
+                    first_xy=[msg.poses[0].pose.position.x,msg.poses[0].pose.position.y] if msg.poses else None,
+                    last_xy=[msg.poses[-1].pose.position.x,msg.poses[-1].pose.position.y] if msg.poses else None)
+                self.latest[topic] = value
+                return
             # Same fixed global route is republished; retain only its first copy.
             if not self.global_path:
                 self.global_path = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
@@ -102,6 +112,9 @@ class Trial(Node):
         else:
             value = msg.data
         self.latest[topic] = value
+        if self.events is not None and topic in ('/planning/avoidance_debug','/planning/target_speed',
+                '/planning/s4_sensor_state','/perception/lidar_status'):
+            self.events.write(json.dumps(dict(t=time.monotonic()-self.started,topic=topic,value=value))+'\n')
         if topic == '/planning/avoidance_debug' and self.capture_phases:
             if not self.phase_updates or self.phase_updates[-1][1]['stage'] != value['stage']:
                 self.phase_updates.append((time.monotonic(), value, dict(self.latest)))
@@ -126,8 +139,17 @@ class Trial(Node):
         if not result.results[0].successful:
             raise RuntimeError(result.results[0].reason)
 
+    def parameters(self):
+        names = self.call(self.parameter_names, ListParameters.Request()).result.names
+        values = self.call(self.parameter_values, GetParameters.Request(names=names)).values
+        # Unset dynamic parameters are omitted, never serialized as string null.
+        params = {name:parameter_value_to_python(value) for name,value in zip(names,values) if value.type}
+        return {'/planning_node': {'ros__parameters': params}}
+
     def snapshot(self):
-        return dict(t=round(time.monotonic()-self.started, 3), values=dict(self.latest))
+        now=time.monotonic()
+        return dict(t=round(now-self.started, 3), values=dict(self.latest),
+                    receipt_ages_s={t:round(now-received,4) for t,received in self.received.items()})
 
     def fresh(self):
         now = time.monotonic()
@@ -160,7 +182,7 @@ class Trial(Node):
             raise RuntimeError('unrecognized launch owner')
         config = self.out/'config'
         config.mkdir()
-        baseline = yaml.safe_load(subprocess.check_output(['ros2', 'param', 'dump', '/planning_node'], text=True))
+        baseline = self.parameters()
         params = baseline.get('/planning_node', baseline.get('planning_node', {}))['ros__parameters']
         saved = yaml.safe_load(Path('/workspace/local_data/kcity_routes/kcity_demo_route.yaml').read_text())
         from edgenode_planning.dijkstra_planner import DijkstraPlanner
@@ -173,7 +195,7 @@ class Trial(Node):
         remaining = planner.plan_route(current_link, self.route_ids)
         if remaining['link_ids'] != full['link_ids'][full['link_ids'].index(current_link):]:
             raise RuntimeError('remaining route differs from the saved global path')
-        if params['route_node_ids'] not in (waypoints, self.route_ids):
+        if params.get('route_node_ids') not in (None, [], 'null', waypoints, self.route_ids):
             raise RuntimeError('active route does not match saved Route Editor route')
         (self.out/'route_resume.json').write_text(json.dumps(dict(saved_waypoints=waypoints,
             remaining_waypoints=self.route_ids, original_link_ids=full['link_ids'],
@@ -188,7 +210,7 @@ class Trial(Node):
                     target.write_bytes(Path(arg).read_bytes())
                     argv[i] = str(target)
             if name == 'planning_node':
-                argv = argv[:argv.index('--ros-args')]+['--ros-args', '--params-file', str(config/'baseline.yaml'), '--params-file', str(config/'stage.yaml')]
+                argv = argv[:argv.index('--ros-args')]+['--ros-args', '--params-file', str(config/'stage.yaml')]
             manifest.append(dict(name=name, argv=argv))
         (config/'manifest.json').write_text(json.dumps(manifest))
         launch = """import json
@@ -236,9 +258,13 @@ def generate_launch_description():
         if self.count_publishers('/ctrl_cmd'):
             raise RuntimeError('old control publisher still present')
         parameters = dict(enable_drive=False, route_node_ids=self.route_ids, cruise_speed_kmh=float(speed), curve_speed_kmh=float(speed),
-                          sharp_curve_speed_kmh=min(float(speed), 3.5), max_drive_speed_kmh=float(speed),
+                          sharp_curve_speed_kmh=float(speed), max_drive_speed_kmh=float(speed),
                           drive_duration_sec=240., avoidance_avoid_speed_kmh=float(avoid), avoidance_hold_duration_s=3.)
-        (self.out/'config/stage.yaml').write_text(yaml.safe_dump({'/planning_node': {'ros__parameters': parameters}}))
+        # One typed parameter file: Humble's dump of an unset dynamic parameter
+        # is YAML null, which can otherwise mask a later array override.
+        merged = yaml.safe_load((self.out/'config/baseline.yaml').read_text())['/planning_node']['ros__parameters']
+        merged.update(parameters)
+        (self.out/'config/stage.yaml').write_text(yaml.safe_dump({'/planning_node': {'ros__parameters': merged}}))
         (self.out/f'{speed}kmh_parameters.json').write_text(json.dumps(parameters, indent=2))
         self.latest.pop('/planning/s4_sensor_state', None)
         self.global_path = []
@@ -283,7 +309,7 @@ def generate_launch_description():
         result = self.call(self.resetter, Trigger.Request())
         if not result.success:
             raise RuntimeError('initial reset refused: '+result.message)
-        applied_dump = yaml.safe_load(subprocess.check_output(['ros2', 'param', 'dump', '/planning_node'], text=True))
+        applied_dump = self.parameters()
         applied = applied_dump.get('/planning_node', applied_dump.get('planning_node', {}))['ros__parameters']
         (self.out/f'{speed}kmh_applied.yaml').write_text(yaml.safe_dump(applied_dump))
         if any(applied.get(name) != value for name, value in parameters.items()):
@@ -390,6 +416,7 @@ def generate_launch_description():
             row['start'] = self.snapshot()
             self.phase_updates = [(time.monotonic(), self.latest['/planning/avoidance_debug'], dict(self.latest))]
             self.capture_phases = True
+            self.events = (self.out/f'{speed}kmh_events.jsonl').open('w')
             self.drive(True)
             started = time.monotonic()
             processed_phases = 0
@@ -473,6 +500,8 @@ def generate_launch_description():
             except Exception as exc:
                 row['disarm_error'] = str(exc)
             row['final'] = self.snapshot()
+            if self.events is not None:
+                self.events.close();self.events = None
             row['final_stopped'] = self.stopped()
             if not row['final_stopped'] or row.get('disarm_error'):
                 row['success'] = False
@@ -486,6 +515,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', required=True)
     parser.add_argument('--attach-first', action='store_true', help='Use an already configured stationary 3km/h stack for the first trial')
+    parser.add_argument('--speeds', type=int, nargs='+', choices=(3,5), default=[5],
+                        help='MORAI trial speeds; default 5 km/h, maximum 5 km/h')
     args = parser.parse_args()
     if subprocess.check_output(['git', 'branch', '--show-current'], text=True).strip() != 's4-finish':
         raise RuntimeError('s4-finish required')
@@ -493,7 +524,7 @@ def main():
     rclpy.init();trial = Trial(out, args.attach_first)
     try:
         trial.initialize()
-        for speed in (3, 5, 10, 15):
+        for speed in args.speeds:
             if not trial.run_stage(speed, speed):
                 break
     finally:

@@ -495,7 +495,7 @@ class StaticObstaclePlanner:
              current_link_id='', route_link_ids=(), observation_valid=True, control_horizon_m=20.,
              hazard_reference=None, entry_reserve_m=0., stopping_required_m=None,
              entry_observation_m=None, observation_curvature_limit=None,
-             now_sec=None, global_reference=None):
+             now_sec=None, global_reference=None, return_search=None):
         normal_reference=reference
         reference=hazard_reference if hazard_reference is not None else reference
         self._min_clearance=math.inf
@@ -625,7 +625,13 @@ class StaticObstaclePlanner:
                 if not cleared or self._surround_clearance<self.config.hold_clearance_m:
                     self.reason='WAIT_SURROUND_CLEARANCE';return self._hold(pose,speed_kmh,actual_curvature,body_cache)
                 if now<self._return_retry_at:return self._hold(pose,speed_kmh,actual_curvature,body_cache)
-                reason=self._generate_return(pose,speed_kmh,actual_curvature,body_cache)
+                reason=(self._generate_return(pose,speed_kmh,actual_curvature,body_cache)
+                        if return_search is None else return_search(self,pose,speed_kmh,actual_curvature,body_cache))
+                if reason=='RETURN_SEARCH_PENDING':
+                    # Only STEP 4 may start this work. Remain stopped while the
+                    # isolated search runs; no old HOLD path can authorize drive.
+                    return dict(self._result(),state='VALIDATING',blocked=True,
+                                points=(),reason=reason)
                 if reason:
                     self.reason=reason;self._return_retry_at=now+1.
                     return self._hold(pose,speed_kmh,actual_curvature,body_cache)

@@ -38,10 +38,15 @@ def test_fresh_start_can_never_publish_motion_after_real_expiry(adapter,paused_r
         def slow(*args,**kwargs):
             result=original(*args,**kwargs);time.sleep(.65);return result
         with patch.object(node.speed_planner,'plan',slow):node.plan()
-        assert node.avoidance_planner.state=='BLOCKED'
-        assert node.avoidance_planner.reason.startswith('S4_SENSOR_')
+        # Freshness gaps use the existing bounded sensor HOLD recovery. A real
+        # continuing outage still latches STOP after its unchanged 2 s bound.
+        assert node._sensor_pause is not None
         assert not node.local_path_pub.last.poses and node.target_speed_pub.last.data==0.
         assert node.get_parameter('enable_drive').value is False
+        node._sensor_pause['steady_started_ns']-=2_000_000_001
+        node.sensor_watchdog()
+        assert node.avoidance_planner.state=='BLOCKED'
+        assert node.avoidance_planner.reason=='S4_SENSOR_RECOVERY_TIMEOUT'
     finally:
         if context:context.stop()
 

@@ -242,6 +242,31 @@ def test_slow_armed_cycle_cannot_publish_a_motion_path_computed_on_stale_pose(no
     assert json.loads(output(node,'avoidance_debug').data)['validation_elapsed_ms']==100.
 
 
+def test_fixed_path_checks_over_50ms_do_not_restart_fresh_pose_wait(node):
+    node.latest_speed_kmh=0.
+    node.set_parameters([Parameter('local_path_length_m',value=50.)])
+    arm_isolated_node(node)
+    with patch('edgenode_planning.planning_node.time.perf_counter',return_value=0.):
+        detect(node,node.test_obstacle());node.plan();node.plan()
+    assert output(node,'avoidance_state').data=='VALIDATING'
+    selected=node.avoidance_planner.selected
+    generated=node.avoidance_planner.generated_transition_count
+    for i in range(1,5):
+        node.latest_pose_stamp_ns+=1
+        node.latest_pose_received_ns=node.get_clock().now().nanoseconds
+        detect(node,node.test_obstacle(),stamp=2.+i)
+        with patch('edgenode_planning.planning_node.time.perf_counter',side_effect=[0.,.08]):
+            node.plan()
+        if i<3:assert output(node,'target_speed').data==0.
+        else:assert output(node,'target_speed').data==3.
+    assert node.avoidance_planner.selected is selected
+    assert node.avoidance_planner.generated_transition_count==generated
+    # A new solid on the actual vehicle still overrides a verified path.
+    detect(node,node.test_obstacle(-1.,3.),stamp=8.);node.plan()
+    assert node.avoidance_planner.state=='BLOCKED'
+    assert output(node,'target_speed').data==0. and not output(node,'local_path').poses
+
+
 def test_reverse_measured_motion_is_not_reinterpreted_as_forward_speed(node):
     msg=Odometry();msg.header.frame_id='map';msg.header.stamp=node.get_clock().now().to_msg()
     msg.pose.pose.orientation.w=1.;msg.twist.twist.linear.x=-1.
