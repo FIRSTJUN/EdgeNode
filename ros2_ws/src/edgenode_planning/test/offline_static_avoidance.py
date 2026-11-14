@@ -11,9 +11,9 @@ import time
 
 import yaml
 
-from edgenode_control.dynamic_lookahead import calculate_lookahead_distance
+from edgenode_control.dynamic_lookahead import path_lookahead_distance
 from edgenode_control.pure_pursuit import PurePursuit
-from edgenode_control.steering_command import to_morai_front_steer
+from edgenode_control.steering_command import to_morai_front_steer, limit_steering_change
 from edgenode_planning.avoidance_geometry import polygon_distance,swept_body
 from edgenode_planning.lane_geometry import PolylineIndex,sample
 from edgenode_planning.local_path_planner import LocalPathPlanner
@@ -30,16 +30,20 @@ def production_config():
     fields=('wheelbase_m','max_wheel_angle_rad','max_front_steer_normalized',
             'steering_sign','control_rate_hz','lookahead_min_m','lookahead_max_m',
             'lookahead_preview_time_sec')
-    return replace(AvoidanceConfig(),**{key:values[key] for key in fields})
+    config={key:values[key] for key in fields}
+    config['lookahead_heading_budget_rad']=values.get('lookahead_heading_budget_rad',.4)
+    config['steering_slew_limit_radps']=values.get('steering_slew_limit_radps',0.)
+    return replace(AvoidanceConfig(),**config)
 
 
 def run(speed=3.,side='left',radius=math.inf,origin=(0.,0.),yaw=0.,lateral_error=0.,
         heading_error=0.,periods=(.05,),delay_steps=0,brake_to_default=False,
         disappear=False,interrupt_confirmation=False,duration=110.,
-        reference_horizon_m=50.,observation_range_m=None):
+        reference_horizon_m=50.,observation_range_m=None,config_overrides=None):
     lanes, point, obstacle =world(side,radius=radius,origin=origin,yaw=yaw)
     config=production_config()
     if not brake_to_default:config=replace(config,avoid_speed_kmh=speed)
+    if config_overrides:config=replace(config,**config_overrides)
     planner=StaticObstaclePlanner(lanes,config=config)
     local=LocalPathPlanner();pp=PurePursuit(config.wheelbase_m,config.max_wheel_angle_rad)
     original=lanes.links['O0']['points']+lanes.links['O1']['points'][1:]
@@ -54,7 +58,7 @@ def run(speed=3.,side='left',radius=math.inf,origin=(0.,0.),yaw=0.,lateral_error
     max_planned_curvature=0.
     turn_history=[actual_curvature]
     min_clearance=math.inf;max_clamp=0;entry_objects=set();return_objects=set()
-    previous_wheel_angle=0.;max_wheel_rate=0.
+    previous_wheel_angle=0.;previous_command=0.;max_wheel_rate=0.
     result=None;failure=None;interrupted=False
     for tick in range(math.ceil(duration/dt)):
         now=tick*dt
@@ -96,13 +100,17 @@ def run(speed=3.,side='left',radius=math.inf,origin=(0.,0.),yaw=0.,lateral_error
         while pending_paths and pending_paths[0][0]<=now+1e-12:
             active_path=pending_paths.pop(0)[1]
         if not active_path:continue
-        lookahead=calculate_lookahead_distance(velocity*3.6,config.lookahead_min_m,
-            config.lookahead_max_m,config.lookahead_preview_time_sec)
+        lookahead=path_lookahead_distance(velocity*3.6,active_path,measurement,
+            config.lookahead_min_m,config.lookahead_max_m,config.lookahead_preview_time_sec,
+            config.lookahead_heading_budget_rad)
         control=pp.compute(active_path,*measurement,lookahead_distance_m=lookahead)
         if control is None:
             failure=dict(reason='CONTROL_NONE',pose=pose,t=now);break
         requested=control['steering_normalized'];max_clamp+=int(abs(requested)>config.max_front_steer_normalized)
         command=to_morai_front_steer(requested,config.steering_sign,config.max_front_steer_normalized)
+        command=limit_steering_change(command*config.max_wheel_angle_rad,
+            previous_command*config.max_wheel_angle_rad,config.steering_slew_limit_radps,dt)/config.max_wheel_angle_rad
+        previous_command=command
         commands.append(command)
         applied=commands[-1-command_delay_ticks] if len(commands)>command_delay_ticks else 0.
         wheel_angle=applied/config.steering_sign*config.max_wheel_angle_rad
@@ -147,6 +155,7 @@ def run(speed=3.,side='left',radius=math.inf,origin=(0.,0.),yaw=0.,lateral_error
         controller_config=dict(wheelbase_m=config.wheelbase_m,max_wheel_angle_rad=config.max_wheel_angle_rad,
             max_front_steer_normalized=config.max_front_steer_normalized,steering_sign=config.steering_sign,
             control_rate_hz=config.control_rate_hz,command_delay_s=config.command_delay_s,
+            steering_slew_limit_radps=config.steering_slew_limit_radps,
             additional_delay_steps=delay_steps,planning_periods_s=periods,
             reference_horizon_m=reference_horizon_m,observation_range_m=observation_range_m),
         timing=dict(mean_ms=sum(timings)/len(timings),p95_ms=p95,worst_ms=max(timings),cycles=len(timings)))

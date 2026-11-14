@@ -8,6 +8,7 @@ import rclpy
 from rclpy.parameter import Parameter
 
 from edgenode_planning.planning_node import PlanningNode
+from edgenode_planning.local_path_planner import LocalPathPlanner
 
 
 def test_accepted_ros_parameter_change_reaches_actual_sharp_speed_next_cycle(route_editor_map):
@@ -38,8 +39,8 @@ def test_accepted_ros_parameter_change_reaches_actual_sharp_speed_next_cycle(rou
                   for i in range(26)]
         node.latest_pose = (0., 0., 0.)
         node.map_matcher.match = Mock(return_value={'link_id': 'AB', 'distance': 0., 'heading_diff': 0.})
-        node.local_path_planner.extract = Mock(return_value={
-            'points': points, 'nearest_index': 0, 'progress_arc_m': 0.})
+        node.local_path_planner.extract = Mock(return_value=LocalPathPlanner().extract(
+            points, 0., 0., horizon_m=80.))
         node.plan()
         assert node.speed_planner.plan(points)['target_speed_kmh'] == 3.5
         results = node.set_parameters([Parameter(name, value=20.) for name in (

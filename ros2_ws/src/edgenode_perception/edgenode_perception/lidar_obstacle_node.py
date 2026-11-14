@@ -1,8 +1,10 @@
 """Publish local MORAI LiDAR footprints through the existing world obstacle interface."""
 
 from dataclasses import fields
+from collections import deque
 import json
 import math
+import time
 
 import numpy as np
 import rclpy
@@ -12,14 +14,14 @@ from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import PointCloud2, PointField
+from sensor_msgs.msg import PointCloud2, PointField, Imu
 from sensor_msgs_py.point_cloud2 import dtype_from_fields
 from std_msgs.msg import Float32, Int32, String
 
 from edgenode_perception.lidar_status import LidarStatus, footprint_digest
 
 from edgenode_perception.lidar_obstacles import (
-    LidarObstacleConfig, detect_clusters, lidar_to_vehicle_xy, vehicle_to_world_xy,
+    LidarObstacleConfig, detect_clusters, lidar_to_vehicle_xy, vehicle_to_world_xy,gravity_ground_heights,
 )
 
 
@@ -74,6 +76,7 @@ class LidarObstacleNode(Node):
             ('sensor_max_source_age_sec', .6),
             ('sensor_future_tolerance_sec', .05),
             ('sensor_status_period_sec', .1),
+            ('gravity_ground_compensation',False),
         ):
             self.declare_parameter(name, default, descriptor)
         self.localization_timeout_sec = self.get_parameter('localization_timeout_sec').value
@@ -82,6 +85,9 @@ class LidarObstacleNode(Node):
                 or self.localization_timeout_sec <= 0.0):
             raise ValueError('localization_timeout_sec must be finite and positive')
         self.latest_pose = None
+        self._gravity_ground=self.get_parameter('gravity_ground_compensation').value
+        self._attitudes=deque(maxlen=200)
+        self._pending_cloud=None
         self.pose_received_ns = None
         self.pose_source_stamp_ns = None
         self.pose_stamp_ordered = False
@@ -94,6 +100,7 @@ class LidarObstacleNode(Node):
             raise ValueError('sensor_status_period_sec must be in (0, .2]')
         self.sensor_status_pub = self.create_publisher(
             String, self.get_parameter('sensor_status_topic').value, 10)
+        self.diagnostics_pub=self.create_publisher(String,'/perception/lidar_diagnostics',10)
         self.sensor_status_timer = self.create_timer(period, self.publish_sensor_status,
             clock=Clock(clock_type=ClockType.STEADY_TIME))
 
@@ -113,12 +120,40 @@ class LidarObstacleNode(Node):
         self.lidar_sub = self.create_subscription(
             PointCloud2, self.get_parameter('lidar_topic').value,
             self.lidar_callback, sensor_qos)
+        if self._gravity_ground:
+            # Keep timestamp-matched attitudes while a cloud is processed.
+            # Depth 1 can discard the matching IMU during a >100ms cloud job.
+            imu_qos=QoSProfile(history=HistoryPolicy.KEEP_LAST,depth=50,
+                reliability=ReliabilityPolicy.BEST_EFFORT,durability=DurabilityPolicy.VOLATILE)
+            self.create_subscription(Imu,'/Imu',self.imu_callback,imu_qos)
+            self.create_timer(.02,self.process_pending_cloud,clock=Clock(clock_type=ClockType.STEADY_TIME))
         self.localization_sub = self.create_subscription(
             Odometry, self.get_parameter('localization_topic').value,
             self.localization_callback, 10)
         self.get_logger().info(
             'LiDAR obstacle detector ready: sensor-local XYZ despite MORAI /map header; '
             'waiting for LiDAR and map odometry; no drive commands')
+
+    def imu_callback(self,msg):
+        q=msg.orientation;stamp=msg.header.stamp.sec*10**9+msg.header.stamp.nanosec
+        norm=math.hypot(q.x,q.y,q.z,q.w)
+        if (stamp<=0 or not math.isfinite(norm) or norm<1e-12
+                or msg.orientation_covariance[0]==-1 or (self._attitudes and stamp<=self._attitudes[-1][0])):return
+        x,y,z,w=(v/norm for v in (q.x,q.y,q.z,q.w))
+        roll=math.atan2(2*(w*x+y*z),1-2*(x*x+y*y))
+        pitch=math.asin(max(-1.,min(1.,2*(w*y-z*x))))
+        self._attitudes.append((stamp,roll,pitch))
+        self.process_pending_cloud()
+
+    def process_pending_cloud(self):
+        if self._pending_cloud is None:return
+        msg,received=self._pending_cloud
+        stamp=msg.header.stamp.sec*10**9+msg.header.stamp.nanosec
+        paired=bool(self._attitudes) and min(abs(row[0]-stamp) for row in self._attitudes)<=50_000_000
+        expired=self.get_clock().now().nanoseconds-received>=50_000_000
+        if paired or expired:
+            self._pending_cloud=None
+            self.lidar_callback(msg,allow_defer=False)
 
     def localization_callback(self, msg):
         """Read the same ROS quaternion yaw convention as Planning/Control."""
@@ -145,7 +180,20 @@ class LidarObstacleNode(Node):
         # Receipt time avoids mixing MORAI header time with the ROS node clock.
         self.pose_received_ns = self.get_clock().now().nanoseconds
 
-    def lidar_callback(self, msg):
+    def lidar_callback(self, msg, *, allow_defer=True):
+        if self._gravity_ground and allow_defer:
+            # KEEP_LAST(1): a newly received cloud supersedes a deferred cloud.
+            # Otherwise an old cloud can run after this one when its IMU arrives,
+            # manufacturing an OUT_OF_ORDER fault inside our own queue.
+            self._pending_cloud=None
+            stamp=msg.header.stamp.sec*10**9+msg.header.stamp.nanosec
+            paired=bool(self._attitudes) and min(abs(row[0]-stamp) for row in self._attitudes)<=50_000_000
+            if not paired:
+                # Cross-topic arrival order is not a sensor fault. Wait at most
+                # 50ms for its attitude without renewing the previous frame age.
+                self._pending_cloud=(msg,self.get_clock().now().nanoseconds)
+                return
+        started=time.perf_counter()
         now = self.get_clock().now()
         stamp_ns = msg.header.stamp.sec * 10**9 + msg.header.stamp.nanosec
         self.sensor_status.begin(stamp_ns, now.nanoseconds)
@@ -165,7 +213,16 @@ class LidarObstacleNode(Node):
             if len(xyz) and not np.isfinite(xyz).all(axis=1).any():
                 raise ValueError('cloud contains no finite XYZ returns')
             failure = 'PROCESSING_ERROR'
-            clusters = detect_clusters(xyz, self.config)
+            attitude=None
+            if self._gravity_ground:
+                attitude=min(self._attitudes,key=lambda row:abs(row[0]-stamp_ns)) if self._attitudes else None
+                if attitude is None or abs(attitude[0]-stamp_ns)>50_000_000:
+                    self.publish_obstacles(msg.header.stamp,[])
+                    self.sensor_status.finish(0,'',self.get_clock().now().nanoseconds,'IMU_UNAVAILABLE')
+                    self.publish_sensor_status();return
+                xyz=gravity_ground_heights(xyz,attitude[1],attitude[2])
+            cluster_stats={}
+            clusters = detect_clusters(xyz, self.config,diagnostics=cluster_stats)
         except Exception as error:
             self.get_logger().warning(
                 f'Invalid LiDAR cloud; publishing empty map obstacles: {error}',
@@ -175,6 +232,15 @@ class LidarObstacleNode(Node):
             self.publish_sensor_status()
             return
         obstacles = self.publish_obstacles(msg.header.stamp, clusters)
+        finite=xyz[np.isfinite(xyz).all(axis=1)]
+        self.diagnostics_pub.publish(String(data=json.dumps(dict(
+            source_stamp_ns=stamp_ns,raw_point_count=len(xyz),cluster_count=len(clusters),
+            max_return_distance_m=float(np.max(np.linalg.norm(finite[:,:2],axis=1))) if len(finite) else 0.,
+            max_cluster_distance_m=max((math.hypot(*c.center_xyz[:2]) for c in clusters),default=0.),
+            roi_max_x_m=self.config.roi_max_x,
+            ground_filter=cluster_stats,
+            imu_pair_delta_ms=abs(attitude[0]-stamp_ns)/1e6 if attitude is not None else None,
+            processing_ms=(time.perf_counter()-started)*1000.),allow_nan=False)))
         self.sensor_status.finish(len(clusters), footprint_digest('map', stamp_ns,
             [(p.position.x, p.position.y) for p in obstacles.poses]),
             self.get_clock().now().nanoseconds)

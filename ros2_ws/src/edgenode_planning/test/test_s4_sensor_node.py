@@ -40,6 +40,19 @@ def assert_stop(node):
     assert node.avoidance_planner.state == 'BLOCKED'
 
 
+def test_imu_pair_gap_is_a_bounded_hold_without_clearing_maneuver(node,clock):
+    feed(node,clock)
+    node.plan()
+    node.stop_for_sensor('IMU_UNAVAILABLE')
+    assert node._sensor_pause is not None
+    assert node.avoidance_planner.state!='BLOCKED'
+    node._sensor_pause['steady_started_ns']-=2_100_000_000
+    node.sensor_watchdog()
+    assert node.avoidance_planner.state=='BLOCKED'
+    assert not output(node, 'local_path').poses
+    assert node.avoidance_planner.state == 'BLOCKED'
+
+
 def assert_hold(node):
     assert output(node, 'target_speed').data == 0.
     assert not output(node, 'local_path').poses

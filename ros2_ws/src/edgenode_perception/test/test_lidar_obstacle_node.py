@@ -101,7 +101,7 @@ def test_lidar_subscription_matches_morai_best_effort_volatile_keep_last(node):
     assert qos.reliability == ReliabilityPolicy.BEST_EFFORT
     assert qos.durability == DurabilityPolicy.VOLATILE
     assert qos.history == HistoryPolicy.KEEP_LAST
-    assert qos.depth == 5
+    assert qos.depth == 1  # Existing latest-cloud policy; do not queue stale clouds.
     assert any(s[0] == Odometry and s[1] == '/localization/odometry'
                for s in node.test_subscriptions)
 
@@ -194,7 +194,9 @@ def test_nonfinite_points_are_removed_even_when_is_dense_claims_true(node):
     msg.is_dense = True
     node.lidar_callback(msg)
     assert len(output(node).poses) == 8
-    assert output(node).poses[0].position.x == pytest.approx(29.74)
+    xs=[p.position.x for p in output(node).poses]
+    assert min(xs) == pytest.approx(29.74-.025)
+    assert max(xs) == pytest.approx(29.74+.025)
 
 
 @pytest.mark.parametrize('kind', [

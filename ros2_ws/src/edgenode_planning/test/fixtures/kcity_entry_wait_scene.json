@@ -1,0 +1,122 @@
+{
+  "config": {
+    "transition_lengths_m": [
+      12.0,
+      16.0,
+      20.0
+    ],
+    "prediction_distance_m": 80.0,
+    "obstacle_margin_m": 0.25,
+    "observation_padding_m": 0.1,
+    "reference_clearance_m": 1.2,
+    "return_margin_m": 0.5,
+    "hold_duration_s": 3.0,
+    "hold_clearance_m": 1.0,
+    "avoid_speed_kmh": 10.0,
+    "deceleration_mps2": 2.0,
+    "reaction_time_s": 0.3,
+    "max_lateral_acceleration_mps2": 1.5,
+    "max_wheel_rate_radps": 0.6,
+    "steering_slew_limit_radps": 0.6,
+    "wheelbase_m": 2.84,
+    "max_wheel_angle_rad": 0.610865,
+    "max_front_steer_normalized": 0.7,
+    "steering_sign": -1.0,
+    "control_rate_hz": 30.0,
+    "lookahead_min_m": 3.5,
+    "lookahead_max_m": 12.0,
+    "lookahead_preview_time_sec": 0.8,
+    "lookahead_heading_budget_rad": 1.6,
+    "rollout_seconds": 2.0,
+    "command_delay_s": 0.1,
+    "acquisition_lateral_m": 0.15,
+    "acquisition_heading_rad": 0.13962634015954636,
+    "acquisition_end_region_m": 2.0,
+    "acquisition_confirmations": 3,
+    "tracking_limit_m": 0.3,
+    "normal_obstacle_confirmations": 2,
+    "normal_detection_latency_s": 1.6,
+    "normal_detection_margin_m": 2.0,
+    "entry_geometry_wait_distance_m": 6.0
+  },
+  "pose": [
+    136.79733786151402,
+    1354.480289963865,
+    1.5568237912619267
+  ],
+  "solid": [
+    [
+      136.45008147552204,
+      1391.824278741413
+    ],
+    [
+      137.73161868095994,
+      1391.824278741413
+    ],
+    [
+      139.01315588639784,
+      1391.824278741413
+    ],
+    [
+      139.01315588639784,
+      1392.5404292862672
+    ],
+    [
+      139.01315588639784,
+      1393.2565798311214
+    ],
+    [
+      137.73161868095994,
+      1393.2565798311214
+    ],
+    [
+      136.45008147552204,
+      1393.2565798311214
+    ],
+    [
+      136.45008147552204,
+      1392.5404292862672
+    ]
+  ],
+  "link_ids": [
+    "A219BS010404",
+    "A219BS010469",
+    "A219BS010408",
+    "A219BS010411",
+    "A219BS010415",
+    "A219BS010419",
+    "A219BS010632",
+    "A219BS010428",
+    "A219BS010429",
+    "A219BS010607",
+    "A219BS010073",
+    "A219BS010586",
+    "A219BS010594",
+    "A219BS010595",
+    "A219BS010596",
+    "A219BS010597",
+    "A219BS010593",
+    "A219BS010452",
+    "A219BS010585",
+    "A219BS010438",
+    "A219BS010603",
+    "A219BS010439",
+    "A219BS010600",
+    "A219BS010440",
+    "A219BS010320",
+    "A219BS010303",
+    "A219BS010314",
+    "A219BS010301",
+    "A219BS010119",
+    "A219BS010103",
+    "A219BS010102",
+    "A219BS010111",
+    "A219BS010109",
+    "A219BS010113",
+    "A219BS010115",
+    "A219BS010378"
+  ],
+  "last_state": "AVOID_ENTRY",
+  "last_reason": "",
+  "source": "MORAI s4-entry-min35-01 diagnostic pose; obstacle box reconstructed from recorded center and extent"
+}

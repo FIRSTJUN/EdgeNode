@@ -65,6 +65,8 @@ class PlanningNodeTest(unittest.TestCase):
             latest_obstacle_groups=[], latest_obstacle_valid=True,
             obstacle_received_ns=None, obstacle_stamp_ns=None,
             latest_speed_kmh=0., latest_turn_curvature=0.,
+            _use_ego_status=False,_sensor_pause=None,_sensor_pause_offset_ns=0,
+            _sensor_resume_validation=False,_return_search=Mock(),
             _validation_pending_stamp_ns=None,_validation_fresh_stamps=set(),
             _candidate_marker_ids=set(),
             _avoidance_path_publishers={name:Mock() for name in ('original_lane_center','left_lane_center',
@@ -96,7 +98,7 @@ class PlanningNodeTest(unittest.TestCase):
             'global_path', 'local_path',
             'recommended_speed', 'speed_mode', 'speed_curvature', 'speed_max_curvature',
             'drive_status','fsm_state','local_path_index','local_path_progress',
-            'avoidance_state','avoidance_debug','runtime_cruise_speed','runtime_curve_speed',
+            'avoidance_state','avoidance_stage','avoidance_debug','runtime_cruise_speed','runtime_curve_speed',
             'runtime_sharp_curve_speed','runtime_max_drive_speed',
         ):
             setattr(self.node, name + '_pub', Mock())
@@ -376,7 +378,7 @@ class PlanningNodeTest(unittest.TestCase):
             self.assert_stopped()
         self.node.dijkstra_planner.plan.assert_called_once_with('link_42', 'goal_default')
         self.assertEqual(self.node.local_path_planner.extract.call_args_list, [
-            call(points, x, 0.0, horizon_m=20.0, previous_index=previous,
+            call(self.node._prepared_route[1], x, 0.0, horizon_m=20.0, previous_index=previous,
                  search_back=3, search_forward=10, resample_spacing_m=2.0,
                  previous_arc_m=arc)
             for x, previous, arc in ((10.0, None, None), (20.0, 2, 10.0), (50.0, 4, 20.0))
@@ -600,6 +602,7 @@ class PlanningNodeTest(unittest.TestCase):
         self.set_speed_route(points)
         self.node.local_path_planner.extract.return_value = {
             'points': local_points, 'nearest_index': 5, 'progress_arc_m': 5.0,
+            'nearest_distance_m':0.0,'path_length_m':4.0,
         }
         PlanningNode.plan(self.node)
         self.assertIs(self.node.speed_planner.plan.call_args.args[0], local_points)
@@ -1300,6 +1303,7 @@ class PlanningNodeTest(unittest.TestCase):
         self.node.latest_pose = (0.0, 0.0, 0.0)
         self.node.local_path_planner.extract.return_value = {
             'points': points, 'nearest_index': 0, 'progress_arc_m': 0.0,
+            'nearest_distance_m':0.0,'path_length_m':12.5,
         }
 
 
@@ -1354,6 +1358,7 @@ class PlanningNodeTest(unittest.TestCase):
         PlanningNode.plan(self.node)
         self.node.local_path_planner.extract.return_value = {
             'points': [[0, 0, 0]], 'nearest_index': 0, 'progress_arc_m': 0.0,
+            'nearest_distance_m':0.0,'path_length_m':0.0,
         }
         PlanningNode.plan(self.node)
         self.assertIsNone(self.node._previous_speed_mode)

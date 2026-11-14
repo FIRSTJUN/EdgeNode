@@ -5,6 +5,8 @@ import time
 import rclpy
 from rclpy.node import Node
 from rclpy.clock import Clock, ClockType
+from rclpy.parameter import Parameter
+from rclpy.qos import QoSProfile, DurabilityPolicy
 
 from geometry_msgs.msg import PoseArray, PoseStamped
 from nav_msgs.msg import Odometry, Path
@@ -39,6 +41,8 @@ from .sensor_readiness import SensorReadiness
 from .return_search import ReturnSearch
 from .s4_distance_safety import DistancePolicy, DistanceSafety, load_evidence
 from .lane_geometry import arc
+from .route_resume import mission_suffix, link_index_at_progress
+from .morai_speed_safety import stopping_speed_cap, required_deceleration_distance
 
 
 # Only freshness/initial-pair gaps may suspend a maneuver temporarily. Invalid
@@ -48,7 +52,7 @@ TRANSIENT_SENSOR_REASONS=frozenset((
     'SENSOR_STATUS_TIMEOUT','SENSOR_STATUS_STALE','OBSTACLE_FRAME_TIMEOUT',
     'SENSOR_INPUT_TIMEOUT','SENSOR_SOURCE_STALE','INPUT_TIMEOUT','STALE_INPUT',
     'LOCALIZATION_UNAVAILABLE','PLANNING_LOCALIZATION_UNAVAILABLE',
-    'PLANNING_LOCALIZATION_STALE','EGO_STATUS_STALE'))
+    'PLANNING_LOCALIZATION_STALE','EGO_STATUS_STALE','IMU_UNAVAILABLE','SENSOR_IMU_UNAVAILABLE'))
 
 
 class PlanningNode(Node):
@@ -142,6 +146,8 @@ class PlanningNode(Node):
                 ('speed_curvature_topic', '/planning/speed_curvature'),
                 ('speed_max_curvature_topic', '/planning/speed_max_curvature'),
                 ('goal_node_id', 'A119BS010245'),
+                ('route_start_link_id', ''),
+                ('route_link_occurrence', -1),
                 # Humble infers Python [] as BYTE_ARRAY and YAML [] as NOT_SET.
                 # Allow both and STRING_ARRAY; plan_route validates nonempty values.
                 ('route_node_ids', [], ParameterDescriptor(dynamic_typing=True)),
@@ -181,6 +187,21 @@ class PlanningNode(Node):
             curvature_persistence_m=self.get_parameter('speed_curvature_persistence_m').value,
             curvature_hysteresis=self.get_parameter('speed_curvature_hysteresis').value,
         )
+        for name,value in (('speed_anticipatory_enabled',False),('speed_deceleration_mps2',2.),
+                ('speed_reaction_time_s',.6),('speed_max_lateral_acceleration_mps2',1.5),
+                ('morai_speed_admission_enabled',False),('morai_validated_speed_cap_kmh',5.),
+                ('morai_verified_detection_distance_m',20.),('morai_braking_delay_s',1.6)):
+            self.declare_parameter(name,value,ParameterDescriptor(read_only=True))
+        self.speed_planner.anticipatory=self.get_parameter('speed_anticipatory_enabled').value
+        self.speed_planner.braking_deceleration_mps2=self.get_parameter('speed_deceleration_mps2').value
+        self.speed_planner.reaction_time_s=self.get_parameter('speed_reaction_time_s').value
+        self.speed_planner.max_lateral_acceleration_mps2=self.get_parameter('speed_max_lateral_acceleration_mps2').value
+        self._morai_speed_policy=None
+        if self.get_parameter('morai_speed_admission_enabled').value:
+            self._morai_speed_policy={name:self.get_parameter('morai_'+name).value for name in
+                ('validated_speed_cap_kmh','verified_detection_distance_m','braking_delay_s')}
+            if not all(_finite_number(v) and v>0 for v in self._morai_speed_policy.values()):
+                raise ValueError('positive measured MORAI speed/range/delay limits required')
 
         self.declare_parameter('obstacle_topic', '/planning/obstacles')
         self.declare_parameter('obstacle_points_per_cluster', 8, ParameterDescriptor(read_only=True))
@@ -278,6 +299,14 @@ class PlanningNode(Node):
                                                           self.reset_avoidance)
 
         self._previous_speed_mode = None
+        self._mission_routing_enabled=True
+        self._relocation=None;self._relocation_stamps=set();self._last_reset_event=None
+        self._reset_history=[];self._route_error=''
+        self._safety_history=[]
+        self.declare_parameter('s4_control_horizon_m',20.,ParameterDescriptor(read_only=True))
+        self._s4_control_horizon=self.get_parameter('s4_control_horizon_m').value
+        self.declare_parameter('max_local_path_start_distance_m',3.5,ParameterDescriptor(read_only=True))
+        self._max_local_path_start_distance=self.get_parameter('max_local_path_start_distance_m').value
         self._route_key = None
         self._route_result = None
         self._progress_index = None
@@ -383,6 +412,9 @@ class PlanningNode(Node):
             self.localization_callback,
             10,
         )
+        self.create_subscription(String,'/localization/reset_event',self.localization_reset_callback,
+            QoSProfile(depth=10,durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self.diagnostics_pub=self.create_publisher(String,'/planning/diagnostics',10)
 
         self.declare_parameter('planning_period_sec',.05,ParameterDescriptor(read_only=True))
         period=self.get_parameter('planning_period_sec').value
@@ -620,10 +652,19 @@ class PlanningNode(Node):
         if getattr(self,'_last_avoidance_state_key',None)!=state_key:
             overlay=f' [{state_key[1]}]' if state_key[1]!=stage else ''
             self.get_logger().info(f'S4 {stage}{overlay} {state_key[2]}')
+            if state_key[2]=='NO_VALID_ADJACENT_LANE':
+                self.get_logger().info('S4 entry context: '+json.dumps(result.get('entry_context',{})))
+            history=getattr(self,'_safety_history',None)
+            if history is not None and result['state']=='BLOCKED' and result.get('reason')!='PLANNING_NOT_READY':
+                history.append(dict(stamp_ns=self.get_clock().now().nanoseconds,
+                    reason=result.get('reason'),pose=getattr(self,'latest_pose',None),
+                    entry_context=result.get('entry_context',{})))
+                del history[:-20]
             self._last_avoidance_state_key=state_key
         self.avoidance_state_pub.publish(String(data=result['state']))
         self.avoidance_stage_pub.publish(String(data=stage))
-        self.avoidance_debug_pub.publish(String(data=json.dumps(diagnostic(result),allow_nan=False)))
+        debug=diagnostic(result);debug.setdefault('stage',stage)
+        self.avoidance_debug_pub.publish(String(data=json.dumps(debug,allow_nan=False)))
         key=(id(result.get('candidates')),stage,result['state'],result.get('reason'),result.get('selected_lane'))
         cache=getattr(self,'_candidate_cache',None)
         if cache is None or cache[0]!=key:
@@ -669,6 +710,55 @@ class PlanningNode(Node):
         # Native MORAI velocity is vehicle-local; retain meaningful reverse.
         self.latest_speed_kmh=3.6*(-speed if velocity.x<-.02 else 0. if velocity.x<0. else speed)
 
+    def localization_reset_callback(self,msg):
+        try:
+            event=json.loads(msg.data)
+            if event.get('schema_version')!=1 or event.get('state') not in ('PENDING','CONFIRMED','CANCELLED'):
+                return
+            key=(event['session_id'],event['seq'],event['state'])
+            if key==self._last_reset_event:return
+            age=(self.get_clock().now().nanoseconds-event['stamp_ns'])/1e9
+            if not 0<=age<=2.:return
+            if event['state']=='CONFIRMED' and (len(event.get('position_xy',()))!=2 or
+                    not all(_finite_number(v) for v in event['position_xy'])):return
+        except (ValueError,KeyError,TypeError):return
+        self._last_reset_event=key;self._reset_history.append(event)
+        self._reset_history=self._reset_history[-20:]
+        self.set_parameters([Parameter('enable_drive',value=False)])
+        self._return_search.cancel()
+        # A pose reset invalidates a maneuver, never an existing hard latch.
+        if event['state']=='CONFIRMED' and self.avoidance_planner.state!='BLOCKED':self.avoidance_planner.reset()
+        self._relocation=event;self._relocation_stamps.clear()
+        self._validation_pending_stamp_ns=None;self._validation_fresh_stamps.clear()
+        self._publish_relocalization_stop()
+        if event['state']=='CONFIRMED':
+            self._progress_index=None;self._progress_arc_m=None
+            self._route_key=None;self._route_result=None;self._previous_speed_mode=None
+            self.map_matcher.previous_link_id=None
+        self.get_logger().info('Planning relocation: '+json.dumps(event))
+
+    def _publish_relocalization_stop(self):
+        path=Path();path.header.frame_id='map';path.header.stamp=self.get_clock().now().to_msg()
+        self.target_speed_pub.publish(Float32(data=0.));self.local_path_pub.publish(path)
+        self.drive_status_pub.publish(String(data='DISABLED'))
+        self.fsm_state_pub.publish(String(data='WAIT_FOR_LOCALIZATION'))
+        self.state_pub.publish(String(data='RELOCALIZING'))
+        self.publish_avoidance(dict(state='RELOCALIZING',stage='RELOCALIZING',blocked=True,
+            points=(),active=False,reason='LOCALIZATION_RESET',reset_event=self._relocation))
+
+    def _relocation_ready(self):
+        event=self._relocation
+        if event['state']=='PENDING' or self.latest_pose is None:return False
+        now=self.get_clock().now().nanoseconds
+        stamp=getattr(self,'latest_pose_stamp_ns',0)
+        if stamp<=event['stamp_ns'] or not 0<=now-stamp<=600_000_000:return False
+        if event['state']=='CONFIRMED' and math.dist(self.latest_pose[:2],event['position_xy'])>.75:return False
+        if self.sensor_guard is not None and self.sensor_reason(now):return False
+        if self.sensor_guard is not None and (self.sensor_guard.matched is None or
+                self.sensor_guard.matched[0]['source_stamp_ns']<=event['stamp_ns']):return False
+        self._relocation_stamps.add(stamp)
+        return len(self._relocation_stamps)>=3
+
     def localization_callback(self, msg):
         """Store the latest pose; map matching runs only in the planning timer."""
         position = msg.pose.pose.position
@@ -710,6 +800,11 @@ class PlanningNode(Node):
         every tick. Match loss retains progress/cache but publishes no Path.
         An active route configuration change invalidates both immediately.
         """
+        plan_started=time.monotonic()
+        if getattr(self,'_relocation',None) is not None:
+            if not self._relocation_ready():
+                self._publish_relocalization_stop();return
+            self._relocation=None
         # Whole timer duration includes route extraction, global path publication
         # and candidate search. Steady time also covers a paused ROS clock.
         s4_started = time.perf_counter() if getattr(self, 'distance_safety', None) else None
@@ -742,6 +837,11 @@ class PlanningNode(Node):
         else:
             goal_node_id = self.get_parameter('goal_node_id').value
             route_key = ('goal', goal_node_id)
+        mission_start='';mission_occurrence=-1
+        if getattr(self,'_mission_routing_enabled',False):
+            mission_start=self.get_parameter('route_start_link_id').value
+            mission_occurrence=self.get_parameter('route_link_occurrence').value
+            if mission_start and use_waypoints:route_key=(*route_key,mission_start,mission_occurrence)
         if route_key != self._route_key:
             if self._route_key is not None and self.avoidance_planner.state!='NORMAL':
                 # An operator may replace a mission while disarmed and parked.
@@ -795,9 +895,16 @@ class PlanningNode(Node):
                 # active waypoint list (or legacy goal) can invalidate it.
                 if route_key != self._route_key:
                     if use_waypoints:
-                        self._route_result = self.dijkstra_planner.plan_route(
-                            current_link, route_node_ids,
-                        )
+                        self._route_error=''
+                        if mission_start:
+                            try:
+                                self._route_result=mission_suffix(self.dijkstra_planner,mission_start,
+                                    route_node_ids,current_link,mission_occurrence)
+                            except (ValueError,TypeError,KeyError,IndexError) as error:
+                                self._route_result=None;self._route_error=str(error)
+                                self.get_logger().warning('Mission resume rejected: '+str(error))
+                        else:
+                            self._route_result = self.dijkstra_planner.plan_route(current_link, route_node_ids)
                     else:
                         self._route_result = self.dijkstra_planner.plan(
                             current_link, goal_node_id,
@@ -843,8 +950,12 @@ class PlanningNode(Node):
                         self.global_path_pub.publish(global_path)
                         self._global_path_published_ns=now_ns
 
+                    prepared=getattr(self,'_prepared_route',None)
+                    if prepared is None or prepared[0] is not self._route_result:
+                        self._prepared_route=(self._route_result,
+                            self.local_path_planner.prepare(self._route_result['points']))
                     local_result = self.local_path_planner.extract(
-                        self._route_result['points'], x, y,
+                        self._prepared_route[1], x, y,
                         horizon_m=self.get_parameter('local_path_length_m').value,
                         previous_index=self._progress_index,
                         search_back=self.get_parameter('local_path_search_back').value,
@@ -852,17 +963,21 @@ class PlanningNode(Node):
                         resample_spacing_m=self.get_parameter('local_path_resample_spacing_m').value,
                         previous_arc_m=self._progress_arc_m,
                     )
+                    if (local_result is not None and self.avoidance_planner.state in ('NORMAL','DETECT')
+                            and local_result['nearest_distance_m']>getattr(self,'_max_local_path_start_distance',math.inf)):
+                        self.get_logger().warning('Local path is too far from Ego; relocation/replanning required',throttle_duration_sec=5.)
+                        local_result=None;state_value='LOCAL_PATH_OUT_OF_RANGE'
                     if local_result is not None:
                         self._progress_index = local_result['nearest_index']
                         self._progress_arc_m = local_result['progress_arc_m']
                         active_local_points = local_result['points']
                         hazard_points = active_local_points
                         s4_kwargs = {}
-                        control_horizon = self.get_parameter('local_path_length_m').value
+                        control_horizon = getattr(self,'_s4_control_horizon',self.get_parameter('local_path_length_m').value)
                         if s4_started is not None:
                             policy = self.distance_safety.policy
                             preview = self.local_path_planner.extract(
-                                self._route_result['points'], x, y, horizon_m=policy.preview_m,
+                                self._prepared_route[1], x, y, horizon_m=policy.preview_m,
                                 previous_index=self._progress_index,
                                 search_back=self.get_parameter('local_path_search_back').value,
                                 search_forward=self.get_parameter('local_path_search_forward').value,
@@ -871,7 +986,10 @@ class PlanningNode(Node):
                             hazard_points = preview['points'] if preview else ()
                             self.refresh_distance(s4_started, self._route_result.get('link_ids', ()))
                             metrics = self._s4_distance_state
-                            if (not hazard_points or arc(hazard_points)[-1] < metrics.get('stopping_required_m', math.inf)):
+                            # An unpaired sensor frame already holds STOP with
+                            # its bounded recovery timer; absent distance metrics
+                            # must not relabel that first cause as a map fault.
+                            if self._sensor_pause is None and (not hazard_points or arc(hazard_points)[-1] < metrics.get('stopping_required_m', math.inf)):
                                 self.stop_for_safety('S4_DISTANCE_MAP_STOPPING_SUPPORT')
                             evidence = self.distance_safety.evidence
                             if evidence and hazard_points and metrics.get('stopping_required_m'):
@@ -923,6 +1041,9 @@ class PlanningNode(Node):
                                     self.latest_obstacle_groups,(x,y,yaw),speed_kmh=self.latest_speed_kmh,
                                     actual_curvature=self.latest_turn_curvature,current_link_id=current_link,
                                     route_link_ids=self._route_result.get('link_ids',()),observation_valid=observation_valid,
+                                    route_link_index=link_index_at_progress(self._route_result,self.dijkstra_planner,
+                                        current_link,self._progress_arc_m) if mission_start else None,
+                                    observation_stamp_ns=getattr(self,'obstacle_stamp_ns',None),
                                     control_horizon_m=control_horizon,now_sec=(now_ns-self._sensor_pause_offset_ns)/1e9,
                                     global_reference=self._route_result.get('points',active_local_points),
                                     return_search=self._return_search, **s4_kwargs)
@@ -996,9 +1117,11 @@ class PlanningNode(Node):
 
                         self.local_path_pub.publish(local_path)
 
-                        speed_result = self.speed_planner.plan(
-                            active_local_points, previous_speed_mode=self._previous_speed_mode,
-                        )
+                        speed_kwargs=dict(previous_speed_mode=self._previous_speed_mode)
+                        if getattr(self.speed_planner,'anticipatory',False):
+                            speed_kwargs['measured_speed_kmh']=self.latest_speed_kmh
+                            speed_kwargs['measured_curvature']=self.latest_turn_curvature
+                        speed_result = self.speed_planner.plan(active_local_points,**speed_kwargs)
                         if (speed_result is not None
                                 and _finite_number(speed_result['target_speed_kmh'])
                                 and speed_result['target_speed_kmh'] >= 0):
@@ -1091,6 +1214,31 @@ class PlanningNode(Node):
 
         if s4_started is not None:
             target_speed.data = min(target_speed.data, self.distance_safety.policy.speed_cap_kmh)
+        admission=getattr(self,'_morai_speed_policy',None)
+        admitted_cap=None
+        if admission is not None:
+            available=max(0.,local_result['path_length_m']-
+                self.avoidance_planner.body.wheelbase_m-self.avoidance_planner.body.front_overhang_m) if local_result else 0.
+            admitted_cap=min(admission['validated_speed_cap_kmh'],stopping_speed_cap(
+                min(available,admission['verified_detection_distance_m']),
+                self.avoidance_planner.config.deceleration_mps2,admission['braking_delay_s']))
+            target_speed.data=min(target_speed.data,admitted_cap)
+        if hasattr(self,'diagnostics_pub'):
+            self.diagnostics_pub.publish(String(data=json.dumps(dict(
+                planning_elapsed_ms=(time.monotonic()-plan_started)*1000.,
+                local_path_length_m=local_result['path_length_m'] if local_result else 0.,
+                nearest_path_distance_m=local_result['nearest_distance_m'] if local_result else None,
+                s4_control_horizon_m=getattr(self,'_s4_control_horizon',None),
+                route_error=getattr(self,'_route_error',''),
+                remaining_waypoints=self._route_result.get('remaining_waypoints') if self._route_result else None,
+                configured_cruise_kmh=self.get_parameter('cruise_speed_kmh').value,
+                recommended_speed_kmh=recommended_speed,admitted_speed_cap_kmh=admitted_cap,
+                speed_admission=admission,reset_history=getattr(self,'_reset_history',[]),
+                safety_history=getattr(self,'_safety_history',[]),
+                deceleration_to_avoidance_m=required_deceleration_distance(
+                    max(0.,self.latest_speed_kmh),self.avoidance_planner.config.avoid_speed_kmh,
+                    deceleration_mps2=self.avoidance_planner.config.deceleration_mps2)
+                    if _finite_number(self.latest_speed_kmh) else None),allow_nan=False)))
 
         state = String()
         state.data = state_value

@@ -76,6 +76,7 @@ class RouteEditorNode(Node):
             'route_save_dir': '/workspace/local_data/kcity_routes',
             'planning_node_name': '/planning_node',
             'start_link_id': '',
+            'saved_route_start_link_id': '',
             'show_mgeo_nodes': True,
             'show_waypoint_node_ids': False,
             'parameter_timeout_sec': 3.0,
@@ -308,7 +309,8 @@ class RouteEditorNode(Node):
     def load_callback(self, request, response):
         return self._edit_service(response, lambda: self.editor.load(
             self._value('route_save_dir'), self._value('route_name'),
-            start_link_id=self._start_link_candidate()), 'ROUTE_LOADED')
+            start_link_id=self._value('saved_route_start_link_id') or self._start_link_candidate(),
+            prefer_saved_start=True), 'ROUTE_LOADED')
 
     async def _call_parameter_service(self, client, request):
         future = client.call_async(request)
@@ -363,6 +365,7 @@ class RouteEditorNode(Node):
             # Atomic with drive=false: even a late response or racing enable
             # cannot apply a new route while preserving an armed drive state.
             parameters = [Parameter('enable_drive', value=False),
+                          Parameter('route_start_link_id',value=self.preview_start_link_id),
                           Parameter('route_node_ids', Parameter.Type.STRING_ARRAY, node_ids)]
             result = (await self._call_parameter_service(self.set_parameters_client,
                 SetParametersAtomically.Request(parameters=[p.to_parameter_msg() for p in parameters]))).result

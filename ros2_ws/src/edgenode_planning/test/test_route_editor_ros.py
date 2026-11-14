@@ -55,6 +55,7 @@ def test_real_ros_late_join_click_preview_and_async_activation(route_editor_map,
         stub.declare_parameter('mgeo_dir', str(route_editor_map))
         stub.declare_parameter('global_path_frame_id', 'map')
         stub.declare_parameter('route_node_ids', [], ParameterDescriptor(dynamic_typing=True))
+        stub.declare_parameter('route_start_link_id', '')
         editor = RouteEditorNode()
         nodes.append(editor)
         probe = Node('probe')
@@ -115,6 +116,7 @@ def test_real_ros_late_join_click_preview_and_async_activation(route_editor_map,
         until(future.done)
         assert future.result().success, future.result().message
         assert stub.get_parameter('route_node_ids').value == ['C']
+        assert stub.get_parameter('route_start_link_id').value == 'AB'
         assert stub.get_parameter('enable_drive').value is False
 
         # Also exercise the real steady-clock timeout, with the remote request

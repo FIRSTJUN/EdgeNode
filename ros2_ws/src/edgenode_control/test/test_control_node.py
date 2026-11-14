@@ -9,7 +9,7 @@ from nav_msgs.msg import Odometry, Path
 from geometry_msgs.msg import PoseStamped
 from morai_ros2_msgs.msg import CtrlCmd, EgoVehicleStatus
 from rclpy.time import Time
-from std_msgs.msg import Float32
+from std_msgs.msg import Float32, String
 
 from edgenode_control.control_node import ControlNode, PID
 from edgenode_control.pure_pursuit import PurePursuit
@@ -114,6 +114,18 @@ class ControlNodeTest(unittest.TestCase):
         cmd=self.publisher.publish.call_args.args[0]
         self.assertEqual(cmd.front_steer,0.)
         self.assertGreater(cmd.brake,0.)
+
+    def test_normal_preview_tuning_does_not_change_the_s4_preview(self):
+        self.parameters['normal_lookahead_min_m'] = 3.5
+        for state, expected in (('NORMAL', 3.5), ('DETECT', 2.5), ('AVOID_ENTRY', 2.5), ('RETURN', 2.5)):
+            self.node.avoidance_state_cb(String(data=state))
+            self.command()
+            self.assertAlmostEqual(self.publishers['/control/lookahead_distance'].publish.call_args.args[0].data, expected)
+        self.node.avoidance_state_cb(String(data='NORMAL'))
+        self.now += 700_000_000
+        self.feed_inputs()
+        self.command()
+        self.assertAlmostEqual(self.publishers['/control/lookahead_distance'].publish.call_args.args[0].data, 2.5)
 
     def test_constructor_creates_new_subscriptions_and_default_parameters(self):
         self.subscriptions.assert_any_call(

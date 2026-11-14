@@ -133,6 +133,7 @@ class RouteEditor:
             'route_name': route_name,
             'frame_id': 'map',
             'waypoint_node_ids': self.waypoint_node_ids,
+            'start_link_id': self.start_link_id,
             'created_from': {'mgeo_dir': self.mgeo_dir},
         }
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -151,7 +152,7 @@ class RouteEditor:
                 temporary.unlink()
         return destination
 
-    def load(self, save_dir, route_name, start_link_id=None):
+    def load(self, save_dir, route_name, start_link_id=None, *, prefer_saved_start=False):
         """Restore a draft, optionally capturing a new session start on success."""
         source = self.route_file(save_dir, route_name)
         try:
@@ -163,6 +164,9 @@ class RouteEditor:
             raise RouteEditorError('INVALID_ROUTE_FILE', 'expected a mapping with frame_id: map')
         node_ids = data.get('waypoint_node_ids')
         self._validate_waypoints(node_ids)
+        saved_start=data.get('start_link_id','')
+        if not isinstance(saved_start,str) or (saved_start and saved_start not in self.valid_link_ids):
+            raise RouteEditorError('INVALID_ROUTE_FILE','invalid saved start_link_id')
         origin = data.get('created_from', {})
         if not isinstance(origin, dict):
             raise RouteEditorError('INVALID_ROUTE_FILE', 'created_from must be a mapping')
@@ -176,6 +180,7 @@ class RouteEditor:
         for node_id in node_ids:
             if not normalized or normalized[-1] != node_id:
                 normalized.append(node_id)
+        if saved_start and (prefer_saved_start or start_link_id is None):start_link_id=saved_start
         if start_link_id is not None:
             self.start_link_id = (start_link_id if isinstance(start_link_id, str)
                                   and start_link_id in self.valid_link_ids else '')

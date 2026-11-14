@@ -106,6 +106,11 @@ def swept_body(body, first, second, margin=0.):
     if first==second:
         return inflate(body.polygon(*first),margin)
     angle = abs(math.atan2(math.sin(second[2]-first[2]), math.cos(second[2]-first[2])))
+    if angle==0.:
+        # Constant orientation + straight translation has an exact convex sweep.
+        # Half the longitudinal step is not a lateral uncertainty: adding it
+        # made harmless guardrails collide when path spacing increased.
+        return inflate(convex_hull(body.polygon(*first)+body.polygon(*second)),margin+EPS)
     radius = max(math.hypot(x,y) for x,y in body.polygon(0.,0.,0.))
     chord=math.dist(first[:2],second[:2])
     travel=chord*angle/(2*math.sin(angle/2)) if angle>1e-9 else chord

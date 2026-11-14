@@ -1,18 +1,22 @@
 """GPS local 위치와 IMU yaw/gyro를 융합하는 4-state EKF 노드."""
 
 import math
+import json
+import uuid
 
 import rclpy
-from morai_ros2_msgs.msg import GPSMessage
+from morai_ros2_msgs.msg import GPSMessage, EgoVehicleStatus, MultiEgoSetting
 from nav_msgs.msg import Odometry
 from pyproj import Transformer
 from pyproj.exceptions import ProjError
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from sensor_msgs.msg import Imu
 from std_msgs.msg import Float32, String
+from std_srvs.srv import Trigger
 
 from edgenode_localization.ekf import EKF
+from edgenode_localization.pose_reset import PoseResetDetector
 
 
 class LocalizationNode(Node):
@@ -50,6 +54,10 @@ class LocalizationNode(Node):
             ('status_publish_period_sec', 1.0),
             ('qos_depth', 10),
             ('sensor_qos_reliability', 'best_effort'),
+            ('morai_pose_reset_enabled', False),
+            ('morai_ego_id', 0),
+            ('pose_reset_jump_m', 10.0),
+            ('pose_reset_confirmations', 3),
         ]:
             self.declare_parameter(name, default)
 
@@ -112,6 +120,20 @@ class LocalizationNode(Node):
         self.latest_gps = None
         self.latest_imu = None
         self.status = 'WAIT_FOR_SENSORS'
+        self._reset_enabled=self.get_parameter('morai_pose_reset_enabled').value
+        self._reset_detector=PoseResetDetector(
+            jump_m=self.get_parameter('pose_reset_jump_m').value,
+            confirmations=self.get_parameter('pose_reset_confirmations').value)
+        self._reset_session=uuid.uuid4().hex;self._reset_seq=0;self._reset_pending=False
+        self._ego_speed=None;self._ego_received_ns=None
+        self._drive_status='';self._drive_received_ns=None;self._valid_imu_received_ns=None
+        self.reset_event_publisher=self.create_publisher(String,'/localization/reset_event',
+            QoSProfile(depth=10,durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        if self._reset_enabled:
+            self.create_subscription(EgoVehicleStatus,'/ego_vehicle_status',self.reset_ego_callback,10)
+            self.create_subscription(MultiEgoSetting,'/multi_ego_setting',self.reset_command_callback,10)
+            self.create_subscription(String,'/planning/drive_status',self.reset_drive_callback,10)
+        self.create_service(Trigger,'/localization/reinitialize',self.reinitialize_callback)
 
         sensor_qos = QoSProfile(
             depth=depth,
@@ -197,6 +219,20 @@ class LocalizationNode(Node):
         self.gps_odometry_publisher.publish(odometry)
 
         self.latest_gps_local = (local_x, local_y)
+        self._valid_gps_stamp_ns=stamp_ns
+        if self._reset_enabled:
+            reset_state=self._reset_detector.observe(local_x,local_y,stamp_ns)
+            if reset_state=='INVALID':return
+            if reset_state in ('PENDING','CONFIRMED'):
+                self._previous_gps=None
+                if not self._reset_pending:self._begin_reset('GPS_RELOCATION')
+                if reset_state=='CONFIRMED' and self._reset_stationary():
+                    self._commit_reset(local_x,local_y,stamp_ns)
+                return
+            if reset_state=='CANCELLED':
+                self._reset_pending=False;self.status='EKF_READY'
+                self._reset_event('CANCELLED','GPS_OUTLIER_REJECTED')
+                self._previous_gps=None
         if self.ekf.initialized:
             self.ekf.update_position(local_x, local_y)
 
@@ -264,6 +300,7 @@ class LocalizationNode(Node):
             self.get_logger().warning(f'IMU dt={dt:.6f}s: 중복/과거 프레임 생략',
                                       throttle_duration_sec=5.0)
             return
+        self._valid_imu_received_ns=self.get_clock().now().nanoseconds
         # 중복/과거 stamp로 적분 기준을 되돌려 같은 구간을 중복 적분하지 않는다.
         # 시간 기준 전환 또는 긴 공백 후에는 현재 stamp를 새 기준으로 사용한다.
         if dt is None or dt > 0.0:
@@ -293,6 +330,62 @@ class LocalizationNode(Node):
         self.status = 'EKF_READY'
         self.get_logger().info('EKF_READY: GPS 위치와 IMU yaw로 초기화 (v=0 m/s)')
         return True
+
+    def reset_ego_callback(self,msg):
+        speed=math.hypot(msg.velocity.x,msg.velocity.y,msg.velocity.z)*3.6
+        self._ego_speed=speed if math.isfinite(speed) else None
+        self._ego_received_ns=self.get_clock().now().nanoseconds
+
+    def reset_drive_callback(self,msg):
+        self._drive_status=msg.data;self._drive_received_ns=self.get_clock().now().nanoseconds
+
+    def _reset_stationary(self):
+        now=self.get_clock().now().nanoseconds
+        return (self._ego_speed is not None and self._ego_speed<.2
+            and self.latest_imu_yaw is not None and self._drive_status=='DISABLED'
+            and all(stamp is not None and 0<=now-stamp<=600_000_000 for stamp in
+                    (self._ego_received_ns,self._drive_received_ns,self._valid_imu_received_ns)))
+
+    def _reset_event(self,state,reason,xy=None):
+        event=dict(schema_version=1,session_id=self._reset_session,seq=self._reset_seq,
+            state=state,reason=reason,stamp_ns=self.get_clock().now().nanoseconds)
+        if xy is not None:event['position_xy']=list(xy)
+        self.reset_event_publisher.publish(String(data=json.dumps(event)))
+        self.get_logger().info('Localization reset: '+json.dumps(event))
+
+    def _begin_reset(self,reason):
+        self._reset_pending=True;self._reset_seq+=1;self.status='EKF_RESET_PENDING'
+        self._previous_gps=None;self._reset_event('PENDING',reason)
+        self.publish_status()
+
+    def _commit_reset(self,x,y,stamp_ns):
+        self.ekf.initialize(x,y,self.latest_imu_yaw,v=0.)
+        self._previous_gps=None;self._last_imu_stamp_ns=None;self._last_imu_uses_header_stamp=None
+        self._reset_detector.accept(x,y,stamp_ns);self._reset_pending=False;self.status='EKF_READY'
+        self._reset_event('CONFIRMED','GPS_IMU_REALIGNED',(x,y));self.publish_status()
+
+    def reset_command_callback(self,msg):
+        """A simulator pose command is stronger evidence than a lone GPS jump."""
+        ego_id=self.get_parameter('morai_ego_id').value
+        if ego_id not in msg.ego_index:return
+        index=list(msg.ego_index).index(ego_id)
+        if index>=len(msg.global_position_x) or index>=len(msg.global_position_y):return
+        x,y=msg.global_position_x[index],msg.global_position_y[index]
+        if not all(math.isfinite(v) for v in (x,y)):return
+        self._reset_detector.expect(x,y)
+        self._begin_reset('MORAI_POSE_COMMAND')
+
+    def reinitialize_callback(self,request,response):
+        if not self._reset_enabled or not self._reset_stationary() or self.latest_gps_local is None:
+            response.success=False;response.message='MORAI reset needs drive disabled, stationary Ego and fresh IMU/GPS'
+            return response
+        stamp_ns=self._valid_gps_stamp_ns
+        if not 0<=self.get_clock().now().nanoseconds-stamp_ns<=600_000_000:
+            response.success=False;response.message='fresh GPS required';return response
+        self._begin_reset('OPERATOR_REINITIALIZE')
+        self._commit_reset(*self.latest_gps_local,stamp_ns)
+        response.success=True;response.message='GPS/IMU realigned; drive remains disabled'
+        return response
 
     def _publish_ekf_odometry(self, stamp):
         x, y, yaw, velocity = self.ekf.get_state()

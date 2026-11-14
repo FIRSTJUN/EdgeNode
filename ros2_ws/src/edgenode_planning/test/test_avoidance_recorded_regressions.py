@@ -40,6 +40,11 @@ def test_real_mgeo_and_frozen_live_initial_input_produce_only_rejected_diagnosti
     planner=StaticObstaclePlanner(LaneNetwork(DijkstraPlanner(root/'local_data/kcity_mgeo')))
     result=planner.plan(scene['reference'],[scene['obstacles']],(*scene['position'],scene['yaw']),
         speed_kmh=3.,current_link_id=scene['current_link_id'],route_link_ids=scene['route_link_ids'])
+    # Detection and candidate search are separate transitions; no path is
+    # committed before the next call checks all entry candidates.
+    assert result['state']=='DETECT' and planner.entry_commits==0
+    result=planner.plan(scene['reference'],[scene['obstacles']],(*scene['position'],scene['yaw']),
+        speed_kmh=3.,current_link_id=scene['current_link_id'],route_link_ids=scene['route_link_ids'])
     assert result['blocked'] and not result['points']
     assert result['candidates'] and any(c.points for c in result['candidates'])
     assert all(c.rejection for c in result['candidates'])

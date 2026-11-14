@@ -5,7 +5,7 @@ from bisect import bisect_right
 import math
 import time
 
-from edgenode_control.dynamic_lookahead import calculate_lookahead_distance
+from edgenode_control.dynamic_lookahead import calculate_lookahead_distance, path_lookahead_distance
 from edgenode_control.pure_pursuit import PurePursuit
 from edgenode_control.steering_command import to_morai_front_steer, limit_steering_change
 
@@ -40,6 +40,7 @@ class AvoidanceConfig:
     lookahead_min_m: float = 2.5
     lookahead_max_m: float = 10.
     lookahead_preview_time_sec: float = .45
+    lookahead_heading_budget_rad: float = .4
     rollout_seconds: float = 2.
     command_delay_s: float = .1
     acquisition_lateral_m: float = .15
@@ -47,6 +48,10 @@ class AvoidanceConfig:
     acquisition_end_region_m: float = 2.
     acquisition_confirmations: int = 3
     tracking_limit_m: float = .30
+    normal_obstacle_confirmations: int = 1
+    normal_detection_latency_s: float = 0.
+    normal_detection_margin_m: float = 2.
+    entry_geometry_wait_distance_m: float = 0.
 
     def __post_init__(self):
         for name, value in self.__dict__.items():
@@ -67,6 +72,8 @@ class AvoidanceConfig:
                 or self.hold_clearance_m<self.obstacle_margin_m
                 or self.steering_sign not in (-1.,1.)):
             raise ValueError('invalid safety/controller configuration')
+        if not isinstance(self.normal_obstacle_confirmations,int) or self.normal_obstacle_confirmations<1:
+            raise ValueError('positive obstacle confirmation count required')
 
     @property
     def curvature_limit(self):
@@ -102,6 +109,12 @@ class StaticObstaclePlanner:
         self._global_path=();self._hold_started=None;self._now=None;self._last_now=None
         self._return_retry_at=0.;self._hold_elapsed=0.;self._surround_clearance=math.inf
         self._detected_obstacles=();self._obstacle_bounds={}
+        self._entry_context={}
+        self._entry_wait_path=();self._entry_wait_origin=None;self._entry_wait_retry=None
+        self._normal_detection_frames=0;self._normal_misses=0;self._normal_stamp=None
+        self._normal_candidate=()
+        self._normal_tracks=[];self._detection_trigger_m=None;self._confirmed_path_obstacles=0
+        self._detected_count=0;self._path_obstacle_count=0
         self._original=();self.left_lane=self.right_lane=()
         self._hazards=()
         self._validated_paths={}
@@ -126,13 +139,23 @@ class StaticObstaclePlanner:
             return False
         detected=obstacle_polygons(groups)
         if self.state=='NORMAL':
+            if self.config.normal_obstacle_confirmations>1:return False
             return bool(self._normal_hazards(reference,self.remembered+detected))
-        if self.state=='DETECT' or (self.state=='RETURN' and not self._return_path):
+        if self.state=='DETECT':
+            if self._entry_wait_path and self._last_pose is not None:
+                progress=PolylineIndex(self._global_path).project(self._last_pose[:2])
+                if progress < self._entry_wait_retry:
+                    changed=tuple(o for o in detected if not any(convex_covers(old,o) for old in self.remembered))
+                    return bool(changed and self._normal_hazards(self._entry_wait_path,changed))
+            return True
+        if (self.state=='RETURN' and not self._return_path and self._last_pose is not None
+                and self._return_clearance_ready(self._last_pose) and self._now>=self._return_retry_at):
             return True
         changed=tuple(o for o in detected if not any(convex_covers(old,o) for old in self.remembered))
         if not changed:return False
         path=(self.selected.entry_path if self.state=='AVOID_ENTRY' else
-              self._return_path if self.state=='RETURN' else self._hold_path or self.selected.entry_path)
+              self._return_path if self.state=='RETURN' and self._return_path
+              else self._hold_path or self.selected.entry_path)
         # New roadside returns do not revoke an already safe motion path.
         # Potential intersections still STOP before full validation. Every new
         # solid, including clear roadside solids, is revalidated by plan().
@@ -155,6 +178,11 @@ class StaticObstaclePlanner:
             hold_elapsed_s=self._hold_elapsed,hold_required_s=self.config.hold_duration_s,
             surround_clearance_m=self._surround_clearance,
             detected_obstacles=self._detected_obstacles,
+            entry_context=self._entry_context,
+            detected_object_count=self._detected_count,path_obstacle_count=self._path_obstacle_count,
+            obstacle_confirmation_frames=self._normal_detection_frames,
+            confirmed_path_obstacles=self._confirmed_path_obstacles,
+            detection_trigger_distance_m=self._detection_trigger_m,
             clearance_m=self._min_clearance,clearance_is_lower_bound=True,curvature_limit=self.config.curvature_limit,
             entry_commits=self.entry_commits,return_commits=self.return_commits,
             generated_transition_count=self.generated_transition_count,
@@ -164,7 +192,7 @@ class StaticObstaclePlanner:
         self.state='BLOCKED';self.reason=reason
         return self._result()
 
-    def _body_safety(self, first, second, obstacles):
+    def _body_geometry(self,first,second):
         swept=swept_body(self.body,first,second)
         bounds=polygon_bounds(swept)
         angle=abs(heading_error(second[2],first[2]))
@@ -172,6 +200,10 @@ class StaticObstaclePlanner:
         sagitta=(chord/(2*math.sin(angle/2))*(1-math.cos(angle/2))) if angle>1e-9 else 0.
         axle_bounds=(min(first[0],second[0])-sagitta,max(first[0],second[0])+sagitta,
                      min(first[1],second[1])-sagitta,max(first[1],second[1])+sagitta)
+        return swept,bounds,axle_bounds,sagitta
+
+    def _body_safety(self, first, second, obstacles, *, prepared=None):
+        swept,bounds,axle_bounds,sagitta=self._body_geometry(first,second) if prepared is None else prepared
         for obstacle in obstacles:
             obstacle=tuple(map(tuple,obstacle))
             other=self._obstacle_bounds.get(obstacle)
@@ -245,10 +277,13 @@ class StaticObstaclePlanner:
         return ''
 
     def _normal_hazards(self, points, obstacles):
+        if not obstacles:return ()
         path_poses=poses(points)
+        # Geometry belongs to the path segment, not to each roadside object.
+        segments=tuple((a,b,self._body_geometry(a,b)) for a,b in zip(path_poses,path_poses[1:]))
         return tuple(o for o in obstacles if any(
-            self._body_safety(a,b,(o,)) in ('BODY_COLLISION','REFERENCE_CLEARANCE')
-            for a,b in zip(path_poses,path_poses[1:])))
+            self._body_safety(a,b,(o,),prepared=geometry) in ('BODY_COLLISION','REFERENCE_CLEARANCE')
+            for a,b,geometry in segments))
 
     def _remember(self, detected):
         # No IDs are present in PoseArray. Merge overlapping observed static
@@ -296,6 +331,10 @@ class StaticObstaclePlanner:
         for tick in range(math.ceil(duration/dt)):
             if duration_s is not None and tick%max(1,round(self.config.control_rate_hz*.1))==0:
                 points=control_local_path(fixed_points,pose,self._control_horizon_m)
+            lookahead=path_lookahead_distance(velocity*3.6,points,pose,
+                self.config.lookahead_min_m,self.config.lookahead_max_m,
+                self.config.lookahead_preview_time_sec,self.config.lookahead_heading_budget_rad)
+            if lookahead is None:return 'INVALID_LOOKAHEAD'
             response=self.pp.compute(points,*pose,lookahead_distance_m=lookahead)
             if response is None:
                 return 'PP_UNTRACKABLE'
@@ -484,6 +523,19 @@ class StaticObstaclePlanner:
         reason=self._validate_active(self._hold_path,pose,speed,actual_curvature,body_cache)
         return self._block(reason) if reason else self._result(self._hold_path)
 
+    def _return_clearance_ready(self,pose):
+        """Use the same STEP 4 clearance for its pre-search STOP and execution.
+
+        New observations can extend the obstacle after STEP 3 first cleared it.
+        The validated HOLD path must then remain available for advancing clear;
+        restarting the search interlock on every HOLD tick would deadlock it.
+        """
+        body=self.body.polygon(*pose)
+        self._surround_clearance=min((polygon_distance(body,o) for o in self.remembered),default=math.inf)
+        rear=max(self.pair.original_index.project(p) for o in self._hazards for p in o)
+        cleared=min(self.pair.original_index.project(p) for p in body)>rear+self.config.return_margin_m
+        return cleared and self._surround_clearance>=self.config.hold_clearance_m
+
     def _detection_path(self, reference, pose):
         index=PolylineIndex(reference);ego=max(0.,min(index.lengths[-1],index.project(pose[:2])))
         front=min(index.project(p) for o in self._hazards for p in o)
@@ -491,11 +543,44 @@ class StaticObstaclePlanner:
         if stop<=ego+1.:return self._block('BRAKING_DISTANCE')
         return self._result(center_suffix(reference,ego,min(stop,index.lengths[-1])))
 
+    def _entry_approach(self, pose, speed, actual_curvature, body_cache):
+        """Creep only on a verified original-lane path; entry stays uncommitted."""
+        reason=self._validate_active(self._entry_wait_path,pose,speed,actual_curvature,body_cache)
+        if reason:return self._block(reason)
+        self.reason='WAIT_ENTRY_GEOMETRY'
+        result=self._result(self._entry_wait_path)
+        result['speed_cap_kmh']=min(3.,self.config.avoid_speed_kmh)
+        return result
+
+    def _confirm_normal_hazards(self,blocking,detected,stamp):
+        fresh=stamp!=self._normal_stamp
+        self._normal_stamp=stamp;tracks=[];confirmed=[];retire=[]
+        for solid in blocking:
+            previous=next((row for row in self._normal_tracks if intersects(row['solid'],solid)),None)
+            row=dict(previous or dict(count=0,misses=0,confirmed=False),solid=solid)
+            if fresh:
+                if any(intersects(solid,d) for d in detected):
+                    row['count']+=1;row['misses']=0
+                    row['confirmed']=row['confirmed'] or row['count']>=self.config.normal_obstacle_confirmations
+                elif not row['confirmed']:
+                    row['count']=0;row['misses']+=1
+            if not row['confirmed'] and row['misses']>=3:retire.append(solid);continue
+            tracks.append(row)
+            if row['confirmed']:confirmed.append(solid)
+        self._normal_tracks=tracks
+        self._normal_detection_frames=max((row['count'] for row in tracks),default=0)
+        self._confirmed_path_obstacles=len(confirmed)
+        if retire:
+            self.remembered=tuple(o for o in self.remembered if o not in retire)
+            self._path_obstacle_count-=len(retire)
+        return tuple(confirmed)
+
     def plan(self, reference, groups, pose, *, speed_kmh=0., actual_curvature=0.,
              current_link_id='', route_link_ids=(), observation_valid=True, control_horizon_m=20.,
              hazard_reference=None, entry_reserve_m=0., stopping_required_m=None,
              entry_observation_m=None, observation_curvature_limit=None,
-             now_sec=None, global_reference=None, return_search=None):
+             now_sec=None, global_reference=None, return_search=None,
+             route_link_index=None, observation_stamp_ns=None):
         normal_reference=reference
         reference=hazard_reference if hazard_reference is not None else reference
         self._min_clearance=math.inf
@@ -513,6 +598,7 @@ class StaticObstaclePlanner:
                     or any(len(p)!=3 or not all(math.isfinite(v) for v in p) for p in reference)):
                 return self._block('INVALID_INPUT_OR_CLOCK')
             detected=obstacle_polygons(groups)
+            self._detected_count=len(detected)
         except (ValueError,TypeError,OverflowError):
             return self._block('INVALID_OBSTACLE_FOOTPRINT')
         if not observation_valid:return self._block('OBSTACLE_OBSERVATION_INVALID_OR_STALE')
@@ -538,7 +624,11 @@ class StaticObstaclePlanner:
                 self.remembered=tuple(o for o in self.remembered if max(index.project(p) for p in o)
                     >=ego-self.body.rear_overhang_m-self.config.return_margin_m)
                 blocking=self._normal_hazards(reference,self.remembered)
-                if not blocking:return self._result(normal_reference)
+                self._path_obstacle_count=len(blocking)
+                if not blocking:
+                    self._normal_detection_frames=0;self._normal_candidate=()
+                    self._normal_tracks=[];self._confirmed_path_obstacles=0
+                    return self._result(normal_reference)
                 self._hazards=blocking
             front=min(index.project(p) for o in self._hazards for p in o)
             actual_front=max(index.project(p) for p in self.body.polygon(*pose))
@@ -552,10 +642,28 @@ class StaticObstaclePlanner:
             if abs(heading_error(pose[2],math.atan2(row[1][1],row[1][0])))>math.radians(30.):
                 return self._block('DIRECTION_CONTINUITY')
             if self.state=='NORMAL':
+                if self.config.normal_obstacle_confirmations>1:
+                    stamp=observation_stamp_ns if observation_stamp_ns is not None else now
+                    self._hazards=self._confirm_normal_hazards(blocking,detected,stamp)
+                    if not self._hazards:
+                        return self._result(normal_reference)
+                    front=min(index.project(p) for o in self._hazards for p in o)
+                    distance=front-actual_front-self.config.obstacle_margin_m
+                if self.config.normal_detection_latency_s>0:
+                    target=self.config.avoid_speed_kmh/3.6
+                    entry_lookahead=calculate_lookahead_distance(self.config.avoid_speed_kmh,
+                        self.config.lookahead_min_m,self.config.lookahead_max_m,self.config.lookahead_preview_time_sec)
+                    self._detection_trigger_m=(velocity*self.config.normal_detection_latency_s
+                        +max(0.,velocity**2-target**2)/(2*self.config.deceleration_mps2)
+                        +max(self.config.transition_lengths_m)+entry_lookahead
+                        +self.config.obstacle_margin_m+self.config.normal_detection_margin_m)
+                    if distance>self._detection_trigger_m:return self._result(normal_reference)
                 saved=global_reference if global_reference is not None else reference
                 if len(saved)<2 or any(len(p)!=3 or not all(math.isfinite(v) for v in p) for p in saved):
                     return self._block('SAVED_GLOBAL_PATH_UNAVAILABLE')
                 self._global_path=tuple(tuple(p) for p in saved)
+                self._entry_context=dict(current_link_id=current_link_id,
+                    route_occurrences=list(route_link_ids).count(current_link_id),pose=tuple(pose))
                 self._detected_obstacles=tuple(dict(
                     center_xy=tuple(sum(p[k] for p in o)/len(o) for k in (0,1)),
                     distance_m=polygon_distance(self.body.polygon(*pose),o),
@@ -565,20 +673,80 @@ class StaticObstaclePlanner:
                 return self._detection_path(reference,pose)
             if speed_kmh>self.config.avoid_speed_kmh+.2:
                 self.reason='DECELERATING';return self._detection_path(reference,pose)
+            if self._entry_wait_path:
+                progress=PolylineIndex(self._global_path).project(pose[:2])
+                if progress < self._entry_wait_retry:
+                    return self._entry_approach(pose,speed_kmh,actual_curvature,body_cache)
+                self._entry_wait_path=()
             pairs=[];all_candidates=[]
+            self._entry_context=dict(current_link_id=current_link_id,
+                route_occurrences=list(route_link_ids).count(current_link_id),pose=tuple(pose),sides={})
             for side in ('left','right'):
+                pair=None
                 try:
-                    pair=self.network.pair(current_link_id,side,list(route_link_ids))
+                    pair=self.network.pair(current_link_id,side,list(route_link_ids),route_link_index=route_link_index)
+                    self._entry_context['sides'][side]=dict(
+                        target_link_id=self.network.links.get(current_link_id,{}).get(side+'_lane_change_dst_link_idx'),
+                        permission_reason=self.network.permission_reason(current_link_id,side),
+                        valid_neighbor=self.network.neighbor(current_link_id,side),
+                        pair_available=pair is not None)
                     if pair is None:continue
                     setattr(self,side+'_lane',pair.adjacent)
                     front_s=min(pair.original_index.project(p) for o in self._hazards for p in o)
                     candidates=self._generate_entry(pair,pose,speed_kmh,actual_curvature,front_s,body_cache)
                     all_candidates.extend(candidates);pairs.append((pair,candidates))
-                except (ValueError,TypeError,IndexError,OverflowError):
+                except (ValueError,TypeError,IndexError,OverflowError) as error:
+                    self._entry_context['sides'].setdefault(side,{})['error']=str(error)
+                    if (str(error)=='ORIGINAL_LANE_RANGE' and pair is not None
+                            and -self.config.entry_geometry_wait_distance_m
+                            <=pair.original_index.project(pose[:2])<0.):
+                        all_candidates.append(LatticeCandidate(side,(),math.nan,math.nan,math.nan,
+                            0.,math.inf,{},'ENTRY_START_BEFORE_LANE'))
                     continue
             self.candidates=tuple(all_candidates)
             safe=[(c,p) for p,cs in pairs for c in cs if not c.rejection]
-            if not safe:return self._block('NO_SAFE_ENTRY' if all_candidates else 'NO_VALID_ADJACENT_LANE')
+            if not safe:
+                # A lane junction may have safe entry geometry a little ahead.
+                # Never waive candidate rejection: at most a bounded 3km/h
+                # approach may use the independently validated original lane.
+                retryable=bool(all_candidates) and all(c.rejection in
+                    ('CURVATURE','INSUFFICIENT_ENTRY_SUPPORT','ENTRY_START_BEFORE_LANE') for c in all_candidates)
+                progress=PolylineIndex(self._global_path).project(pose[:2])
+                if self._entry_wait_origin is None:self._entry_wait_origin=progress
+                remaining=self.config.entry_geometry_wait_distance_m-(progress-self._entry_wait_origin)
+                reserve=self._rollout_distance(speed_kmh)+self.body.wheelbase_m+self.body.front_overhang_m+2.
+                if retryable and remaining>1e-6 and distance>reserve:
+                    approach=self._detection_path(reference,pose)
+                    if approach['blocked']:return approach
+                    # Fit a same-lane approach through the tiny raw map join;
+                    # its own curvature/body/PP gates remain unchanged.
+                    index=PolylineIndex(self._global_path)
+                    end=min(index.project(approach['points'][-1]),progress+self._control_horizon_m)
+                    row=sample(self._global_path,progress)
+                    prepared,prefix=self._preparation(pose,speed_kmh,actual_curvature,row[0][2])
+                    start=index.project(prepared[:2])
+                    if end<=start+1.:return self._block('NO_SAFE_ENTRY')
+                    try:
+                        path=prefix+transition(prepared[:2],prepared[2],actual_curvature,
+                            self._global_path,end,end-start)[1:]
+                    except (ValueError,TypeError,IndexError,OverflowError):
+                        return self._block('NO_SAFE_ENTRY')
+                    corridor=PolylineIndex(reference)
+                    initial=math.dist(pose[:2],sample(reference,max(0.,min(corridor.lengths[-1],
+                        corridor.project(pose[:2]))))[0][:2])
+                    if initial>self.config.tracking_limit_m:return self._block('TRACKING_ERROR')
+                    # The path starts at the measured pose: an already admitted
+                    # initial offset cannot vanish at its first point. It may
+                    # not grow; otherwise keep the 10cm same-lane corridor.
+                    corridor_limit=max(min(.1,self.config.tracking_limit_m),initial)
+                    if any(math.dist(p[:2],sample(reference,max(0.,min(corridor.lengths[-1],
+                            corridor.project(p[:2]))))[0][:2])>corridor_limit+1e-9
+                            for p in path):return self._block('ENTRY_APPROACH_CORRIDOR')
+                    self._entry_wait_path=path
+                    self._entry_wait_retry=progress+min(2.,remaining)
+                    return self._entry_approach(pose,speed_kmh,actual_curvature,body_cache)
+                return self._block('NO_SAFE_ENTRY' if all_candidates else 'NO_VALID_ADJACENT_LANE')
+            self._entry_wait_path=()
             self.selected,self.pair=min(safe,key=lambda row:row[0].cost)
             self._last_progress=None;self._original=self.pair.original
             self.state='AVOID_ENTRY';self.reason='';self.entry_commits+=1
@@ -618,11 +786,7 @@ class StaticObstaclePlanner:
             if not self._return_path:
                 # Recheck STEP 3 clearance against each new LiDAR frame before
                 # a delayed/retried return search. Do not abandon the safe lane.
-                self._surround_clearance=min((polygon_distance(self.body.polygon(*pose),o)
-                                             for o in self.remembered),default=math.inf)
-                rear=max(self.pair.original_index.project(p) for o in self._hazards for p in o)
-                cleared=min(self.pair.original_index.project(p) for p in self.body.polygon(*pose))>rear+self.config.return_margin_m
-                if not cleared or self._surround_clearance<self.config.hold_clearance_m:
+                if not self._return_clearance_ready(pose):
                     self.reason='WAIT_SURROUND_CLEARANCE';return self._hold(pose,speed_kmh,actual_curvature,body_cache)
                 if now<self._return_retry_at:return self._hold(pose,speed_kmh,actual_curvature,body_cache)
                 reason=(self._generate_return(pose,speed_kmh,actual_curvature,body_cache)

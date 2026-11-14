@@ -1,9 +1,18 @@
 """ROS-independent local path extraction from ordered global XYZ points."""
 
 import math
+from dataclasses import dataclass
 
 
 _MAX_RESAMPLED_POINTS = 10000
+
+
+@dataclass(frozen=True)
+class PreparedPath:
+    points: tuple
+    segment_lengths: tuple
+    cumulative: tuple
+    vertex_sources: tuple
 
 
 def _finite_number(value):
@@ -22,6 +31,20 @@ class LocalPathPlanner:
     The output starts at the selected projection, not at a nearest vertex.
     Original corners are retained; resampled indices never represent progress.
     """
+
+    def prepare(self, points):
+        """Validate/copy a fixed mission once; only immutable data may skip revalidation."""
+        if not isinstance(points,(list,tuple)) or not points:return None
+        if any(not isinstance(p,(list,tuple)) or len(p)!=3 or
+               not all(_finite_number(v) for v in p) for p in points):return None
+        immutable=tuple(tuple(p) for p in points)
+        lengths=tuple(math.hypot(b[0]-a[0],b[1]-a[1]) for a,b in zip(immutable,immutable[1:]))
+        cumulative=[0.];sources=[0]
+        for length in lengths:
+            cumulative.append(cumulative[-1]+length)
+            sources.append(sources[-1] if length==0 else len(sources))
+        if not all(math.isfinite(v) for v in cumulative):return None
+        return PreparedPath(immutable,lengths,tuple(cumulative),tuple(sources))
 
     def extract(self, global_points, x, y, horizon_m=20.0,
                 previous_index=None, search_back=3, search_forward=10,
@@ -51,6 +74,8 @@ class LocalPathPlanner:
         Callers must reset both previous_index and previous_arc_m on a route
         replacement. Unbounded output requests fail closed.
         """
+        prepared=global_points if isinstance(global_points,PreparedPath) else None
+        if prepared is not None:global_points=prepared.points
         if not isinstance(global_points, (list, tuple)) or not global_points:
             return None
         if not all(_finite_number(value) for value in
@@ -65,19 +90,19 @@ class LocalPathPlanner:
             if (isinstance(previous_index, bool) or not isinstance(previous_index, int)
                     or not 0 <= previous_index < len(global_points)):
                 return None
-        for point in global_points:
+        for point in (() if prepared is not None else global_points):
             if not isinstance(point, (list, tuple)) or len(point) != 3:
                 return None
             if not all(_finite_number(value) for value in point):
                 return None
 
-        segment_lengths = [
+        segment_lengths = prepared.segment_lengths if prepared is not None else [
             math.hypot(float(b[0]) - float(a[0]), float(b[1]) - float(a[1]))
             for a, b in zip(global_points, global_points[1:])
         ]
-        cumulative = [0.0]
-        vertex_sources = [0]
-        for length in segment_lengths:
+        cumulative = prepared.cumulative if prepared is not None else [0.0]
+        vertex_sources = prepared.vertex_sources if prepared is not None else [0]
+        for length in (() if prepared is not None else segment_lengths):
             arc = cumulative[-1] + length
             if not math.isfinite(length) or not math.isfinite(arc):
                 return None

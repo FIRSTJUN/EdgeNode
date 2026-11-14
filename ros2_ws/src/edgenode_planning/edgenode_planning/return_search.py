@@ -1,15 +1,21 @@
 """Isolated STEP 4 search; ROS callbacks keep servicing live safety inputs."""
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 from copy import copy
+from multiprocessing import get_context
+import os
 import time
 
 
 class ReturnSearch:
-    def __init__(self):
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='s4_return')
+    def __init__(self, executor=None):
+        # A CPU-bound Python geometry thread contends with ROS callbacks for
+        # the GIL. Spawn a worker without inheriting the live DDS threads.
+        self._executor = executor if executor is not None else ProcessPoolExecutor(
+            max_workers=1, mp_context=get_context('spawn'))
         self._future = None
         self._context = None
         self.elapsed_ms = 0.
+        self.worker_pid = None
 
     def cancel(self):
         if self._future is not None:
@@ -25,7 +31,7 @@ class ReturnSearch:
         started = time.perf_counter()
         generated = snapshot.generated_transition_count
         reason = snapshot._generate_return(pose, speed, curvature, {})
-        return reason, snapshot, snapshot.generated_transition_count-generated, (time.perf_counter()-started)*1000.
+        return reason, snapshot, snapshot.generated_transition_count-generated, (time.perf_counter()-started)*1000., os.getpid()
 
     def __call__(self, planner, pose, speed, curvature, body_cache):
         # Geometry/configuration belongs to the current maneuver. New LiDAR
@@ -45,7 +51,7 @@ class ReturnSearch:
             return 'RETURN_SEARCH_PENDING'
         future = self._future
         self._future = self._context = None
-        reason, snapshot, generated, self.elapsed_ms = future.result()
+        reason, snapshot, generated, self.elapsed_ms, self.worker_pid = future.result()
         planner.candidates = snapshot.candidates
         planner.generated_transition_count += generated
         if not reason:

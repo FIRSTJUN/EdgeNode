@@ -157,7 +157,10 @@ def test_degenerate_cluster_keeps_eight_samples_but_one_cluster():
     clusters = detect_clusters([[10, 0, -0.5]] * 5, LidarObstacleConfig())
     assert len(clusters) == 1
     assert len(clusters[0].footprint_xy()) == 8
-    assert set(clusters[0].footprint_xy()) == {(10, 0)}
+    footprint=np.asarray(clusters[0].footprint_xy())
+    np.testing.assert_allclose(footprint.max(axis=0)-footprint.min(axis=0),[.05,.05])
+    assert (footprint.min(axis=0)<=np.array([10.,0.])).all()
+    assert (footprint.max(axis=0)>=np.array([10.,0.])).all()
 
 
 def test_measured_ego_return_envelope_is_fully_removed_by_self_mask(config):

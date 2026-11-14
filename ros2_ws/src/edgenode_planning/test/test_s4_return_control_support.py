@@ -25,3 +25,21 @@ def test_short_saved_global_path_defers_return_and_keeps_adjacent_lane():
 def test_control_reserve_tracks_unchanged_rollout_speed(speed,minimum):
     p,_,_=setup()
     assert p._rollout_distance(speed)>minimum
+
+
+def test_return_reobserved_rear_keeps_validated_hold_motion_available():
+    p,point,obstacle=setup();enter(p,point,obstacle);acquire(p,point,3.5)
+    plan(p,point,[],s=45.,offset=3.5,now=5.)
+    assert p.state=='RETURN' and not p._return_path
+    assert p.needs_validation_stop(p._global_path,[])
+    # A new silhouette extends the remembered rear after STEP 3 completed.
+    extended=tuple(obstacle(35.,46.))
+    p.remembered=p._hazards=(extended,)
+    p._obstacle_bounds.clear();p._validated_paths.clear()
+    assert not p.needs_validation_stop(p._global_path,[])
+    result=plan(p,point,[],s=45.,offset=3.5,now=5.1)
+    assert result['state']=='RETURN' and not result['blocked']
+    assert result['reason']=='WAIT_SURROUND_CLEARANCE' and result['points']
+    assert not p.needs_validation_stop(p._global_path,[])
+    # New intrusions into that HOLD path still require STOP before validation.
+    assert p.needs_validation_stop(p._global_path,[obstacle(50.,53.,3.,4.)])

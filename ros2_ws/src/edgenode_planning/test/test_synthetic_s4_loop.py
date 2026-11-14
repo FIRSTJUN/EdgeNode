@@ -59,3 +59,11 @@ def test_faults_latch_blocked_and_vehicle_actually_stops(fault):
 def test_harness_binds_actual_production_control_methods():
     assert OfflineControl.control_loop is ControlNode.control_loop
     assert OfflineControl.publish_safe_stop is ControlNode.publish_safe_stop
+
+
+def test_new_original_lane_obstacle_defers_return_without_forcing_unsafe_motion():
+    result = outcome(fault='return_lane_obstruction', obstacle_front_m=35.)
+    assert result['success'], (result['reason'], result['transitions'])
+    assert result['safe_model_stop'] and result['global_path_return']
+    assert result['min_obstacle_clearance_m'] > .25
+    assert result['return_error_m'] <= .15

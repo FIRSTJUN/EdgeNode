@@ -20,6 +20,7 @@ from edgenode_perception.lidar_obstacle_node import LidarObstacleNode
 from edgenode_planning.static_obstacle_planner import StaticObstaclePlanner
 from edgenode_planning.planning_fsm import PlanningFSM
 from edgenode_planning.planning_node import PlanningNode
+from edgenode_planning.lane_geometry import LaneNetwork
 
 
 def test_best_effort_cloud_world_pose_planning_lattice_and_disabled_fsm():
@@ -78,8 +79,14 @@ def test_best_effort_cloud_world_pose_planning_lattice_and_disabled_fsm():
               and math.isfinite(distances[-1].data))
         result = received[-1]
         assert result.header.frame_id == 'map'
-        assert result.poses[0].position.x == pytest.approx(15.25, abs=1e-6)
-        assert result.poses[0].position.y == pytest.approx(0.06, abs=1e-6)
+        # A thin return has a conservative 5 cm footprint centered at the
+        # measured map point, rather than eight coincident vertices.
+        xs = [pose.position.x for pose in result.poses]
+        ys = [pose.position.y for pose in result.poses]
+        assert (min(xs) + max(xs)) / 2 == pytest.approx(15.25, abs=1e-6)
+        assert (min(ys) + max(ys)) / 2 == pytest.approx(0.06, abs=1e-6)
+        assert max(xs) - min(xs) == pytest.approx(.05, abs=1e-6)
+        assert max(ys) - min(ys) == pytest.approx(.05, abs=1e-6)
         assert result.poses[0].orientation.w == 1.0
         assert distances[-1].data == pytest.approx(math.hypot(14.06, 0.06))
 
@@ -91,12 +98,14 @@ def test_best_effort_cloud_world_pose_planning_lattice_and_disabled_fsm():
         assert len(result.poses) == 8
         assert len(consumer.latest_obstacle_groups) == 1
         assert len(consumer.latest_obstacle_groups[0]) == 8
-        assert consumer.latest_obstacle_groups[0][0] == pytest.approx((15.25, 0.06), abs=1e-6)
+        assert consumer.latest_obstacle_groups[0][0] == pytest.approx((15.225, 0.035), abs=1e-6)
         route = [[float(x), 0.0, 0.0] for x in range(31)]
-        avoidance = StaticObstaclePlanner(SimpleNamespace(pair=lambda *args:None)).plan(
-            route, consumer.latest_obstacle_groups, (0.0, 0.0, 0.0))
-        # Repeated identical synthetic returns form a degenerate box. Detection
-        # transport is valid; missing physical obstacle extent must fail closed.
+        planner = StaticObstaclePlanner(LaneNetwork(SimpleNamespace(links_by_id={}, graph={})))
+        avoidance = planner.plan(route, consumer.latest_obstacle_groups, (0.0, 0.0, 0.0))
+        assert avoidance['state'] == 'DETECT' and planner.entry_commits == 0
+        avoidance = planner.plan(route, consumer.latest_obstacle_groups, (0.0, 0.0, 0.0))
+        # The footprint is valid, but absent adjacent-lane evidence still
+        # rejects the maneuver and preserves the emergency motion gate.
         assert avoidance['blocked'] and not avoidance['points']
         fsm = PlanningFSM()
         assert fsm.update(localization_ready=True, map_match_ready=True,

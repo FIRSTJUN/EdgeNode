@@ -221,11 +221,13 @@ class LaneNetwork:
                 return None
         return target_id
 
-    def pair(self, original_id, side, route_link_ids):
-        if route_link_ids.count(original_id)!=1:
-            return None
+    def pair(self, original_id, side, route_link_ids, *, route_link_index=None):
+        if route_link_index is None:
+            if route_link_ids.count(original_id)!=1:return None
+            route_link_index=route_link_ids.index(original_id)
+        if not 0<=route_link_index<len(route_link_ids) or route_link_ids[route_link_index]!=original_id:return None
         originals,adjacents,ids,section_ends = [],[],[],[]
-        start = route_link_ids.index(original_id)
+        start = route_link_index
         previous_original = previous_adjacent = None
         for link_id in route_link_ids[start:]:
             adjacent_id = self.neighbor(link_id,side)

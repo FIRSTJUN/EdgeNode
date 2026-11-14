@@ -12,6 +12,7 @@ lidar_obstacle_node:
     sensor_max_source_age_sec: 0.6
     sensor_future_tolerance_sec: 0.05
     sensor_status_period_sec: 0.1
+    gravity_ground_compensation: false
 
     # Initial MORAI Sonata baseline, not final S4 tuning.
     # XYZ is sensor-local even though the incoming frame_id is /map.
@@ -20,13 +21,25 @@ lidar_obstacle_node:
     roi_min_y: -4.0
     roi_max_y: 4.0
     ground_z_threshold: -1.0
+    obstacle_height_filter_enabled: false
+    # Gravity-leveled sensor Z. The MORAI Sonata sensor sits near the roof;
+    # 1m above it retains a conservative body-height margin while excluding gantries.
+    obstacle_max_z_m: 1.0
+    oriented_footprints: false
+    ground_plane_filter_enabled: false
+    ground_plane_neighbor_m: 1.5
+    ground_plane_max_slope: 0.15
+    ground_plane_tolerance_m: 0.04
+    ground_plane_min_seed_points: 5
     near_origin_radius_m: 0.3
     # NPC-free Ego returns: x=0.301..1.934, abs(y)<=0.690 m.
     # Keep the self mask within that measured body region plus a small margin.
     self_mask_max_x: 2.0
+    self_mask_min_x: -2.4
     self_mask_half_width_y: 0.8
     cluster_distance_m: 0.8
     min_cluster_points: 5
+    min_footprint_extent_m: 0.05
 
     # Sensor translation relative to the vehicle reference point.
     # Mount z=1.11 m does not enter the planar world-center output (z=0).

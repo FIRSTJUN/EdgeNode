@@ -56,7 +56,9 @@ def test_body_cache_inputs_invalidate_and_clearance_is_reapplied(change):
         if change=='path':points=tuple((p[0],9.,0.) for p in points)
         elif change=='obstacles':objects=(((2.,-.5),(3.,-.5),(3.,.5),(2.,.5)),)
         elif change=='body':planner.body=replace(planner.body,width_m=3.8)
-        elif change=='config':planner.config=replace(planner.config,obstacle_margin_m=1.)
+        # This object is over 1 m from the corrected straight body sweep.
+        # Raise the margin past the actual clearance to exercise rejection.
+        elif change=='config':planner.config=replace(planner.config,obstacle_margin_m=1.5,hold_clearance_m=1.5)
         else:planner.network=world()[0]
         reason=planner._path_safety(points,objects,3.,body_cache=cache)
         assert checks.call_count>original_count

@@ -20,7 +20,9 @@ def outcome(speed,side,radius=math.inf,variant='nominal'):
         'detection_loss':dict(disappear=True),
         'confirmation_interruption':dict(interrupt_confirmation=True),
         'decelerate':dict(brake_to_default=True)}
-    result=run(speed,side,radius=radius,**variants[variant])
+    # The current S4 launch explicitly uses the production 0.6 rad/s limiter.
+    # Keep the no-limiter conservative rejections in the direct run() tests.
+    result=run(speed,side,radius=radius,config_overrides=dict(steering_slew_limit_radps=.6),**variants[variant])
     output=os.environ.get('STATIC_AVOIDANCE_OUTPUT')
     if output:
         root=Path(output);root.mkdir(parents=True,exist_ok=True)
@@ -39,7 +41,7 @@ def test_production_pp_full_lifecycle_with_early_known_obstacle_and_fifty_m_prev
     assert r['candidate_lane_batches']==1  # No trajectory refit due to tracking error.
     assert r['max_planned_curvature_m_inv']<=simulation.AvoidanceConfig().curvature_limit
     assert r['clamp_count']==0 and r['max_steering']<=.70
-    assert r['max_wheel_rate_radps']<=.6
+    assert r['max_wheel_rate_radps']<=.6+1e-9
     assert r['min_body_clearance_m']>.25
 
 
@@ -48,7 +50,7 @@ def test_closed_loop_gentle_curve_crosses_link_and_returns(side):
     r=outcome(3.,side,300.)
     assert r['success'],r['failure']
     assert r['return_path_objects']==1 and r['clamp_count']==0
-    assert r['max_wheel_rate_radps']<=.6
+    assert r['max_wheel_rate_radps']<=.6+1e-9
 
 
 @pytest.mark.parametrize('variant',['one_mm','small_errors','outward_heading','timing_and_delay','detection_loss','confirmation_interruption'])
@@ -57,19 +59,20 @@ def test_bounded_tracking_and_observation_disturbances(variant):
     assert r['success'],r['failure']
     assert r['entry_path_objects']==r['return_path_objects']==1
     assert r['min_body_clearance_m']>.25 and r['clamp_count']==0
-    assert r['max_wheel_rate_radps']<=.6
+    assert r['max_wheel_rate_radps']<=.6+1e-9
     if variant=='confirmation_interruption':assert r['confirmation_interrupted']
 
 
 def test_initial_ten_kmh_decelerates_before_committing_default_three_kmh_entry():
     r=outcome(10.,'left',variant='decelerate')
     assert r['success'],r['failure']
-    assert r['phases']==['NORMAL','DETECT','AVOID_ENTRY','AVOID_HOLD','RETURN','NORMAL']
+    # An already observed obstacle is detected on the first planning call.
+    assert r['phases']==['DETECT','AVOID_ENTRY','AVOID_HOLD','RETURN','NORMAL']
     assert all(row['speed_kmh']<=3.2 for row in r['rows'] if row['state']=='AVOID_ENTRY')
 
 
 @pytest.mark.parametrize('speed',[3.,10.])
-def test_actual_default_preview_and_lidar_range_stop_when_safe_entry_distance_is_missing(speed):
+def test_current_preview_and_sensing_keep_low_speed_feasible_and_no_limiter_rejection(speed):
     import yaml
     config=yaml.safe_load((Path(__file__).parents[2]/'edgenode_perception/config/lidar_obstacle.yaml').read_text())['lidar_obstacle_node']['ros__parameters']
     planning=yaml.safe_load((Path(__file__).parents[1]/'config/planning.yaml').read_text())['planning_node']['ros__parameters']
@@ -79,10 +82,16 @@ def test_actual_default_preview_and_lidar_range_stop_when_safe_entry_distance_is
     if output:
         root=Path(output);root.mkdir(parents=True,exist_ok=True)
         (root/f'{speed:g}_production_preview_and_sensing.json').write_text(json.dumps(r,indent=2)+'\n')
-    assert not r['success'] and r['phases']==['NORMAL','DETECT','BLOCKED']
-    assert r['failure']['reason']=='NO_SAFE_ENTRY',r['failure']
-    assert r['entry_commits']==r['return_commits']==0
-    assert {c['reason'] for c in r['failure']['candidates']}=={'ENTRY_DEADLINE'}
+    assert planning['local_path_length_m']==80.
+    if speed==3.:
+        assert r['success'],r['failure']
+        assert r['phases']==['NORMAL','DETECT','AVOID_ENTRY','AVOID_HOLD','RETURN','NORMAL']
+        assert r['entry_commits']==r['return_commits']==1
+    else:
+        assert not r['success'] and r['failure']['reason']=='STEERING_RATE'
+        assert r['phases']==['NORMAL','DETECT','AVOID_ENTRY','BLOCKED']
+        assert r['entry_commits']==1 and r['return_commits']==0
+    assert r['min_body_clearance_m']>.25
 
 
 @pytest.mark.parametrize('speed',[3.,10.])

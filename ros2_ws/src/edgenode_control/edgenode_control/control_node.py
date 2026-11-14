@@ -3,11 +3,11 @@ import math
 import rclpy
 from rclpy.node import Node
 
-from std_msgs.msg import Float32
+from std_msgs.msg import Float32, String
 from nav_msgs.msg import Odometry, Path
 from morai_ros2_msgs.msg import CtrlCmd, EgoVehicleStatus
 
-from edgenode_control.dynamic_lookahead import calculate_lookahead_distance
+from edgenode_control.dynamic_lookahead import path_lookahead_distance
 from edgenode_control.pure_pursuit import PurePursuit
 from edgenode_control.steering_command import to_morai_front_steer, limit_steering_change
 
@@ -82,6 +82,7 @@ class ControlNode(Node):
             ('lookahead_distance_m', 2.5),
             ('lookahead_max_m', 10.0),
             ('lookahead_preview_time_sec', 0.45),
+            ('lookahead_heading_budget_rad', 0.4),
             ('steering_sign', -1.0),
             ('max_front_steer_normalized', 0.70),
             ('steering_slew_limit_radps', 0.0),
@@ -98,6 +99,10 @@ class ControlNode(Node):
         # takes precedence. The legacy parameter no longer fixes the lookahead.
         self.declare_parameter(
             'lookahead_min_m', self.get_parameter('lookahead_distance_m').value)
+        self.declare_parameter('normal_lookahead_min_m', self.get_parameter('lookahead_min_m').value)
+        self._avoidance_state = ''
+        self._avoidance_state_stamp_ns = None
+        self.create_subscription(String, '/planning/avoidance_state', self.avoidance_state_cb, 10)
 
         self.target_error = 0.0
         self.target_speed_kmh = 0.0
@@ -171,6 +176,10 @@ class ControlNode(Node):
         # Compatibility/debug only: this input never refreshes a watchdog.
         self.target_error = float(msg.data)
 
+    def avoidance_state_cb(self, msg: String):
+        self._avoidance_state = msg.data
+        self._avoidance_state_stamp_ns = self.now_ns()
+
     def target_speed_cb(self, msg: Float32):
         speed = float(msg.data)
         self.target_speed_kmh = max(0.0, speed) if math.isfinite(speed) else speed
@@ -230,11 +239,17 @@ class ControlNode(Node):
             self.speed_pid.reset()
             return
 
-        lookahead_distance_m = calculate_lookahead_distance(
-            self.current_speed_kmh,
-            lookahead_min_m=self.get_parameter('lookahead_min_m').value,
+        minimum = self.get_parameter('lookahead_min_m').value
+        state_stamp = getattr(self, '_avoidance_state_stamp_ns', None)
+        if (getattr(self, '_avoidance_state', '') == 'NORMAL' and state_stamp is not None
+                and 0 <= (now - state_stamp) / 1e9 <= self.get_parameter('command_timeout_sec').value):
+            minimum = self.get_parameter('normal_lookahead_min_m').value
+        lookahead_distance_m = path_lookahead_distance(
+            self.current_speed_kmh,self.local_path_points,self.latest_pose,
+            lookahead_min_m=minimum,
             lookahead_max_m=self.get_parameter('lookahead_max_m').value,
             lookahead_preview_time_sec=self.get_parameter('lookahead_preview_time_sec').value,
+            heading_budget_rad=self.get_parameter('lookahead_heading_budget_rad').value,
         )
         if lookahead_distance_m is None:
             self.publish_safe_stop()

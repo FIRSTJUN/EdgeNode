@@ -183,7 +183,7 @@ def test_valid_activation_applies_ordered_string_array_atomically_with_drive_fal
     assert 'ROUTE_ACTIVATED' in response.message
     request = node._call_parameter_service.call_args_list[1].args[1]
     parameters = {p.name: Parameter.from_parameter_msg(p).value for p in request.parameters}
-    assert parameters == {'enable_drive': False, 'route_node_ids': ['C']}
+    assert parameters == {'enable_drive': False, 'route_start_link_id':'AB','route_node_ids': ['C']}
     assert not node._activation_pending
 
 
@@ -432,7 +432,7 @@ def test_waiting_draft_captures_first_valid_link_only_once(node):
     node.editor.planner.plan_route.assert_called_once_with('AB', ['D'])
 
 
-def test_load_recaptures_current_link_once_and_locks_the_new_session(node):
+def test_load_preserves_saved_origin_instead_of_reconnecting_passed_waypoints(node):
     ready(node)
     click(node, 30)
     assert node.save_callback(None, Trigger.Response()).success
@@ -440,29 +440,29 @@ def test_load_recaptures_current_link_once_and_locks_the_new_session(node):
     assert node.preview_start_link_id == 'AB'
     node.editor.planner.plan_route = Mock(wraps=node.editor.planner.plan_route)
     assert node.load_callback(None, Trigger.Response()).success
-    assert node.preview_start_link_id == 'BC'
+    assert node.preview_start_link_id == 'AB'
     assert node.editor.waypoint_node_ids == ['C', 'D']
-    assert node.editor.preview['link_ids'] == ['BC', 'CD']
+    assert node.editor.preview['link_ids'] == ['AB', 'BC', 'CD']
     original = deepcopy(node.editor.preview)
     for link_id in ('AB', 'CD', 'BC'):
         node.current_link_callback(String(data=link_id))
-        assert node.preview_start_link_id == 'BC'
+        assert node.preview_start_link_id == 'AB'
         assert node.editor.preview == original
-    node.editor.planner.plan_route.assert_called_once_with('BC', ['C', 'D'])
+    node.editor.planner.plan_route.assert_called_once_with('AB', ['C', 'D'])
 
 
-def test_load_without_current_link_waits_for_a_new_capture(node):
+def test_load_without_current_link_uses_saved_origin_and_keeps_it(node):
     ready(node)
     assert node.save_callback(None, Trigger.Response()).success
     node.current_link_callback(String(data=''))
     assert node.load_callback(None, Trigger.Response()).success
-    assert node.preview_start_link_id == ''
+    assert node.preview_start_link_id == 'AB'
     assert node.editor.waypoint_node_ids == ['C']
-    assert node.editor.preview_status == 'WAITING_FOR_CURRENT_LINK'
+    assert node.editor.preview_status == 'PREVIEW_READY'
     node.current_link_callback(String(data='BC'))
-    assert node.preview_start_link_id == 'BC'
+    assert node.preview_start_link_id == 'AB'
     node.current_link_callback(String(data='AB'))
-    assert node.preview_start_link_id == 'BC'
+    assert node.preview_start_link_id == 'AB'
 
 
 def test_offline_fallback_is_captured_and_not_replaced_by_later_live_links(node):

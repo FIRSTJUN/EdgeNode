@@ -109,6 +109,7 @@ class Trial(Node):
             return
         elif isinstance(msg, String) and topic.endswith(('debug', 'sensor_state', 'lidar_status')):
             value = json.loads(msg.data)
+            if topic.endswith('avoidance_debug'):value.setdefault('stage',value.get('state','UNKNOWN'))
         else:
             value = msg.data
         self.latest[topic] = value

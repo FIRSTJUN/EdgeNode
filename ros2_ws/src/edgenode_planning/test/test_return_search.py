@@ -1,5 +1,7 @@
 """STEP 4 work cannot starve callbacks or authorize an obsolete result."""
 from threading import Event
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+import os
 from unittest.mock import patch
 
 from edgenode_planning.return_search import ReturnSearch
@@ -17,7 +19,7 @@ def test_async_return_keeps_sequential_gates_and_rechecks_live_obstacles():
         started.set()
         assert release.wait(3.)
         return original(snapshot,*args)
-    search=ReturnSearch()
+    search=ReturnSearch(executor=ThreadPoolExecutor(max_workers=1))
     try:
         with patch.object(StaticObstaclePlanner,'_generate_return',slow):
             r=plan(p,point,[],s=45.,offset=3.5,now=5.1,return_search=search)
@@ -37,3 +39,20 @@ def test_async_return_keeps_sequential_gates_and_rechecks_live_obstacles():
         assert p.state=='NORMAL' and search._future is None
     finally:
         release.set();search.close()
+
+
+def test_production_return_search_runs_outside_the_ros_process():
+    planner, point, obstacle = setup()
+    enter(planner, point, obstacle); acquire(planner, point, 3.5)
+    assert plan(planner, point, [], s=45., offset=3.5, now=5.)['state'] == 'RETURN'
+    search = ReturnSearch()
+    try:
+        assert isinstance(search._executor, ProcessPoolExecutor)
+        plan(planner, point, [], s=45., offset=3.5, now=5.1, return_search=search)
+        reason, snapshot, generated, elapsed, pid = search._future.result(timeout=15.)
+        assert pid != os.getpid() and not reason and snapshot._return_path
+        assert planner.return_commits == 0
+        result = plan(planner, point, [], s=45., offset=3.5, now=5.2, return_search=search)
+        assert not result['blocked'] and planner.return_commits == 1
+    finally:
+        search.close()

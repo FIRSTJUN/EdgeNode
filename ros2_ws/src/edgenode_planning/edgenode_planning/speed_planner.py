@@ -81,6 +81,34 @@ def _persistent_curvature(curvatures, boundaries, minimum_length_m):
     return representative
 
 
+def _coherent_turn_mean(curvatures, turns, positions, boundaries, path_length, window_m):
+    """Retain short real map turns that a spatial median can erase.
+
+    Average signed curvature by metres, only where the surrounding exact
+    heading changes agree. A point spike turns out and back, so its cancelling
+    heading changes must not acquire the support of a real road corner.
+    The caller still requires the existing contiguous persistence distance.
+    """
+    result = []
+    for position in positions:
+        begin = bisect_left(positions, position - window_m)
+        end = bisect_right(positions, position + window_m)
+        absolute_turn = math.fsum(abs(value) for value in turns[begin:end])
+        net_turn = abs(math.fsum(turns[begin:end]))
+        if absolute_turn == 0. or net_turn < .5 * absolute_turn:
+            result.append(0.)
+            continue
+        left = max(0., position - window_m / 2.)
+        right = min(path_length, position + window_m / 2.)
+        first = max(0, bisect_right(boundaries, left) - 1)
+        stop = min(len(curvatures), bisect_left(boundaries, right))
+        integral = math.fsum(curvatures[index] * (
+            min(right, boundaries[index + 1]) - max(left, boundaries[index]))
+            for index in range(first, stop))
+        result.append(integral / (right - left))
+    return result
+
+
 class SpeedPlanner:
     """Estimate XY curvature with a fixed preview and discrete speed profile.
 
@@ -93,7 +121,9 @@ class SpeedPlanner:
                  sharp_curve_speed_kmh=0.5, preview_distance_m=10.0,
                  curve_curvature_threshold=0.04, sharp_curvature_threshold=0.10,
                  curvature_smoothing_window_m=2.0, curvature_persistence_m=2.0,
-                 curvature_hysteresis=0.005):
+                 curvature_hysteresis=0.005, anticipatory=False,
+                 braking_deceleration_mps2=2., reaction_time_s=.6,
+                 max_lateral_acceleration_mps2=1.5):
         self.cruise_speed_kmh = cruise_speed_kmh
         self.curve_speed_kmh = curve_speed_kmh
         self.sharp_curve_speed_kmh = sharp_curve_speed_kmh
@@ -103,8 +133,13 @@ class SpeedPlanner:
         self.curvature_smoothing_window_m = curvature_smoothing_window_m
         self.curvature_persistence_m = curvature_persistence_m
         self.curvature_hysteresis = curvature_hysteresis
+        self.anticipatory=anticipatory
+        self.braking_deceleration_mps2=braking_deceleration_mps2
+        self.reaction_time_s=reaction_time_s
+        self.max_lateral_acceleration_mps2=max_lateral_acceleration_mps2
 
-    def plan(self, local_path_points, previous_speed_mode=None):
+    def plan(self, local_path_points, previous_speed_mode=None, measured_speed_kmh=0.,
+             measured_curvature=0.):
         """Return speed and geometry diagnostics, or None for unusable input.
 
         Validate every XYZ point, including points beyond the preview. Z never
@@ -179,6 +214,7 @@ class SpeedPlanner:
             return None
 
         curvatures = []
+        turns = []
         positions = []
         sample_arc = 0.0
         for p0, p1, p2 in zip(evaluated, evaluated[1:], evaluated[2:]):
@@ -200,6 +236,7 @@ class SpeedPlanner:
             if not math.isfinite(curvature):
                 return None
             curvatures.append(curvature)
+            turns.append(math.atan2(cross, dx1 * (p2[0] - p1[0]) + dy1 * (p2[1] - p1[1])))
             positions.append(sample_arc)
         if not curvatures:
             return None
@@ -207,6 +244,11 @@ class SpeedPlanner:
         filtered, boundaries = _distance_median(
             curvatures, positions, evaluated_length, self.curvature_smoothing_window_m,
         )
+        if self.anticipatory:
+            turn_mean = _coherent_turn_mean(curvatures, turns, positions, boundaries,
+                evaluated_length, self.curvature_smoothing_window_m)
+            filtered = [mean if abs(mean) > abs(median) else median
+                        for median, mean in zip(filtered, turn_mean)]
         filtered = [abs(value) for value in filtered]
         representative = _persistent_curvature(filtered, boundaries, self.curvature_persistence_m)
         curve_release = max(0.0, self.curve_curvature_threshold - self.curvature_hysteresis)
@@ -220,6 +262,47 @@ class SpeedPlanner:
         else:
             speed_mode, speed = 'CRUISE', self.cruise_speed_kmh
         ordered = sorted(abs(value) for value in curvatures)
+        constraint_distance=0.;profile_speed=speed
+        if self.anticipatory:
+            if (not all(_finite_number(v) for v in (measured_speed_kmh, measured_curvature,
+                    self.braking_deceleration_mps2,self.reaction_time_s,self.max_lateral_acceleration_mps2))
+                    or measured_speed_kmh<0 or self.braking_deceleration_mps2<=0
+                    or self.reaction_time_s<0 or self.max_lateral_acceleration_mps2<=0):return None
+            masks=[]
+            for threshold in (1e-4,curve_release if previous_speed_mode in ('CURVE','SHARP_CURVE')
+                              else self.curve_curvature_threshold,
+                              sharp_release if previous_speed_mode=='SHARP_CURVE' else self.sharp_curvature_threshold):
+                mask=[False]*len(filtered);begin=0
+                while begin<len(filtered):
+                    if filtered[begin]<threshold:begin+=1;continue
+                    end=begin+1
+                    while end<len(filtered) and filtered[end]>=threshold:end+=1
+                    if boundaries[end]-boundaries[begin]>=min(self.curvature_persistence_m,evaluated_length)-1e-9:
+                        mask[begin:end]=[True]*(end-begin)
+                    begin=end
+                masks.append(mask)
+            speed=self.cruise_speed_kmh;profile_speed=speed;speed_mode='CRUISE'
+            reaction_distance=measured_speed_kmh/3.6*self.reaction_time_s
+            for i,k in enumerate(filtered):
+                mode,limit=('SHARP_CURVE',self.sharp_curve_speed_kmh) if masks[2][i] else (
+                    ('CURVE',self.curve_speed_kmh) if masks[1][i] else ('CRUISE',self.cruise_speed_kmh))
+                if masks[0][i]:limit=min(limit,3.6*math.sqrt(self.max_lateral_acceleration_mps2/k))
+                distance=max(0.,boundaries[i]-reaction_distance)
+                allowed=3.6*math.sqrt((limit/3.6)**2+2*self.braking_deceleration_mps2*distance)
+                if allowed<speed:
+                    speed=allowed;speed_mode=mode;profile_speed=limit;constraint_distance=boundaries[i]
+            # The preview can already be straight while the actual vehicle is
+            # still turning. Do not accelerate out of the same lateral limit
+            # until the measured wheel curvature has unwound.
+            if abs(measured_curvature) > 1e-4:
+                measured_cap = 3.6 * math.sqrt(
+                    self.max_lateral_acceleration_mps2 / abs(measured_curvature))
+                if measured_cap < speed:
+                    speed = profile_speed = measured_cap
+                    constraint_distance = 0.
+                    speed_mode = ('SHARP_CURVE' if abs(measured_curvature) >= self.sharp_curvature_threshold
+                                  else 'CURVE' if abs(measured_curvature) >= self.curve_curvature_threshold
+                                  else 'CRUISE')
         return {
             'target_speed_kmh': float(speed),
             'representative_curvature': representative,
@@ -229,4 +312,6 @@ class SpeedPlanner:
             'evaluated_path_length_m': evaluated_length,
             'evaluated_point_count': len(evaluated),
             'speed_mode': speed_mode,
+            'braking_constraint_distance_m': constraint_distance,
+            'constraint_speed_kmh': float(profile_speed),
         }

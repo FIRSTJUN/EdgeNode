@@ -168,6 +168,10 @@ class TestGPSVelocity(unittest.TestCase):
                 self.node.latest_gps_local = None
                 self.node.latest_imu_yaw = None
                 self.node._previous_gps = None
+                # Each sensor-order case starts a new filter/time history,
+                # matching the production reinitialization service.
+                self.node._last_imu_stamp_ns = None
+                self.node._last_imu_uses_header_stamp = None
                 imu = Imu()
                 imu.orientation.z = math.sin(0.15)
                 imu.orientation.w = math.cos(0.15)

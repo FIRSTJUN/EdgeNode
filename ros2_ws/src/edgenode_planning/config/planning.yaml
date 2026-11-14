@@ -20,7 +20,7 @@ planning_node:
 
     global_path_topic: /planning/global_path
     local_path_topic: /planning/local_path
-    local_path_length_m: 20.0
+    local_path_length_m: 80.0
     # Maximum output spacing; keep original corners and dense MGeo points.
     # Progress refers to original global segments, never to resampled points.
     local_path_resample_spacing_m: 2.0
@@ -34,6 +34,8 @@ planning_node:
     # Empty: use goal_node_id. Nonempty: visit these nodes in order; the last
     # entry is the final goal (goal_node_id is ignored). Set before driving.
     route_node_ids: []
+    route_start_link_id: ''
+    route_link_occurrence: -1
     # Example using the currently verified destination:
     # route_node_ids: [A119BS010245]
     global_path_frame_id: map
@@ -53,8 +55,9 @@ planning_node:
     drive_duration_sec: 60.0
     cruise_speed_kmh: 50.0
     curve_speed_kmh: 25.0
-    sharp_curve_speed_kmh: 3.5
-    speed_preview_distance_m: 10.0
+    sharp_curve_speed_kmh: 15.0
+    speed_preview_distance_m: 80.0
+    speed_anticipatory_enabled: true
     curve_curvature_threshold: 0.04
     sharp_curvature_threshold: 0.10
     # Spatial weighted median and contiguous curvature support, in metres.
@@ -85,7 +88,7 @@ planning_node:
     avoidance_return_margin_m: 0.5
     avoidance_hold_duration_s: 3.0
     avoidance_hold_clearance_m: 1.0
-    avoidance_avoid_speed_kmh: 3.0
+    avoidance_avoid_speed_kmh: 10.0
     avoidance_deceleration_mps2: 2.0
     avoidance_reaction_time_s: 0.3
     avoidance_max_lateral_acceleration_mps2: 1.5

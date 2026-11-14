@@ -92,6 +92,7 @@ class Road:
         self.reference = []
         for key in self.route_ids:
             self.reference.extend(links[key]['points'] if not self.reference else links[key]['points'][1:])
+        self.original_hash = hashlib.sha256(json.dumps(self.reference).encode()).hexdigest()
         self.index = PolylineIndex(self.reference)
         self.obstacles = [self.obstacle(scene.obstacle_front_m, scene.obstacle_length_m,
                                        scene.obstacle_width_m, scene.obstacle_yaw_rad)]
@@ -144,6 +145,7 @@ class OfflineControl:
 
     def __init__(self, values):
         self.values = values; self.ns = 10_000_000_000; self.last_control_ns = self.ns
+        self._last_front_steer = 0.
         self.target_speed_kmh = self.current_speed_kmh = 0.
         self.latest_pose = None; self.local_path_points = []
         self.target_speed_stamp_ns = self.local_path_stamp_ns = None
@@ -192,7 +194,10 @@ class Vehicle:
 
 def production_values():
     file = Path(__file__).resolve().parents[2]/'edgenode_control/config/control.yaml'
-    return yaml.safe_load(file.read_text())['control_node']['ros__parameters']
+    values = yaml.safe_load(file.read_text())['control_node']['ros__parameters']
+    # ControlNode declares this default when the YAML omits it.
+    values.setdefault('lookahead_heading_budget_rad', AvoidanceConfig().lookahead_heading_budget_rad)
+    return values
 
 
 def simulate(scene):
@@ -219,8 +224,8 @@ def simulate(scene):
     process_timings=[]
     planning_rows, rollout_failures, selected_geometry = [], [], []
     original_rollout = planner._rollout
-    def audited_rollout(points, pose, speed, curvature, obstacles):
-        reason = original_rollout(points, pose, speed, curvature, obstacles)
+    def audited_rollout(points, pose, speed, curvature, obstacles, duration_s=None):
+        reason = original_rollout(points, pose, speed, curvature, obstacles, duration_s=duration_s)
         if reason:
             try:
                 available = arc(control_local_path(points, pose, policy.control_horizon_m))[-1]
@@ -283,10 +288,12 @@ def simulate(scene):
             path = control_local_path(road.reference, vehicle.pose, policy.control_horizon_m)
             control.local_path_points = path; control.target_speed_kmh = 0.
             control.local_path_stamp_ns = control.target_speed_stamp_ns = ns
-        if scene.fault == 'return_obstruction' and planner.state == 'RETURN' and not return_fault_injected:
-            # Occupy the reserved lane crossing itself. A nearer original-lane
-            # obstacle may still be passed entirely in the adjacent lane.
-            road.obstacles.append(road.obstacle(road.station(vehicle.pose)+14., 4., 1., 0.))
+        if scene.fault in ('return_obstruction', 'return_lane_obstruction') and planner.state == 'RETURN' and not return_fault_injected:
+            # A narrow object in the original lane can safely defer return.
+            # The stop fault must obstruct the adjacent HOLD corridor as well.
+            width = 2*scene.lane_width_m+2. if scene.fault == 'return_obstruction' else 1.
+            lateral = road.offset/2 if scene.fault == 'return_obstruction' else 0.
+            road.obstacles.append(road.obstacle(road.station(vehicle.pose)+14., 4., width, 0., lateral))
             return_fault_injected = True
         # Producer and Planning share deterministic virtual time. Incoming data
         # are queued while a modeled Planning callback is busy, as in a single
