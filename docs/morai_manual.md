@@ -11,6 +11,14 @@ NORMAL은 직선과 일반 커브를 모두 포함하며 `cruise_speed_kmh` 한 
 경계 근거가 부족해 실제 접근 시 정지했다. 상세 근거와 다음 위치는
 [s4_progress_20261115.md](s4_progress_20261115.md)를 참고한다.
 
+`ffc382c` 이후 NORMAL의 지도 경계 접촉은 `/planning/avoidance_debug`의
+`boundary_contact_reason`에 기록한다. `boundary_check_mode=diagnostic`이면
+S4 경계 이유로 일반 주행을 정지시키지 않는다. 실제 장애물·센서 정지는 유지한다.
+MORAI Launch의 `normal_lookahead_heading_budget_rad=0.25`는 NORMAL 전용이며,
+S4 Control/rollout은 기존 `lookahead_heading_budget_rad=1.6`을 유지한다.
+현재 위치 NORMAL 출발 확인과 관련 노드만 교체한 세션의 종료 주의점은
+[수정 보고서](s4_normal_boundary_20261115.md)를 참고한다.
+
 ## 1. Ubuntu 호스트 터미널 H1 — Docker와 VS Code
 
 MORAI K-City와 기존 ROS2 통신 설정만 켜져 있다고 가정한다.

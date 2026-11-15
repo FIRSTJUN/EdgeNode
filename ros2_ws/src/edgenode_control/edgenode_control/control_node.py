@@ -100,6 +100,8 @@ class ControlNode(Node):
         self.declare_parameter(
             'lookahead_min_m', self.get_parameter('lookahead_distance_m').value)
         self.declare_parameter('normal_lookahead_min_m', self.get_parameter('lookahead_min_m').value)
+        self.declare_parameter('normal_lookahead_heading_budget_rad',
+                               self.get_parameter('lookahead_heading_budget_rad').value)
         self._avoidance_state = ''
         self._avoidance_state_stamp_ns = None
         self.create_subscription(String, '/planning/avoidance_state', self.avoidance_state_cb, 10)
@@ -240,16 +242,18 @@ class ControlNode(Node):
             return
 
         minimum = self.get_parameter('lookahead_min_m').value
+        heading_budget = self.get_parameter('lookahead_heading_budget_rad').value
         state_stamp = getattr(self, '_avoidance_state_stamp_ns', None)
         if (getattr(self, '_avoidance_state', '') == 'NORMAL' and state_stamp is not None
                 and 0 <= (now - state_stamp) / 1e9 <= self.get_parameter('command_timeout_sec').value):
             minimum = self.get_parameter('normal_lookahead_min_m').value
+            heading_budget = self.get_parameter('normal_lookahead_heading_budget_rad').value
         lookahead_distance_m = path_lookahead_distance(
             self.current_speed_kmh,self.local_path_points,self.latest_pose,
             lookahead_min_m=minimum,
             lookahead_max_m=self.get_parameter('lookahead_max_m').value,
             lookahead_preview_time_sec=self.get_parameter('lookahead_preview_time_sec').value,
-            heading_budget_rad=self.get_parameter('lookahead_heading_budget_rad').value,
+            heading_budget_rad=heading_budget,
         )
         if lookahead_distance_m is None:
             self.publish_safe_stop()

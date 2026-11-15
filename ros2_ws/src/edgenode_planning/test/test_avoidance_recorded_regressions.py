@@ -34,7 +34,7 @@ def test_collinear_reversal_is_not_zero_curvature_feasibility():
         curvatures([(0.,0.,0.),(2.,0.,0.),(1.,0.,0.)])
 
 
-def test_real_mgeo_and_frozen_live_initial_input_produce_only_rejected_diagnostic_paths():
+def test_real_mgeo_frozen_scene_now_has_a_continuously_swept_and_trackable_entry():
     scene=json.loads((FIXTURES/'s4_adjacent_lane_scene.json').read_text())['inputs']
     root=Path(__file__).resolve().parents[4]
     planner=StaticObstaclePlanner(LaneNetwork(DijkstraPlanner(root/'local_data/kcity_mgeo')))
@@ -45,6 +45,10 @@ def test_real_mgeo_and_frozen_live_initial_input_produce_only_rejected_diagnosti
     assert result['state']=='DETECT' and planner.entry_commits==0
     result=planner.plan(scene['reference'],[scene['obstacles']],(*scene['position'],scene['yaw']),
         speed_kmh=3.,current_link_id=scene['current_link_id'],route_link_ids=scene['route_link_ids'])
-    assert result['blocked'] and not result['points']
-    assert result['candidates'] and any(c.points for c in result['candidates'])
-    assert all(c.rejection for c in result['candidates'])
+    assert result['state']=='AVOID_ENTRY' and result['points'] and not result['blocked']
+    assert planner.selected is not None and not planner.selected.rejection
+    assert planner._path_safety(result['points'],planner.remembered,3.)==''
+    from edgenode_planning.lane_geometry import arc
+    duration=arc(planner.selected.kinematic_points)[-1]/(3/3.6)+planner.config.rollout_seconds
+    assert planner._rollout(result['points'],(*scene['position'],scene['yaw']),3.,0.,
+        planner.remembered,duration_s=duration)==''

@@ -19,6 +19,7 @@ from sensor_msgs_py.point_cloud2 import dtype_from_fields
 from std_msgs.msg import Float32, Int32, String
 
 from edgenode_perception.lidar_status import LidarStatus, footprint_digest
+from edgenode_perception.pose_history import PoseHistory
 
 from edgenode_perception.lidar_obstacles import (
     LidarObstacleConfig, detect_clusters, lidar_to_vehicle_xy, vehicle_to_world_xy,gravity_ground_heights,
@@ -77,6 +78,7 @@ class LidarObstacleNode(Node):
             ('sensor_future_tolerance_sec', .05),
             ('sensor_status_period_sec', .1),
             ('gravity_ground_compensation',False),
+            ('time_aligned_obstacles',False),
         ):
             self.declare_parameter(name, default, descriptor)
         self.localization_timeout_sec = self.get_parameter('localization_timeout_sec').value
@@ -86,6 +88,8 @@ class LidarObstacleNode(Node):
             raise ValueError('localization_timeout_sec must be finite and positive')
         self.latest_pose = None
         self._gravity_ground=self.get_parameter('gravity_ground_compensation').value
+        self._time_aligned=self.get_parameter('time_aligned_obstacles').value
+        self._poses=PoseHistory()
         self._attitudes=deque(maxlen=200)
         self._pending_cloud=None
         self.pose_received_ns = None
@@ -126,6 +130,7 @@ class LidarObstacleNode(Node):
             imu_qos=QoSProfile(history=HistoryPolicy.KEEP_LAST,depth=50,
                 reliability=ReliabilityPolicy.BEST_EFFORT,durability=DurabilityPolicy.VOLATILE)
             self.create_subscription(Imu,'/Imu',self.imu_callback,imu_qos)
+        if self._gravity_ground or self._time_aligned:
             self.create_timer(.02,self.process_pending_cloud,clock=Clock(clock_type=ClockType.STEADY_TIME))
         self.localization_sub = self.create_subscription(
             Odometry, self.get_parameter('localization_topic').value,
@@ -149,7 +154,9 @@ class LidarObstacleNode(Node):
         if self._pending_cloud is None:return
         msg,received=self._pending_cloud
         stamp=msg.header.stamp.sec*10**9+msg.header.stamp.nanosec
-        paired=bool(self._attitudes) and min(abs(row[0]-stamp) for row in self._attitudes)<=50_000_000
+        paired=(not self._gravity_ground or bool(self._attitudes) and
+                min(abs(row[0]-stamp) for row in self._attitudes)<=50_000_000)
+        paired=paired and (not self._time_aligned or self._poses.sample(stamp) is not None)
         expired=self.get_clock().now().nanoseconds-received>=50_000_000
         if paired or expired:
             self._pending_cloud=None
@@ -177,17 +184,21 @@ class LidarObstacleNode(Node):
         x, y, z, w = (value / norm for value in (q.x, q.y, q.z, q.w))
         yaw = math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
         self.latest_pose = (position.x, position.y, yaw)
+        if self.pose_stamp_ordered:self._poses.add(stamp,self.latest_pose)
         # Receipt time avoids mixing MORAI header time with the ROS node clock.
         self.pose_received_ns = self.get_clock().now().nanoseconds
+        if self._time_aligned:self.process_pending_cloud()
 
     def lidar_callback(self, msg, *, allow_defer=True):
-        if self._gravity_ground and allow_defer:
+        if (self._gravity_ground or self._time_aligned) and allow_defer:
             # KEEP_LAST(1): a newly received cloud supersedes a deferred cloud.
             # Otherwise an old cloud can run after this one when its IMU arrives,
             # manufacturing an OUT_OF_ORDER fault inside our own queue.
             self._pending_cloud=None
             stamp=msg.header.stamp.sec*10**9+msg.header.stamp.nanosec
-            paired=bool(self._attitudes) and min(abs(row[0]-stamp) for row in self._attitudes)<=50_000_000
+            paired=(not self._gravity_ground or bool(self._attitudes) and
+                    min(abs(row[0]-stamp) for row in self._attitudes)<=50_000_000)
+            paired=paired and (not self._time_aligned or self._poses.sample(stamp) is not None)
             if not paired:
                 # Cross-topic arrival order is not a sensor fault. Wait at most
                 # 50ms for its attitude without renewing the previous frame age.
@@ -207,6 +218,12 @@ class LidarObstacleNode(Node):
             self.sensor_status.finish(0, '', now.nanoseconds, 'LOCALIZATION_UNAVAILABLE')
             self.publish_sensor_status()
             return
+        alignment=self._poses.sample(stamp_ns) if self._time_aligned else None
+        if self._time_aligned and alignment is None:
+            self.publish_obstacles(msg.header.stamp,[])
+            self.sensor_status.finish(0,'',now.nanoseconds,'LOCALIZATION_UNAVAILABLE')
+            self.publish_sensor_status();return
+        frame_pose=alignment['pose'] if alignment is not None else self.latest_pose
         failure = 'INVALID_INPUT'
         try:
             xyz = pointcloud_xyz(msg)
@@ -231,7 +248,7 @@ class LidarObstacleNode(Node):
             self.sensor_status.finish(0, '', self.get_clock().now().nanoseconds, failure)
             self.publish_sensor_status()
             return
-        obstacles = self.publish_obstacles(msg.header.stamp, clusters)
+        obstacles = self.publish_obstacles(msg.header.stamp, clusters,frame_pose)
         finite=xyz[np.isfinite(xyz).all(axis=1)]
         self.diagnostics_pub.publish(String(data=json.dumps(dict(
             source_stamp_ns=stamp_ns,raw_point_count=len(xyz),cluster_count=len(clusters),
@@ -240,6 +257,9 @@ class LidarObstacleNode(Node):
             roi_max_x_m=self.config.roi_max_x,
             ground_filter=cluster_stats,
             imu_pair_delta_ms=abs(attitude[0]-stamp_ns)/1e6 if attitude is not None else None,
+            world_pose_stamp_ns=stamp_ns if alignment is not None else self.pose_source_stamp_ns,
+            pose_bracket_span_ms=alignment['span_ms'] if alignment is not None else None,
+            pose_nearest_delta_ms=alignment['nearest_delta_ms'] if alignment is not None else None,
             processing_ms=(time.perf_counter()-started)*1000.),allow_nan=False)))
         self.sensor_status.finish(len(clusters), footprint_digest('map', stamp_ns,
             [(p.position.x, p.position.y) for p in obstacles.poses]),
@@ -256,9 +276,9 @@ class LidarObstacleNode(Node):
         status = self.sensor_status.snapshot(now_ns, localization_valid=valid_pose)
         self.sensor_status_pub.publish(String(data=json.dumps(status, allow_nan=False)))
 
-    def world_pose(self, lidar_x, lidar_y):
+    def world_pose(self, lidar_x, lidar_y, frame_pose=None):
         vx, vy = lidar_to_vehicle_xy(float(lidar_x), float(lidar_y), self.config)
-        wx, wy = vehicle_to_world_xy(vx, vy, *self.latest_pose)
+        wx, wy = vehicle_to_world_xy(vx, vy, *(frame_pose if frame_pose is not None else self.latest_pose))
         pose = Pose()
         pose.position.x = float(wx)
         pose.position.y = float(wy)
@@ -266,7 +286,7 @@ class LidarObstacleNode(Node):
         pose.orientation.w = 1.0
         return pose
 
-    def publish_obstacles(self, stamp, clusters):
+    def publish_obstacles(self, stamp, clusters,frame_pose=None):
         obstacles = PoseArray()
         obstacles.header.stamp = stamp
         obstacles.header.frame_id = 'map'
@@ -275,9 +295,9 @@ class LidarObstacleNode(Node):
         distances = []
         for cluster in clusters:
             for x, y in cluster.footprint_xy():
-                obstacles.poses.append(self.world_pose(x, y))
+                obstacles.poses.append(self.world_pose(x, y,frame_pose))
             center = cluster.center_xyz
-            centers.poses.append(self.world_pose(center[0], center[1]))
+            centers.poses.append(self.world_pose(center[0], center[1],frame_pose))
             # Preserve sensor-origin centroid XY range, independently of bounds.
             distances.append(math.hypot(float(center[0]), float(center[1])))
         self.obstacles_pub.publish(obstacles)

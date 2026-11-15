@@ -7,9 +7,10 @@ import uuid
 import rclpy
 from morai_ros2_msgs.msg import GPSMessage, EgoVehicleStatus, MultiEgoSetting
 from nav_msgs.msg import Odometry
-from pyproj import Transformer
+from pyproj import Transformer, Proj
 from pyproj.exceptions import ProjError
 from rclpy.node import Node
+from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from sensor_msgs.msg import Imu
 from std_msgs.msg import Float32, String
@@ -17,11 +18,15 @@ from std_srvs.srv import Trigger
 
 from edgenode_localization.ekf import EKF
 from edgenode_localization.pose_reset import PoseResetDetector
+from edgenode_localization.map_heading import grid_convergence,grid_yaw
 
 
 class LocalizationNode(Node):
     def __init__(self):
         super().__init__('localization_node')
+        self.declare_parameter('imu_yaw_frame','grid',ParameterDescriptor(read_only=True))
+        self._imu_yaw_frame=self.get_parameter('imu_yaw_frame').value
+        if self._imu_yaw_frame not in ('grid','enu'):raise ValueError('imu_yaw_frame must be grid or enu')
 
         for name, default in [
             ('gps_topic', '/gps'),
@@ -85,6 +90,10 @@ class LocalizationNode(Node):
             f"EPSG:{self.get_parameter('utm_epsg').value}",
             always_xy=True,
         )
+        self._map_projection=Proj(f"EPSG:{self.get_parameter('utm_epsg').value}")
+        self._grid_convergence=None if self._imu_yaw_frame=='enu' else 0.
+        self._raw_imu_yaw=None
+        self.grid_convergence_pub=self.create_publisher(Float32,'/localization/grid_convergence_deg',depth)
 
         self.max_predict_dt_sec = self.get_parameter('max_predict_dt_sec').value
         if not math.isfinite(self.max_predict_dt_sec) or self.max_predict_dt_sec <= 0.0:
@@ -186,6 +195,13 @@ class LocalizationNode(Node):
         if not (math.isfinite(utm_easting) and math.isfinite(utm_northing)):
             self.get_logger().warning('유효하지 않은 UTM 좌표: GPS Odometry 발행 생략')
             return
+        if self._imu_yaw_frame=='enu':
+            try:self._grid_convergence=grid_convergence(self._map_projection,longitude,latitude)
+            except (ValueError,ProjError):
+                self.get_logger().warning('Map heading basis unavailable; GPS update rejected')
+                return
+            if self._raw_imu_yaw is not None:self.latest_imu_yaw=grid_yaw(self._raw_imu_yaw,self._grid_convergence)
+            self.grid_convergence_pub.publish(Float32(data=math.degrees(self._grid_convergence)))
 
         # K-City 원점은 UTM 52N의 유한한 양수 쌍이다.
         # 0/음수/NaN/Inf가 있으면 두 축 모두 설정값으로 대체한다.
@@ -279,6 +295,8 @@ class LocalizationNode(Node):
             2.0 * (qw * qz + qx * qy),
             1.0 - 2.0 * (qy * qy + qz * qz),
         )
+        self._raw_imu_yaw=imu_yaw
+        imu_yaw=grid_yaw(imu_yaw,self._grid_convergence) if self._grid_convergence is not None else None
         self.latest_imu_yaw = imu_yaw
         self.latest_gyro_z = gyro_z
 
@@ -311,6 +329,7 @@ class LocalizationNode(Node):
             if self._try_initialize_ekf():
                 self._publish_ekf_odometry(stamp)
             return
+        if imu_yaw is None:return
 
         if dt is not None and 0.0 < dt <= self.max_predict_dt_sec:
             self.ekf.predict(gyro_z, dt)

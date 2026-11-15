@@ -44,6 +44,7 @@ class ReturnSearch:
             snapshot = copy(planner)
             snapshot._obstacle_bounds = dict(planner._obstacle_bounds)
             snapshot._validated_paths = {}
+            snapshot._map_sweep_cache = type(planner._map_sweep_cache)()
             self._context = context
             self._future = self._executor.submit(self._search, snapshot, pose, speed, curvature)
             return 'RETURN_SEARCH_PENDING'

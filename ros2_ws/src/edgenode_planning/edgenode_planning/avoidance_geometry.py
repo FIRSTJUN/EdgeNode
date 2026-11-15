@@ -99,9 +99,14 @@ def obstacle_polygons(groups):
 def swept_body(body, first, second, margin=0.):
     """Conservative continuous rigid-body enclosure between two poses.
 
-    Every intermediate corner is within half-step translation + R*half-angle
-    of its nearer endpoint. Inflating the endpoint hull by that bound covers
-    curved no-slip motion as well as linearly interpolated path samples.
+    Interpolation is linear translation + shortest-angle yaw, or a constant-
+    curvature bicycle step. The endpoint hull already contains every linearly
+    interpolated corner. For either reference motion, the chord-interpolation
+    error is bounded by sup|corner''(u)|/8 = (R_axle + R_body)*angle**2/8.
+    This follows from the linear-interpolation remainder for u in [0,1].
+    R_axle=chord/(2*sin(angle/2)) for a bicycle arc (zero for linear motion).
+    The square inflation contains that Euclidean error disk. Unlike adding
+    half the translation again, this bound is continuous at zero rotation.
     """
     if first==second:
         return inflate(body.polygon(*first),margin)
@@ -113,6 +118,6 @@ def swept_body(body, first, second, margin=0.):
         return inflate(convex_hull(body.polygon(*first)+body.polygon(*second)),margin+EPS)
     radius = max(math.hypot(x,y) for x,y in body.polygon(0.,0.,0.))
     chord=math.dist(first[:2],second[:2])
-    travel=chord*angle/(2*math.sin(angle/2)) if angle>1e-9 else chord
-    bound = travel/2 + radius*angle/2
+    axle_error=chord*angle**2/(16*math.sin(angle/2)) if angle>1e-9 else chord*angle/8
+    bound = axle_error+radius*angle**2/8
     return inflate(body.polygon(*first)+body.polygon(*second), margin+bound)

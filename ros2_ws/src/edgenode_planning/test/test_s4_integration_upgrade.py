@@ -120,7 +120,9 @@ def test_speed_aware_detection_retains_confirmed_far_hazard_across_empty_frames(
     for stamp in (1,2):
         r=planner.plan(reference,[obstacle(60.,64.)],(0.,0.,0.),speed_kmh=5.,observation_stamp_ns=stamp)
         assert r['state']=='NORMAL' and r['speed_cap_kmh'] is None
-    assert r['confirmed_path_obstacles']==1 and 26.<r['detection_trigger_distance_m']<29.
+    # Reserve the refined 24m transition family and up to 4m delayed entry,
+    # in addition to the existing speed/reaction/lookahead budget.
+    assert r['confirmed_path_obstacles']==1 and 35.<r['detection_trigger_distance_m']<36.
     for stamp in (3,4,5):
         assert planner.plan(reference,[],(20.,0.,0.),speed_kmh=5.,observation_stamp_ns=stamp)['state']=='NORMAL'
     assert planner.plan(reference,[],(30.,0.,0.),speed_kmh=5.,observation_stamp_ns=6)['state']=='DETECT'

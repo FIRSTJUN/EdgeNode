@@ -40,3 +40,42 @@ def test_swept_vehicle_touching_the_actual_center_divider_is_rejected(boundaries
     polygon = ((x-.2,y-.2),(x+.2,y-.2),(x+.2,y+.2),(x-.2,y+.2))
     assert boundaries.swept_reason(polygon).startswith('LANE_BOUNDARY_COLLISION:')
     assert boundaries.swept_reason(((-500.,-500.),(-499.,-500.),(-499.,-499.),(-500.,-499.))) == ''
+
+
+def test_observed_outer_markings_prove_only_their_bounded_ordinary_lane_pair(boundaries):
+    import math
+    from edgenode_planning.lane_geometry import sample
+    from edgenode_planning.vehicle_geometry import sonata_geometry
+    network=LaneNetwork(DijkstraPlanner(ROOT/'local_data/kcity_mgeo'));network.boundaries=boundaries
+    pair=network.pair('A219BS010314','left',['A219BS010314'])
+    road=boundaries.road_corridor_for_pair(network,pair)
+    assert road is not None and road.authorizes(pair.ids,'left')
+    assert not road.authorizes(pair.ids,'right')
+    p,t=sample(pair.original,45.);yaw=math.atan2(t[1],t[0]);body=sonata_geometry()
+    shifted=lambda offset:body.polygon(p[0]-offset*t[1],p[1]+offset*t[0],yaw)
+    assert road.covers(shifted(4.))
+    assert not road.covers(shifted(8.))
+    p,t=sample(pair.original,100.)
+    assert not road.covers(body.polygon(*p[:2],math.atan2(t[1],t[0])))
+
+
+def test_missing_or_ambiguous_outer_marking_never_becomes_a_road_surface(boundaries):
+    from copy import deepcopy
+    network=LaneNetwork(DijkstraPlanner(ROOT/'local_data/kcity_mgeo'))
+    local=deepcopy(boundaries);local._road_corridor_cache.clear();network.boundaries=local
+    pair=network.pair('A219BS010314','left',['A219BS010314'])
+    local.observed_sides.pop(('A219BS010315','left'))
+    assert local.road_corridor_for_pair(network,pair) is None
+
+
+def test_explicit_return_denial_invalidates_even_a_cached_offset_certificate(boundaries):
+    network=LaneNetwork(DijkstraPlanner(ROOT/'local_data/kcity_mgeo'));network.boundaries=boundaries
+    pair=network.pair('A219BS010314','left',['A219BS010314'])
+    assert boundaries.road_corridor_for_pair(network,pair) is not None
+    network.links['A219BS010315']['can_move_right_lane']=False
+    assert boundaries.road_corridor_for_pair(network,pair) is None
+
+
+def test_current_unmarked_intersection_cannot_supply_an_offset_certificate(boundaries):
+    network=LaneNetwork(DijkstraPlanner(ROOT/'local_data/kcity_mgeo'));network.boundaries=boundaries
+    assert network.pair('A219BS010469','right',['A219BS010469']) is None

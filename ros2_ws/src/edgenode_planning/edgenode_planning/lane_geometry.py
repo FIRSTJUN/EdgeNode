@@ -164,6 +164,8 @@ class LaneNetwork:
             raise ValueError('explicit permission policy must be boolean')
         self.require_explicit_permission = require_explicit_permission
         self.boundaries = None
+        # Only an explicitly verified directed surface may authorize offsets.
+        self.road_corridor = None
         self.links = planner.links_by_id
         self.valid = {edge['link_id'] for edges in planner.graph.values() for edge in edges}
 

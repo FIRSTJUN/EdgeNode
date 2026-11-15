@@ -21,6 +21,8 @@ class HDMapBoundaries:
                     and all(nearest(center, p)[0] <= .05 for p in raw)):
                 self.aligned_links.add(identifier)
         self.shared = {}
+        self.observed_sides = {}
+        self._road_corridor_cache = {}
         self.forbidden = []
         self.cells = {}
         # Only lane/road boundaries are used. Stop lines and guide lines are not
@@ -29,6 +31,9 @@ class HDMapBoundaries:
         for feature in read_layer(Path(directory) / 'B2_SURFACELINEMARK'):
             attr = feature['attributes']
             left, right = attr['L_linkID'], attr['R_linkID']
+            for link,side in ((left,'right'),(right,'left')):
+                if link:self.observed_sides.setdefault((link,side),[]).append(
+                    (attr,translated(feature,origin)))
             allowed = attr['Type'] == '212' and attr['Kind'] == '503'
             if left and right:
                 self.shared.setdefault(frozenset((left, right)), []).append((allowed, attr['ID']))
@@ -60,9 +65,60 @@ class HDMapBoundaries:
             for y in range(int(lo_y // 10), int(hi_y // 10) + 1):
                 nearby.update(self.cells.get((x, y), ()))
         for index in nearby:
+            # Do not filter by L/R_linkID: a center divider may be recorded
+            # only against the opposite-direction link and still touch Ego.
             a, b, (x0, x1, y0, y1), identifier = self.forbidden[index]
             if x1 < lo_x or hi_x < x0 or y1 < lo_y or hi_y < y0:
                 continue
             if intersects(polygon, (a, b)):
                 return 'LANE_BOUNDARY_COLLISION:' + identifier
         return ''
+
+    def road_corridor_for_pair(self, network, pair):
+        """Bound ONLY ordinary, bidirectionally permitted lane-pair strips.
+
+        Both outer sides must be actual unambiguous B2 observations. Exact
+        piecewise-linear strips are triangulated, never a centerline buffer or
+        a convex hull across a junction. Unobserved caps/gaps remain outside.
+        Internal regulatory markings still use swept_reason() on every body.
+        """
+        from .hdmap_audit import marking_definition
+        from .lane_geometry import LanePair,PolylineIndex,arc
+        from .road_corridor import VerifiedRoadCorridor
+        reverse='right' if pair.side=='left' else 'left'
+        if any(network.permission_reason(a,pair.side) or network.permission_reason(b,reverse)
+               for a,b in pair.ids):return None
+        key=(tuple(pair.ids),pair.side)
+        if key in self._road_corridor_cache:return self._road_corridor_cache[key]
+        cells=[];links=[];sources=set()
+        for original,adjacent in pair.ids:
+            outer_left=adjacent if pair.side=='left' else original
+            outer_right=original if pair.side=='left' else adjacent
+            lines=[];identifiers=[]
+            for link,side in ((outer_right,'right'),(outer_left,'left')):
+                rows=self.observed_sides.get((link,side),())
+                if len(rows)!=1:break
+                attr,parts=rows[0]
+                if (len(parts)!=1 or attr['Kind'] not in ('501','503','505','506')
+                        or attr['Type']=='999' or not marking_definition(attr['Type'],attr['Kind'])['definition_confirmed']):break
+                line=parts[0];center=PolylineIndex(network.links[link]['points'])
+                if center.project(line[-1])<center.project(line[0]):line=tuple(reversed(line))
+                lines.append(line);identifiers.append(attr['ID'])
+            if len(lines)!=2:continue
+            right,left=lines;index=PolylineIndex(right)
+            # Trim strictly inside actual measured caps; never extrapolate a
+            # side boundary to the MGeo endpoint or fill the next section gap.
+            start=max(0.,index.project(left[0]))+.25
+            end=min(arc(right)[-1],index.project(left[-1]))-.25
+            if end<=start:continue
+            observed=LanePair(right,left,[(outer_right,outer_left)],'left',[arc(right)[-1]])
+            envelope=observed.corridor_envelope(start,end)
+            if envelope['failure'] or not envelope['quads']:continue
+            cells.extend(envelope['quads']);links.extend((original,adjacent));sources.update(identifiers)
+        result=(VerifiedRoadCorridor(cells,source='HDMAP_B2_ORDINARY_LANE_STRIPS:'+','.join(sorted(sources)),
+                    link_ids=links,allowed_sides=(pair.side,)) if cells else None)
+        if result is not None:
+            result.crossings=tuple(row for a,b in pair.ids for row in
+                ((a,pair.side,b),(b,reverse,a)))
+        self._road_corridor_cache[key]=result
+        return result

@@ -127,6 +127,26 @@ class ControlNodeTest(unittest.TestCase):
         self.command()
         self.assertAlmostEqual(self.publishers['/control/lookahead_distance'].publish.call_args.args[0].data, 2.5)
 
+    def test_normal_corner_preview_is_separate_from_s4_and_stale_state(self):
+        self.parameters.update(lookahead_max_m=12., lookahead_preview_time_sec=.8,
+                               lookahead_heading_budget_rad=1.6,
+                               normal_lookahead_heading_budget_rad=.25,
+                               normal_lookahead_min_m=3.5)
+        self.node.current_speed_kmh=30.
+        self.set_path([(0.,0.,0.),(4.,0.,0.),(8.,-4.,0.),(20.,-16.,0.)])
+        for state in ('NORMAL','DETECT','AVOID_ENTRY','AVOID_HOLD','RETURN'):
+            self.node.avoidance_state_cb(String(data=state))
+            self.command()
+            actual=self.publishers['/control/lookahead_distance'].publish.call_args.args[0].data
+            self.assertAlmostEqual(actual,4. if state=='NORMAL' else 30./3.6*.8)
+        self.node.avoidance_state_cb(String(data='NORMAL'))
+        self.now+=700_000_000
+        self.feed_inputs()
+        self.node.current_speed_kmh=30.
+        self.set_path([(0.,0.,0.),(4.,0.,0.),(8.,-4.,0.),(20.,-16.,0.)])
+        self.command()
+        self.assertAlmostEqual(self.publishers['/control/lookahead_distance'].publish.call_args.args[0].data,30./3.6*.8)
+
     def test_constructor_creates_new_subscriptions_and_default_parameters(self):
         self.subscriptions.assert_any_call(
             Path, '/planning/local_path', self.node.local_path_cb, 10,

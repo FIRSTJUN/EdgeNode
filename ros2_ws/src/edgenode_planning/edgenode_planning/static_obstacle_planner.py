@@ -1,6 +1,7 @@
-"""One static-obstacle planner; fixed lattice maneuvers and hard safety first."""
+"""Measured-pose, multi-candidate static avoidance with hard safety gates."""
 from dataclasses import dataclass
 from collections import deque
+from collections import OrderedDict
 from bisect import bisect_right
 import math
 import time
@@ -19,6 +20,8 @@ from .vehicle_geometry import sonata_geometry
 @dataclass(frozen=True)
 class AvoidanceConfig:
     transition_lengths_m: tuple = (12., 16., 20.)
+    entry_start_offsets_m: tuple = (0., 2., 4.)
+    transition_search_step_m: float = 2.
     prediction_distance_m: float = 80.
     obstacle_margin_m: float = .25
     observation_padding_m: float = .05
@@ -55,9 +58,11 @@ class AvoidanceConfig:
 
     def __post_init__(self):
         for name, value in self.__dict__.items():
-            if name=='transition_lengths_m':
-                if not value or any(not math.isfinite(v) or v<=0 for v in value):
+            if name in ('transition_lengths_m', 'entry_start_offsets_m'):
+                if (not value or any(isinstance(v,bool) or not math.isfinite(v) or
+                        (v<=0 if name=='transition_lengths_m' else v<0) for v in value)):
                     raise ValueError('positive transition lengths required')
+                object.__setattr__(self,name,tuple(value))
             elif isinstance(value, bool) or not isinstance(value,(int,float)) or not math.isfinite(value):
                 raise ValueError('invalid '+name)
             elif name!='steering_sign' and value<0:
@@ -72,6 +77,9 @@ class AvoidanceConfig:
                 or self.hold_clearance_m<self.obstacle_margin_m
                 or self.steering_sign not in (-1.,1.)):
             raise ValueError('invalid safety/controller configuration')
+        if (self.transition_search_step_m<=0 or 0. not in self.entry_start_offsets_m
+                or len(self.entry_start_offsets_m)>8):
+            raise ValueError('bounded entry start search including zero required')
         if not isinstance(self.normal_obstacle_confirmations,int) or self.normal_obstacle_confirmations<1:
             raise ValueError('positive obstacle confirmation count required')
 
@@ -125,6 +133,11 @@ class StaticObstaclePlanner:
         self._entry_reserve_m=0.
         self._entry_observation_m=None
         self._observation_curvature_limit=None
+        self._boundary_contact_reason=''
+        self._boundary_check_mode='diagnostic'
+        self._road_area=None
+        self._collision_context={};self._failure_context={};self._check_phase=''
+        self._map_sweep_cache=OrderedDict()
 
     def invalidate_observation(self):
         self.confirmations=0
@@ -169,6 +182,9 @@ class StaticObstaclePlanner:
         active=self.state!='NORMAL' or speed_cap is not None
         return dict(state=self.state,stage=self.state,points=[] if self.state=='BLOCKED' else path,
             blocked=self.state=='BLOCKED',reason=self.reason,active=active,
+            boundary_contact_reason=self._boundary_contact_reason,
+            boundary_check_mode=self._boundary_check_mode,
+            failure_context=self._failure_context,
             speed_cap_kmh=self.config.avoid_speed_kmh if active and speed_cap is None else speed_cap,
             candidates=self.candidates,original_lane=self._original,left_lane=self.left_lane,
             right_lane=self.right_lane,selected_lane=self.pair.current_ids(
@@ -180,6 +196,8 @@ class StaticObstaclePlanner:
             detected_obstacles=self._detected_obstacles,
             entry_context=self._entry_context,
             detected_object_count=self._detected_count,path_obstacle_count=self._path_obstacle_count,
+            remembered_object_count=len(self.remembered),
+            selected_mode=getattr(self.pair,'mode','lane') if self.pair else '',
             obstacle_confirmation_frames=self._normal_detection_frames,
             confirmed_path_obstacles=self._confirmed_path_obstacles,
             detection_trigger_distance_m=self._detection_trigger_m,
@@ -189,6 +207,8 @@ class StaticObstaclePlanner:
             candidate_lane_batches=self.candidate_lane_batches)
 
     def _block(self, reason):
+        if reason in ('BODY_COLLISION','REFERENCE_CLEARANCE','ROAD_AREA_UNPROVEN') or reason.startswith('LANE_BOUNDARY_COLLISION:'):
+            self._failure_context=dict(self._collision_context)
         self.state='BLOCKED';self.reason=reason
         return self._result()
 
@@ -203,12 +223,43 @@ class StaticObstaclePlanner:
         return swept,bounds,axle_bounds,sagitta
 
     def _body_safety(self, first, second, obstacles, *, prepared=None):
-        swept,bounds,axle_bounds,sagitta=self._body_geometry(first,second) if prepared is None else prepared
-        boundaries = getattr(self.network, 'boundaries', None)
+        geometry=self._body_geometry(first,second) if prepared is None else prepared
+        # Immutable-map proof is independent of changing LiDAR observations.
+        # Only fixed sampled sweeps use this cache; rollout poses are always
+        # checked from the current measured state. Never cache solid clearance.
+        boundaries=getattr(self.network,'boundaries',None)
+        key=(self._geometry_context(),id(boundaries),tuple(first),tuple(second)) if prepared is not None else None
+        if key is not None and key in self._map_sweep_cache:
+            reason,context=self._map_sweep_cache[key]
+            self._map_sweep_cache.move_to_end(key)
+            if reason:self._collision_context=dict(context,phase=self._check_phase);return reason
+            return self._obstacle_safety(first,second,obstacles,prepared=geometry)
+        reason=self._map_sweep_reason(first,second,geometry,boundaries)
+        if key is not None:
+            self._map_sweep_cache[key]=(reason,dict(self._collision_context) if reason else {})
+            if len(self._map_sweep_cache)>12000:self._map_sweep_cache.popitem(last=False)
+        if reason:return reason
+        return self._obstacle_safety(first,second,obstacles,prepared=geometry)
+
+    def _map_sweep_reason(self,first,second,geometry,boundaries):
+        if self._road_area is not None:
+            contained=inflate(geometry[0],self.config.tracking_limit_m)
+            if not self._road_area.covers(contained):
+                self._collision_context=dict(phase=self._check_phase,first_pose=first,second_pose=second,
+                    swept_polygon=geometry[0],containment_polygon=contained,
+                    tracking_margin_m=self.config.tracking_limit_m,road_source=self._road_area.source)
+                return 'ROAD_AREA_UNPROVEN'
         if boundaries is not None:
-            boundary_reason = boundaries.swept_reason(swept)
+            boundary_reason = boundaries.swept_reason(geometry[0])
             if boundary_reason:
+                self._collision_context=dict(phase=self._check_phase,first_pose=first,second_pose=second,
+                    swept_polygon=geometry[0],boundary_reason=boundary_reason)
                 return boundary_reason
+        return ''
+
+    def _obstacle_safety(self, first, second, obstacles, *, prepared=None):
+        """LiDAR collision/clearance only; map markings cannot hide a solid."""
+        swept,bounds,axle_bounds,sagitta=self._body_geometry(first,second) if prepared is None else prepared
         for obstacle in obstacles:
             obstacle=tuple(map(tuple,obstacle))
             other=self._obstacle_bounds.get(obstacle)
@@ -225,17 +276,22 @@ class StaticObstaclePlanner:
             clearance=polygon_distance(swept,obstacle)
             self._min_clearance=min(self._min_clearance,clearance)
             if clearance<=self.config.obstacle_margin_m:
+                self._collision_context=dict(phase=self._check_phase,first_pose=first,second_pose=second,
+                    clearance_m=clearance,obstacle=obstacle,swept_polygon=swept)
                 return 'BODY_COLLISION'
             if reference_lower<self.config.reference_clearance_m:
                 axle=inflate((tuple(first[:2]),tuple(second[:2])),sagitta)
                 if polygon_distance(axle,obstacle)<self.config.reference_clearance_m:
+                    self._collision_context=dict(phase=self._check_phase,first_pose=first,second_pose=second,
+                        clearance_m=clearance,obstacle=obstacle,swept_polygon=swept)
                     return 'REFERENCE_CLEARANCE'
         return ''
 
     def _geometry_context(self):
-        return (id(self.network),self.body,self.config,self._observation_curvature_limit)
+        return (id(self.network),self.body,self.config,self._observation_curvature_limit,id(self._road_area))
 
     def _path_safety(self, points, obstacles, speed, geometry_check=True, body_cache=None, curvature_points=None):
+        self._check_phase='PATH_SWEEP'
         try:
             ks=curvatures(points if curvature_points is None else curvature_points)
         except (ValueError,OverflowError):
@@ -287,7 +343,7 @@ class StaticObstaclePlanner:
         # Geometry belongs to the path segment, not to each roadside object.
         segments=tuple((a,b,self._body_geometry(a,b)) for a,b in zip(path_poses,path_poses[1:]))
         return tuple(o for o in obstacles if any(
-            self._body_safety(a,b,(o,),prepared=geometry) in ('BODY_COLLISION','REFERENCE_CLEARANCE')
+            self._obstacle_safety(a,b,(o,),prepared=geometry) in ('BODY_COLLISION','REFERENCE_CLEARANCE')
             for a,b,geometry in segments))
 
     def _remember(self, detected):
@@ -313,6 +369,7 @@ class StaticObstaclePlanner:
         return 2*velocity*self.config.rollout_seconds+lookahead+2*self.config.tracking_limit_m
 
     def _rollout(self, points, pose, speed, actual_curvature, obstacles, duration_s=None):
+        self._check_phase='PP_ROLLOUT'
         velocity=max(speed,self.config.avoid_speed_kmh)/3.6
         lookahead=calculate_lookahead_distance(velocity*3.6,self.config.lookahead_min_m,
             self.config.lookahead_max_m,self.config.lookahead_preview_time_sec)
@@ -350,12 +407,14 @@ class StaticObstaclePlanner:
                 return 'STEERING_CLAMP'
             command=to_morai_front_steer(response['steering_normalized'],self.config.steering_sign,
                 self.config.max_front_steer_normalized)
-            queue.append((tick*dt+self.config.command_delay_s,
-                command/self.config.steering_sign*self.config.max_wheel_angle_rad))
+            # Control limits the outgoing command before transport delay.
+            # Apply the same ordering here, including the measured initial turn.
+            requested_angle=limit_steering_change(
+                command/self.config.steering_sign*self.config.max_wheel_angle_rad,
+                requested_angle,self.config.steering_slew_limit_radps,dt)
+            queue.append((tick*dt+self.config.command_delay_s,requested_angle))
             while queue and queue[0][0]<=tick*dt+1e-12:
-                requested_angle=queue.popleft()[1]
-            applied_angle=limit_steering_change(requested_angle,previous_angle,
-                self.config.steering_slew_limit_radps,dt)
+                applied_angle=queue.popleft()[1]
             curvature=math.tan(applied_angle)/self.config.wheelbase_m
             if velocity**2*abs(curvature)>self.config.max_lateral_acceleration_mps2:
                 return 'LATERAL_ACCELERATION'
@@ -380,48 +439,240 @@ class StaticObstaclePlanner:
                        for i in range(divisions+1))
         return prepared[-1],tuple((x,y,float(z)) for x,y,_ in prepared)
 
+    def _entry_lengths(self):
+        """Refine the configured family; physical gates decide admissibility."""
+        base=self.config.transition_lengths_m
+        step=self.config.transition_search_step_m
+        low=max(step,min(base)-2*step)
+        high=max(base)+2*step
+        # Bound work independently of a pathological parameter value.
+        count=min(16,math.ceil((high-low)/step)+1)
+        return tuple(sorted(set(base)|{low+i*step for i in range(count)}))
+
+    def _road_offsets(self, road, reference, side, required):
+        """Probe actual map-supported cross-section, never a guessed width.
+
+        Sparse initial LiDAR faces need not limit the available passing gap.
+        Every proposed value still gets whole-trajectory and PP validation.
+        Stop at the first unsupported interval, including an interior gap.
+        """
+        index=PolylineIndex(reference)
+        front=min(index.project(p) for o in self._hazards for p in o)
+        row=sample(reference,max(0.,min(index.lengths[-1],front)))
+        point,tangent=row;sign=1 if side=='left' else -1
+        yaw=math.atan2(tangent[1],tangent[0]);supported=[]
+        for i in range(32):
+            offset=required+i*.2
+            solid=self.body.polygon(point[0]-sign*offset*tangent[1],
+                point[1]+sign*offset*tangent[0],yaw)
+            if not road.covers(inflate(solid,self.config.tracking_limit_m)):break
+            supported.append(offset)
+        if not supported:return ()
+        low,high=supported[0],supported[-1]
+        return tuple(sorted({low+(high-low)*fraction for fraction in (0.,.25,.5,.75,1.)}))
+
+    def _hazard_clearance(self, points):
+        minimum=math.inf
+        path_poses=poses(points)
+        for a,b in zip(path_poses,path_poses[1:]):
+            swept,bounds,_,_=self._body_geometry(a,b)
+            for obstacle in self._hazards:
+                other=polygon_bounds(obstacle)
+                if bounds_distance(bounds,other)>=minimum:continue
+                minimum=min(minimum,polygon_distance(swept,obstacle))
+        return minimum
+
+    def _entry_obstacles(self, pair):
+        """Reserve is longitudinal sensing/braking uncertainty, not a deadline
+        for reaching the neighboring center. Sweep against that uncertainty.
+        """
+        if not self._entry_reserve_m:return self.remembered
+        reserved=[]
+        for solid in self.remembered:
+            station=min(pair.original_index.project(p) for p in solid)
+            row=sample(pair.original,max(0.,min(pair.length,station)))
+            if row is None:raise ValueError('ENTRY_RESERVE_REFERENCE')
+            tx,ty=row[1];reserve=self._entry_reserve_m
+            reserved.append(convex_hull(list(solid)+[(x-tx*reserve,y-ty*reserve) for x,y in solid]))
+        return tuple(reserved)
+
     def _generate_entry(self, pair, pose, speed, actual_curvature, front, body_cache=None):
-        """STEP 2 only. No return target, reservation or return permission."""
+        """Search both transition length and entry position, without refitting
+        an approved maneuver. Every accepted entry is tracked to completion.
+        """
         self.candidate_lane_batches+=1
         ego=pair.original_index.project(pose[:2]);row=sample(pair.original,ego)
-        if row is None:
-            raise ValueError('ORIGINAL_LANE_RANGE')
-        # Neighbor links may start slightly ahead of the current cross-section.
-        # Entry needs real target/tail correspondence, not one at its start.
+        if row is None:raise ValueError('ORIGINAL_LANE_RANGE')
         prepared,prefix=self._preparation(pose,speed,actual_curvature,row[0][2])
         prepared_s=pair.original_index.project(prepared[:2])
         supported=pair.length-self.body.wheelbase_m-self.body.front_overhang_m-1.
         reserve=self._rollout_distance(speed)
         candidates=[];projection_cache={}
-        for length in self.config.transition_lengths_m:
-            entry=path=();end=prepared_s+length;cost=math.inf;terms={}
+        obstacles=self._entry_obstacles(pair)
+        original_area=self._road_area
+        self._road_area=getattr(pair,'road_area',None)
+        def generate(length, offset):
+            entry=path=();end=prepared_s+offset+length;cost=math.inf;terms={};clearance=0.
             try:
-                target=pair.at(end);tail=pair.at(min(supported,end+reserve))
-                if target is None or tail is None or end+reserve>supported:
+                tail_s=end+reserve
+                if getattr(pair,'mode','lane')=='road_offset':
+                    rear=max(pair.original_index.project(p) for o in self._hazards for p in o)
+                    # A small offset can fit entry yet collide during HOLD.
+                    # Prove passage of the entire observed obstruction before
+                    # committing to this non-centerline guide.
+                    tail_s=max(tail_s,rear+self.body.rear_overhang_m+self.config.return_margin_m+reserve)
+                target=pair.at(end);tail=pair.at(min(supported,tail_s))
+                if target is None or tail is None or tail_s>supported:
                     raise ValueError('INSUFFICIENT_ENTRY_SUPPORT')
-                entry=prefix+transition(prepared[:2],prepared[2],actual_curvature,
+                start_pose=prepared;initial=prefix;start_turn=actual_curvature
+                if offset:
+                    start=sample(pair.original,prepared_s+offset)
+                    if start is None:raise ValueError('ORIGINAL_LANE_RANGE')
+                    approach=transition(prepared[:2],prepared[2],actual_curvature,
+                        pair.original,prepared_s+offset,offset)
+                    initial=prefix+approach[1:]
+                    from .lane_geometry import curvature_at
+                    start_pose=(*start[0][:2],math.atan2(start[1][1],start[1][0]))
+                    start_turn=curvature_at(pair.original,prepared_s+offset)
+                entry=initial+transition(start_pose[:2],start_pose[2],start_turn,
                     pair.adjacent,target['adjacent_s'],length)[1:]
                 self.generated_transition_count+=1
-                # This short adjacent tail is PP support for completing entry.
-                # STEP 3's driving path is created only after acquisition.
                 path=entry+center_suffix(pair.adjacent,target['adjacent_s'],tail['adjacent_s'])[1:]
-                reason=''
                 needed=end+self.body.wheelbase_m+self.body.front_overhang_m+\
                     self.config.obstacle_margin_m+self._entry_reserve_m
-                if needed>front:reason='ENTRY_DEADLINE'
-                if not reason and self._entry_observation_m is not None and needed-ego>self._entry_observation_m:
+                if getattr(pair,'mode','lane')=='road_offset':
+                    needed=max(needed,tail_s+self.body.wheelbase_m+self.body.front_overhang_m+
+                        self.config.obstacle_margin_m+self._entry_reserve_m)
+                reason=''
+                if self._entry_observation_m is not None and needed-ego>self._entry_observation_m:
                     reason='ENTRY_OBSERVATION_DISTANCE'
-                if not reason:reason=self._path_safety(path,self.remembered,speed,body_cache=body_cache)
-                if not reason:reason=self._rollout(path,pose,speed,actual_curvature,self.remembered)
+                if not reason:reason=self._path_safety(path,obstacles,speed,body_cache=body_cache)
+                if not reason:
+                    duration=arc(entry)[-1]/(max(speed,self.config.avoid_speed_kmh)/3.6)+self.config.rollout_seconds
+                    if getattr(pair,'mode','lane')=='road_offset':
+                        duration=max(duration,(arc(path)[-1]-reserve)/(max(speed,self.config.avoid_speed_kmh)/3.6)+self.config.rollout_seconds)
+                    reason=self._rollout(path,pose,speed,actual_curvature,obstacles,duration_s=duration)
+                if not reason and getattr(pair,'mode','lane')=='road_offset':
+                    clearance=self._hazard_clearance(path)
                 cost,terms=reference_cost(path,pair.original,pair.adjacent,self.weights,
                                           projection_cache=projection_cache)
             except (ValueError,TypeError,IndexError,OverflowError) as error:
                 reason=str(error)
             candidates.append(LatticeCandidate(pair.side,path or entry,end,math.nan,math.nan,
-                length,cost,terms,reason,path or entry,()))
+                length,cost,terms,reason,path or entry,(),entry,
+                entry_start_offset_m=offset,mode=getattr(pair,'mode','lane'),obstacle_clearance_m=clearance))
+        try:
+            for length in self.config.transition_lengths_m:generate(length,0.)
+            if not any(not c.rejection for c in candidates):
+                for offset in self.config.entry_start_offsets_m:
+                    for length in self._entry_lengths():
+                        if offset==0. and length in self.config.transition_lengths_m:continue
+                        generate(length,offset)
+        finally:
+            self._road_area=original_area
         return candidates
 
+    def _search_entry(self, reference, pose, speed_kmh, actual_curvature, current_link_id,
+                      route_link_ids, route_link_index, distance, body_cache=None):
+        ego=max(0.,min(arc(reference)[-1],PolylineIndex(reference).project(pose[:2])))
+        pairs=[];all_candidates=[]
+        self._entry_context=dict(current_link_id=current_link_id,
+            route_occurrences=list(route_link_ids).count(current_link_id),pose=tuple(pose),sides={})
+        for side in ('left','right'):
+            pair=None
+            try:
+                pair=self.network.pair(current_link_id,side,list(route_link_ids),route_link_index=route_link_index)
+                self._entry_context['sides'][side]=dict(
+                    target_link_id=self.network.links.get(current_link_id,{}).get(side+'_lane_change_dst_link_idx'),
+                    permission_reason=self.network.permission_reason(current_link_id,side),
+                    valid_neighbor=self.network.neighbor(current_link_id,side),
+                    pair_available=pair is not None)
+                if pair is None:continue
+                setattr(self,side+'_lane',pair.adjacent)
+                front_s=min(pair.original_index.project(p) for o in self._hazards for p in o)
+                candidates=self._generate_entry(pair,pose,speed_kmh,actual_curvature,front_s,body_cache)
+                all_candidates.extend(candidates);pairs.append((pair,candidates))
+            except (ValueError,TypeError,IndexError,OverflowError) as error:
+                self._entry_context['sides'].setdefault(side,{})['error']=str(error)
+                if (str(error)=='ORIGINAL_LANE_RANGE' and pair is not None
+                        and -self.config.entry_geometry_wait_distance_m
+                        <=pair.original_index.project(pose[:2])<0.):
+                    all_candidates.append(LatticeCandidate(side,(),math.nan,math.nan,math.nan,
+                        0.,math.inf,{},'ENTRY_START_BEFORE_LANE'))
+                continue
+        roads=[]
+        explicit=getattr(self.network,'road_corridor',None)
+        if explicit is not None:roads.append(explicit)
+        boundaries=getattr(self.network,'boundaries',None)
+        if boundaries is not None and hasattr(boundaries,'road_corridor_for_pair'):
+            for pair,_ in pairs:
+                try:area=boundaries.road_corridor_for_pair(self.network,pair)
+                except (ValueError,TypeError,IndexError,OverflowError):area=None
+                if area is not None:roads.append(area)
+        self._entry_context['road_offset_evidence']=';'.join(r.source for r in roads) or 'UNAVAILABLE'
+        for road in roads:
+            for side in ('left','right'):
+                if side not in road.allowed_sides:continue
+                row=sample(reference,ego);normal=(-row[1][1],row[1][0])
+                laterals=[(p[0]-row[0][0])*normal[0]+(p[1]-row[0][1])*normal[1]
+                          for o in self._hazards for p in o]
+                required=(max(laterals) if side=='left' else -min(laterals))+self.body.width_m/2+self.config.obstacle_margin_m
+                offsets=self._road_offsets(road,reference,side,max(self.body.width_m/2,required))
+                if not offsets:
+                    all_candidates.append(LatticeCandidate(side,(),math.nan,math.nan,math.nan,
+                        0.,math.inf,{},'ROAD_AREA_UNPROVEN',mode='road_offset',obstacle_clearance_m=0.))
+                for offset in offsets:
+                    pair=road.offset_pair(self.network,current_link_id,side,list(route_link_ids),
+                        offset,route_link_index)
+                    if pair is None:continue
+                    front_s=min(pair.original_index.project(p) for o in self._hazards for p in o)
+                    cs=self._generate_entry(pair,pose,speed_kmh,actual_curvature,front_s,body_cache)
+                    all_candidates.extend(cs);pairs.append((pair,cs))
+        self.candidates=tuple(all_candidates)
+        safe=[(c,p) for p,cs in pairs for c in cs if not c.rejection]
+        if not safe:
+            # A lane junction may have safe entry geometry a little ahead.
+            # Never waive candidate rejection. The S4 target may be used
+            # only on the independently validated original lane.
+            retryable=bool(all_candidates) and all(c.rejection in
+                ('CURVATURE','INSUFFICIENT_ENTRY_SUPPORT','ENTRY_START_BEFORE_LANE') for c in all_candidates)
+            progress=PolylineIndex(self._global_path).project(pose[:2])
+            if self._entry_wait_origin is None:self._entry_wait_origin=progress
+            remaining=self.config.entry_geometry_wait_distance_m-(progress-self._entry_wait_origin)
+            reserve=self._rollout_distance(speed_kmh)+self.body.wheelbase_m+self.body.front_overhang_m+2.
+            if retryable and remaining>1e-6 and distance>reserve:
+                approach=self._detection_path(reference,pose)
+                if approach['blocked']:return approach
+                index=PolylineIndex(self._global_path)
+                end=min(index.project(approach['points'][-1]),progress+self._control_horizon_m)
+                path,reason=self._approach_candidates(reference,pose,speed_kmh,actual_curvature,end,body_cache)
+                if reason:return self._block(reason)
+                self._entry_wait_path=path
+                self._entry_wait_retry=progress+min(2.,remaining)
+                return self._entry_approach(pose,speed_kmh,actual_curvature,body_cache)
+            available=bool(all_candidates) or any(v.get('pair_available') for v in self._entry_context['sides'].values())
+            return self._block('NO_SAFE_ENTRY' if available else 'NO_VALID_ADJACENT_LANE')
+        self._entry_wait_path=()
+        # A road-offset path proves passage of the WHOLE obstruction, unlike
+        # an entry-only lane tail. Prefer its largest verified obstacle gap,
+        # then use the existing path cost; every hard floor stays mandatory.
+        offsets=[row for row in safe if row[0].mode=='road_offset']
+        self.selected,self.pair=(min(offsets,key=lambda row:(-row[0].obstacle_clearance_m,row[0].cost))
+                                 if offsets else min(safe,key=lambda row:row[0].cost))
+        self._road_area=getattr(self.pair,'road_area',None)
+        self._last_progress=None;self._original=self.pair.original
+        self.state='AVOID_ENTRY';self.reason='';self.entry_commits+=1
+        return self._result(self.selected.entry_path)
+
     def _return_permission(self, start, end):
+        if start<0 or end>self.pair.length:return 'RETURN_OUTSIDE_LANE_SUPPORT'
+        if getattr(self.pair,'mode','lane')=='road_offset':
+            for original,side,target in getattr(self.pair.road_area,'crossings',()):
+                reason=self.network.permission_reason(original,side)
+                if reason:return reason
+                if self.network.links[original].get(side+'_lane_change_dst_link_idx')!=target:
+                    return 'RETURN_LINK_MISMATCH'
+            return '' if self.pair.road_area.authorizes(self.pair.ids) else 'ROAD_PERMISSION_UNPROVEN'
         reverse='right' if self.pair.side=='left' else 'left'
         begin=0.
         for (original,adjacent),finish in zip(self.pair.ids,self.pair.section_ends):
@@ -467,7 +718,8 @@ class StaticObstaclePlanner:
             except (ValueError,TypeError,IndexError,OverflowError) as error:
                 reason=str(error)
             candidates.append(LatticeCandidate(self.pair.side,path,self.selected.entry_end_s,
-                station,end,length,cost,terms,reason,self.selected.entry_path,path,curve))
+                station,end,length,cost,terms,reason,self.selected.entry_path,path,curve,
+                mode=getattr(self.pair,'mode','lane')))
         self.candidates=tuple(candidates)
         safe=[c for c in candidates if not c.rejection]
         if not safe:return 'NO_SAFE_RETURN'
@@ -548,9 +800,64 @@ class StaticObstaclePlanner:
         if stop<=ego+1.:return self._block('BRAKING_DISTANCE')
         return self._result(center_suffix(reference,ego,min(stop,index.lengths[-1])))
 
+    def _approach_candidates(self, reference, pose, speed, actual_curvature, end, body_cache):
+        """Try native geometry and several curvature-continuous rejoin points.
+
+        A certified road surface replaces the center-distance heuristic only
+        when it proves whole-body containment. Without it, keep the existing
+        narrow corridor as a conservative fallback, never infer a lane width.
+        """
+        index=PolylineIndex(self._global_path);progress=index.project(pose[:2])
+        row=sample(self._global_path,progress)
+        corridor=PolylineIndex(reference)
+        nearest=sample(reference,max(0.,min(corridor.lengths[-1],corridor.project(pose[:2]))))
+        initial=math.dist(pose[:2],nearest[0][:2])
+        if initial>self.config.tracking_limit_m:return (), 'TRACKING_ERROR'
+        prepared,prefix=self._preparation(pose,speed,actual_curvature,row[0][2])
+        start=index.project(prepared[:2]);paths=[];rejections=[]
+        if end<=start+1.:return (), 'NO_SAFE_ENTRY'
+        paths.append(center_suffix(self._global_path,progress,end))
+        for length in sorted(set((4.,8.,12.,end-start))):
+            anchor=min(end,start+length)
+            if anchor<=start+1.:continue
+            curve=prefix+transition(prepared[:2],prepared[2],actual_curvature,
+                self._global_path,anchor,anchor-start)[1:]
+            if end>anchor+1e-6:curve+=center_suffix(self._global_path,anchor,end)[1:]
+            paths.append(curve)
+        area=getattr(self.network,'road_corridor',None)
+        current=self._entry_context.get('current_link_id')
+        if area is not None and not area.authorizes(((current,current),)):area=None
+        original_area=self._road_area;self._road_area=area
+        try:
+            for path in paths:
+                reason=''
+                if area is None:
+                    limit=max(min(.1,self.config.tracking_limit_m),initial)
+                    if any(math.dist(p[:2],sample(reference,max(0.,min(corridor.lengths[-1],
+                            corridor.project(p[:2]))))[0][:2])>limit+1e-9 for p in path):
+                        reason='APPROACH_ROAD_AREA_UNPROVEN'
+                if not reason:reason=self._path_safety(path,self.remembered,speed,body_cache=body_cache)
+                if not reason:
+                    duration=max(0.,arc(path)[-1]-self._rollout_distance(speed))/(max(speed,self.config.avoid_speed_kmh)/3.6)
+                    reason=self._rollout(path,pose,speed,actual_curvature,self.remembered,
+                        duration_s=max(self.config.rollout_seconds,duration))
+                rejections.append(reason)
+                if not reason:
+                    self._entry_context['approach_rejections']=rejections
+                    self._entry_context['approach_evidence']=area.source if area else 'NATIVE_ROUTE_NARROW_CORRIDOR'
+                    return path,''
+        finally:self._road_area=original_area
+        self._entry_context['approach_rejections']=rejections
+        return (), 'NO_SAFE_ENTRY_APPROACH'
+
     def _entry_approach(self, pose, speed, actual_curvature, body_cache):
         """Use the S4 target only on an independently verified original-lane path."""
-        reason=self._validate_active(self._entry_wait_path,pose,speed,actual_curvature,body_cache)
+        original_area=self._road_area
+        road=getattr(self.network,'road_corridor',None)
+        current=self._entry_context.get('current_link_id')
+        if road is not None and road.authorizes(((current,current),)):self._road_area=road
+        try:reason=self._validate_active(self._entry_wait_path,pose,speed,actual_curvature,body_cache)
+        finally:self._road_area=original_area
         if reason:return self._block(reason)
         self.reason='WAIT_ENTRY_GEOMETRY'
         result=self._result(self._entry_wait_path)
@@ -584,7 +891,7 @@ class StaticObstaclePlanner:
              hazard_reference=None, entry_reserve_m=0., stopping_required_m=None,
              entry_observation_m=None, observation_curvature_limit=None,
              now_sec=None, global_reference=None, return_search=None,
-             route_link_index=None, observation_stamp_ns=None):
+             route_link_index=None, observation_stamp_ns=None, entry_search=None):
         normal_reference=reference
         reference=hazard_reference if hazard_reference is not None else reference
         self._min_clearance=math.inf
@@ -618,7 +925,16 @@ class StaticObstaclePlanner:
             self._validated_paths.clear()
             if self._hazards:
                 self._hazards=tuple(o for o in self.remembered if any(intersects(o,h) for h in self._hazards))
-        reason=self._body_safety(pose,pose,self.remembered)
+        geometry=self._body_geometry(pose,pose)
+        self._check_phase='MEASURED_BODY'
+        boundaries=getattr(self.network,'boundaries',None)
+        self._boundary_contact_reason=boundaries.swept_reason(geometry[0]) if boundaries is not None else ''
+        self._boundary_check_mode='diagnostic' if self.state=='NORMAL' else 'avoidance'
+        # NORMAL owns the unchanged base route. A map-marking contact is a
+        # tracking diagnostic there, not an S4 emergency-stop request. Actual
+        # LiDAR body collision/clearance and observation failures still stop.
+        reason=(self._obstacle_safety(pose,pose,self.remembered,prepared=geometry)
+                if self.state=='NORMAL' else self._body_safety(pose,pose,self.remembered,prepared=geometry))
         if reason:return self._block(reason)
 
         if self.state in ('NORMAL','DETECT'):
@@ -659,7 +975,7 @@ class StaticObstaclePlanner:
                         self.config.lookahead_min_m,self.config.lookahead_max_m,self.config.lookahead_preview_time_sec)
                     self._detection_trigger_m=(velocity*self.config.normal_detection_latency_s
                         +max(0.,velocity**2-target**2)/(2*self.config.deceleration_mps2)
-                        +max(self.config.transition_lengths_m)+entry_lookahead
+                        +max(self._entry_lengths())+max(self.config.entry_start_offsets_m)+entry_lookahead
                         +self.config.obstacle_margin_m+self.config.normal_detection_margin_m)
                     if distance>self._detection_trigger_m:return self._result(normal_reference)
                 saved=global_reference if global_reference is not None else reference
@@ -673,6 +989,11 @@ class StaticObstaclePlanner:
                     distance_m=polygon_distance(self.body.polygon(*pose),o),
                     size_xy_m=tuple(max(p[k] for p in o)-min(p[k] for p in o) for k in (0,1)))
                     for o in self._hazards)
+                # Only confirmed, in-range path hazards activate S4's hard
+                # boundary gate. Every candidate and rollout uses it as well.
+                self._boundary_check_mode='avoidance'
+                reason=self._body_safety(pose,pose,self.remembered,prepared=geometry)
+                if reason:return self._block(reason)
                 self.state='DETECT';self.reason='OBSTACLE_DETECTED'
                 return self._detection_path(reference,pose)
             if speed_kmh>self.config.avoid_speed_kmh+.2:
@@ -682,79 +1003,9 @@ class StaticObstaclePlanner:
                 if progress < self._entry_wait_retry:
                     return self._entry_approach(pose,speed_kmh,actual_curvature,body_cache)
                 self._entry_wait_path=()
-            pairs=[];all_candidates=[]
-            self._entry_context=dict(current_link_id=current_link_id,
-                route_occurrences=list(route_link_ids).count(current_link_id),pose=tuple(pose),sides={})
-            for side in ('left','right'):
-                pair=None
-                try:
-                    pair=self.network.pair(current_link_id,side,list(route_link_ids),route_link_index=route_link_index)
-                    self._entry_context['sides'][side]=dict(
-                        target_link_id=self.network.links.get(current_link_id,{}).get(side+'_lane_change_dst_link_idx'),
-                        permission_reason=self.network.permission_reason(current_link_id,side),
-                        valid_neighbor=self.network.neighbor(current_link_id,side),
-                        pair_available=pair is not None)
-                    if pair is None:continue
-                    setattr(self,side+'_lane',pair.adjacent)
-                    front_s=min(pair.original_index.project(p) for o in self._hazards for p in o)
-                    candidates=self._generate_entry(pair,pose,speed_kmh,actual_curvature,front_s,body_cache)
-                    all_candidates.extend(candidates);pairs.append((pair,candidates))
-                except (ValueError,TypeError,IndexError,OverflowError) as error:
-                    self._entry_context['sides'].setdefault(side,{})['error']=str(error)
-                    if (str(error)=='ORIGINAL_LANE_RANGE' and pair is not None
-                            and -self.config.entry_geometry_wait_distance_m
-                            <=pair.original_index.project(pose[:2])<0.):
-                        all_candidates.append(LatticeCandidate(side,(),math.nan,math.nan,math.nan,
-                            0.,math.inf,{},'ENTRY_START_BEFORE_LANE'))
-                    continue
-            self.candidates=tuple(all_candidates)
-            safe=[(c,p) for p,cs in pairs for c in cs if not c.rejection]
-            if not safe:
-                # A lane junction may have safe entry geometry a little ahead.
-                # Never waive candidate rejection. The S4 target may be used
-                # only on the independently validated original lane.
-                retryable=bool(all_candidates) and all(c.rejection in
-                    ('CURVATURE','INSUFFICIENT_ENTRY_SUPPORT','ENTRY_START_BEFORE_LANE') for c in all_candidates)
-                progress=PolylineIndex(self._global_path).project(pose[:2])
-                if self._entry_wait_origin is None:self._entry_wait_origin=progress
-                remaining=self.config.entry_geometry_wait_distance_m-(progress-self._entry_wait_origin)
-                reserve=self._rollout_distance(speed_kmh)+self.body.wheelbase_m+self.body.front_overhang_m+2.
-                if retryable and remaining>1e-6 and distance>reserve:
-                    approach=self._detection_path(reference,pose)
-                    if approach['blocked']:return approach
-                    # Fit a same-lane approach through the tiny raw map join;
-                    # its own curvature/body/PP gates remain unchanged.
-                    index=PolylineIndex(self._global_path)
-                    end=min(index.project(approach['points'][-1]),progress+self._control_horizon_m)
-                    row=sample(self._global_path,progress)
-                    prepared,prefix=self._preparation(pose,speed_kmh,actual_curvature,row[0][2])
-                    start=index.project(prepared[:2])
-                    if end<=start+1.:return self._block('NO_SAFE_ENTRY')
-                    try:
-                        path=prefix+transition(prepared[:2],prepared[2],actual_curvature,
-                            self._global_path,end,end-start)[1:]
-                    except (ValueError,TypeError,IndexError,OverflowError):
-                        return self._block('NO_SAFE_ENTRY')
-                    corridor=PolylineIndex(reference)
-                    initial=math.dist(pose[:2],sample(reference,max(0.,min(corridor.lengths[-1],
-                        corridor.project(pose[:2]))))[0][:2])
-                    if initial>self.config.tracking_limit_m:return self._block('TRACKING_ERROR')
-                    # The path starts at the measured pose: an already admitted
-                    # initial offset cannot vanish at its first point. It may
-                    # not grow; otherwise keep the 10cm same-lane corridor.
-                    corridor_limit=max(min(.1,self.config.tracking_limit_m),initial)
-                    if any(math.dist(p[:2],sample(reference,max(0.,min(corridor.lengths[-1],
-                            corridor.project(p[:2]))))[0][:2])>corridor_limit+1e-9
-                            for p in path):return self._block('ENTRY_APPROACH_CORRIDOR')
-                    self._entry_wait_path=path
-                    self._entry_wait_retry=progress+min(2.,remaining)
-                    return self._entry_approach(pose,speed_kmh,actual_curvature,body_cache)
-                return self._block('NO_SAFE_ENTRY' if all_candidates else 'NO_VALID_ADJACENT_LANE')
-            self._entry_wait_path=()
-            self.selected,self.pair=min(safe,key=lambda row:row[0].cost)
-            self._last_progress=None;self._original=self.pair.original
-            self.state='AVOID_ENTRY';self.reason='';self.entry_commits+=1
-            return self._result(self.selected.entry_path)
+            arguments=(reference,pose,speed_kmh,actual_curvature,current_link_id,
+                       route_link_ids,route_link_index,distance,body_cache)
+            return self._search_entry(*arguments) if entry_search is None else entry_search(self,*arguments)
 
         progress=self.pair.original_index.project(pose[:2])
         if not math.isfinite(progress):return self._block('INVALID_PROGRESS')
@@ -808,7 +1059,7 @@ class StaticObstaclePlanner:
             station=PolylineIndex(self._global_path).project(pose[:2])
             if self._acquired(pose,self._global_path,self.selected.return_end_s,station):
                 self.state='NORMAL';self.reason='';self.remembered=();self.selected=None;self.pair=None
-                self.candidates=();self._hold_path=();self._return_path=();self._hazards=()
+                self.candidates=();self._hold_path=();self._return_path=();self._hazards=();self._road_area=None
                 self._hold_started=None;self._last_progress=None;self._validated_paths.clear()
                 return self._result(normal_reference)
             return self._result(self._return_path)

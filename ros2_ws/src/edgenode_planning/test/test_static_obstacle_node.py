@@ -84,6 +84,19 @@ def arm_isolated_node(node):
     assert all(r.successful for r in result)
 
 
+def finish_entry_search(node):
+    """Wait for actual worker computation, then adopt on fresh mocked inputs.
+
+    No new odometry stamp is invented: this must not satisfy the separate
+    distinct-pose interlock tested below.
+    """
+    assert node._entry_search._future is not None
+    node._entry_search._future.result(timeout=20.)
+    node.latest_pose_received_ns=node.get_clock().now().nanoseconds
+    detect(node,node.test_obstacle(),stamp=2.)
+    node.plan()
+
+
 def test_no_obstacle_keeps_original_global_and_local_path_without_boundary_data(node):
     node.plan()
     assert output(node,'avoidance_state').data=='NORMAL'
@@ -104,6 +117,7 @@ def test_verified_synthetic_road_selects_only_local_avoidance_and_caps_high_spee
     # closed-loop benchmarks record actual execution time without this mock.
     with patch('edgenode_planning.planning_node.time.perf_counter',return_value=0.):
         arm_isolated_node(node);node.plan()
+        finish_entry_search(node)
         for _ in range(3):
             node.latest_pose_stamp_ns+=1
             node.latest_pose_received_ns=node.get_clock().now().nanoseconds
@@ -216,6 +230,7 @@ def test_candidate_search_stops_before_computation_and_requires_distinct_fresh_o
         detect(node,node.test_obstacle());node.plan()
         assert output(node,'avoidance_state').data=='VALIDATING'
         assert node.target_speed_pub.publish.call_args_list[0].args[0].data==0.
+        node.plan();finish_entry_search(node)
         for _ in range(3):
             node.latest_pose_received_ns=node.get_clock().now().nanoseconds
             detect(node,node.test_obstacle(),stamp=2.);node.plan()
@@ -248,6 +263,7 @@ def test_fixed_path_checks_over_50ms_do_not_restart_fresh_pose_wait(node):
     arm_isolated_node(node)
     with patch('edgenode_planning.planning_node.time.perf_counter',return_value=0.):
         detect(node,node.test_obstacle());node.plan();node.plan()
+        finish_entry_search(node)
     assert output(node,'avoidance_state').data=='VALIDATING'
     selected=node.avoidance_planner.selected
     generated=node.avoidance_planner.generated_transition_count
@@ -321,5 +337,6 @@ def test_validation_interlock_retains_independent_detection_stage(node):
         assert debug['stage']=='DETECT' and debug['generated_transition_count']==0
         assert not output(node,'local_path').poses
         node.plan()
+        finish_entry_search(node)
         assert output(node,'avoidance_stage').data=='AVOID_ENTRY'
         assert node.avoidance_planner.return_commits==0

@@ -123,6 +123,9 @@ class LatticeCandidate:
     entry_path: tuple = ()
     return_path: tuple = ()
     kinematic_points: tuple = ()
+    entry_start_offset_m: float = 0.
+    mode: str = 'lane'
+    obstacle_clearance_m: float = math.inf
 
 
 @dataclass(frozen=True)

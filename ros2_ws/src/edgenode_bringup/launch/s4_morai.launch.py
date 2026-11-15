@@ -36,7 +36,8 @@ def launch_nodes(context):
     env={'OPENBLAS_NUM_THREADS':'1','OMP_NUM_THREADS':'1'}
     return [
         Node(package='edgenode_localization',executable='localization_node',output='screen',
-             parameters=[config('edgenode_localization','localization'),{'morai_pose_reset_enabled':True}],
+             parameters=[config('edgenode_localization','localization'),{
+                 'morai_pose_reset_enabled':True,'imu_yaw_frame':'enu'}],
              additional_env={'OPENBLAS_NUM_THREADS':'1','OMP_NUM_THREADS':'1'}),
         Node(package='edgenode_perception',executable='lidar_obstacle_node',output='screen',
              parameters=[config('edgenode_perception','lidar_obstacle'),{
@@ -46,7 +47,8 @@ def launch_nodes(context):
                  # roof margin excludes the signal housings seen at +0.5m.
                  'obstacle_height_filter_enabled':True,
                  'obstacle_max_z_m':value('lidar_obstacle_max_z_m',float),
-                 'gravity_ground_compensation':True}],additional_env=env),
+                 'gravity_ground_compensation':True,
+                 'time_aligned_obstacles':True}],additional_env=env),
         Node(package='edgenode_planning',executable='planning_node',output='screen',
              parameters=[config('edgenode_planning','planning'),geometry,mission,{
                  'enable_drive':value('enable_drive',bool),
@@ -74,6 +76,8 @@ def launch_nodes(context):
         Node(package='edgenode_control',executable='control_node',output='screen',parameters=[control,{
             'steering_slew_limit_radps':.6,'lookahead_max_m':value('lookahead_max_m',float),
             'normal_lookahead_min_m':value('normal_lookahead_min_m',float),
+            # NORMAL limits corner cutting independently of the validated S4 rollout.
+            'normal_lookahead_heading_budget_rad':value('normal_lookahead_heading_budget_rad',float),
             'lookahead_preview_time_sec':value('lookahead_preview_time_sec',float),
             'lookahead_heading_budget_rad':value('lookahead_heading_budget_rad',float)}],additional_env=env),
     ]
@@ -88,6 +92,7 @@ def generate_launch_description():
         ('hold_duration_s','3.0'),('drive_duration_sec','3600.0'),
         ('lookahead_max_m','12.0'),('lookahead_preview_time_sec','0.8'),
         ('normal_lookahead_min_m','3.5'),('lookahead_heading_budget_rad','1.6'),
+        ('normal_lookahead_heading_budget_rad','0.25'),
         ('lidar_roi_max_x','100.0'),
         ('lidar_obstacle_max_z_m','0.3'),
         ('route_file','/workspace/local_data/kcity_routes/kcity_demo_route.yaml'),

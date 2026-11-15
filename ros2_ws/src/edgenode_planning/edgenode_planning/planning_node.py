@@ -39,6 +39,7 @@ from .lattice_path import CostWeights, control_local_path, curvatures
 from .avoidance_visualization import candidate_markers, diagnostic
 from .sensor_readiness import SensorReadiness
 from .return_search import ReturnSearch
+from .entry_search import EntrySearch
 from .s4_distance_safety import DistancePolicy, DistanceSafety, load_evidence
 from .lane_geometry import arc
 from .route_resume import mission_suffix, link_index_at_progress
@@ -217,6 +218,7 @@ class PlanningNode(Node):
                                    ParameterDescriptor(read_only=True))
         values = {name:self.get_parameter('avoidance_'+name).value for name in defaults.__dict__}
         values['transition_lengths_m'] = tuple(values['transition_lengths_m'])
+        values['entry_start_offsets_m'] = tuple(values['entry_start_offsets_m'])
         weights=CostWeights()
         for name,value in weights.__dict__.items():
             self.declare_parameter('avoidance_cost_'+name,value,ParameterDescriptor(read_only=True))
@@ -268,6 +270,7 @@ class PlanningNode(Node):
         self._validation_pending_stamp_ns = None
         self._validation_fresh_stamps = set()
         self._return_search = ReturnSearch()
+        self._entry_search = EntrySearch()
         self._candidate_marker_ids = set()
         self._candidate_cache=None
         self._diagnostic_path_cache={}
@@ -424,6 +427,7 @@ class PlanningNode(Node):
         )
 
     def destroy_node(self):
+        self._entry_search.close()
         self._return_search.close()
         return super().destroy_node()
 
@@ -440,6 +444,7 @@ class PlanningNode(Node):
             return response
         if response.success:
             self._return_search.cancel()
+            self._entry_search.cancel()
             self._sensor_pause=None
             self._sensor_pause_offset_ns=0
             self._sensor_resume_validation=False
@@ -541,6 +546,7 @@ class PlanningNode(Node):
 
     def stop_for_safety(self, reason):
         self._return_search.cancel()
+        self._entry_search.cancel()
         self._finish_sensor_pause()
         self._sensor_resume_validation=False
         # A recovered producer must never clear an existing avoidance latch.
@@ -719,6 +725,7 @@ class PlanningNode(Node):
         self._reset_history=self._reset_history[-20:]
         self.set_parameters([Parameter('enable_drive',value=False)])
         self._return_search.cancel()
+        self._entry_search.cancel()
         # A pose reset invalidates a maneuver, never an existing hard latch.
         if event['state']=='CONFIRMED' and self.avoidance_planner.state!='BLOCKED':self.avoidance_planner.reset()
         self._relocation=event;self._relocation_stamps.clear()
@@ -1039,7 +1046,7 @@ class PlanningNode(Node):
                                     observation_stamp_ns=getattr(self,'obstacle_stamp_ns',None),
                                     control_horizon_m=control_horizon,now_sec=(now_ns-self._sensor_pause_offset_ns)/1e9,
                                     global_reference=self._route_result.get('points',active_local_points),
-                                    return_search=self._return_search, **s4_kwargs)
+                                    return_search=self._return_search,entry_search=self._entry_search, **s4_kwargs)
                             if (not isinstance(avoidance_result,dict) or
                                     not isinstance(avoidance_result.get('blocked'),bool) or
                                     'points' not in avoidance_result or 'state' not in avoidance_result):

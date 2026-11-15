@@ -122,13 +122,39 @@ class LidarCluster:
 
 
 def oriented_bounds(xy,min_extent_m=.05):
-    """PCA box containing every observed XY point, including diagonal walls."""
+    """Minimum-area containing rectangle over observed hull edge directions.
+
+    PCA rotates with the density of visible front/side returns and can invent
+    a large corner outside a partially observed vehicle. The hull-edge box
+    contains EVERY return without using point density as an object heading.
+    Keep the 8-point wire format, nonzero thin-object floor and all margins.
+    """
+    xy=np.asarray(xy,dtype=float)
+    if xy.ndim!=2 or xy.shape[1]!=2 or not len(xy) or not np.isfinite(xy).all():
+        raise ValueError('finite observed XY points required')
     center=xy.mean(axis=0);relative=xy-center
-    _,vectors=np.linalg.eigh(relative.T@relative)
-    axis=vectors[:,-1];axes=np.array((axis,(-axis[1],axis[0]))).T
-    local=relative@axes;low=local.min(axis=0);high=local.max(axis=0)
-    padding=np.maximum(0.,(min_extent_m-(high-low))/2)
-    low-=padding;high+=padding
+    unique=sorted(set(map(tuple,relative)))
+    def half(points):
+        result=[]
+        for p in points:
+            while len(result)>1:
+                a,b=result[-2:]
+                if (b[0]-a[0])*(p[1]-b[1])-(b[1]-a[1])*(p[0]-b[0])>0:break
+                result.pop()
+            result.append(p)
+        return result
+    hull=np.array(half(unique)[:-1]+half(list(reversed(unique)))[:-1]) if len(unique)>1 else np.array(unique)
+    edges=np.roll(hull,-1,axis=0)-hull
+    angles=np.unique(np.mod(np.arctan2(edges[:,1],edges[:,0]),math.pi/2))
+    best=None
+    for angle in angles:
+        c,s=math.cos(angle),math.sin(angle);axes=np.array(((c,-s),(s,c)))
+        local=relative@axes;low=local.min(axis=0);high=local.max(axis=0)
+        padding=np.maximum(0.,(min_extent_m-(high-low))/2)+1e-9
+        low=low-padding;high=high+padding
+        key=(float(np.prod(high-low)),float(angle))
+        if best is None or key<best[0]:best=(key,axes,low,high)
+    _,axes,low,high=best
     corners=np.array(((low[0],low[1]),(high[0],low[1]),
                       (high[0],high[1]),(low[0],high[1])))@axes.T+center
     return tuple(tuple(float(v) for v in row) for row in corners)

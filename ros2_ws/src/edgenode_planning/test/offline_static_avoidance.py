@@ -39,15 +39,18 @@ def production_config():
 def run(speed=3.,side='left',radius=math.inf,origin=(0.,0.),yaw=0.,lateral_error=0.,
         heading_error=0.,periods=(.05,),delay_steps=0,brake_to_default=False,
         disappear=False,interrupt_confirmation=False,duration=110.,
-        reference_horizon_m=50.,observation_range_m=None,config_overrides=None):
+        reference_horizon_m=50.,observation_range_m=None,config_overrides=None,
+        obstacle_front_m=35.,obstacle_length_m=4.,configure_network=None):
     lanes, point, obstacle =world(side,radius=radius,origin=origin,yaw=yaw)
+    if configure_network is not None:configure_network(lanes)
     config=production_config()
     if not brake_to_default:config=replace(config,avoid_speed_kmh=speed)
     if config_overrides:config=replace(config,**config_overrides)
     planner=StaticObstaclePlanner(lanes,config=config)
     local=LocalPathPlanner();pp=PurePursuit(config.wheelbase_m,config.max_wheel_angle_rad)
     original=lanes.links['O0']['points']+lanes.links['O1']['points'][1:]
-    obstacles=[obstacle()];static_obstacles=tuple(tuple(p) for p in obstacle())
+    footprint=obstacle(obstacle_front_m,obstacle_front_m+obstacle_length_m)
+    obstacles=[footprint];static_obstacles=tuple(tuple(p) for p in footprint)
     pose=(*point(0.,lateral_error)[:2],yaw+heading_error)
     dt=1/config.control_rate_hz;velocity=speed/3.6;actual_curvature=0.;distance=0.
     phases=[];rows=[];timings=[];commands=[];measurements=[pose]
@@ -119,7 +122,8 @@ def run(speed=3.,side='left',radius=math.inf,origin=(0.,0.),yaw=0.,lateral_error
         actual_curvature=math.tan(wheel_angle)/config.wheelbase_m
         next_pose=bicycle_step(pose,actual_curvature,velocity*dt)
         swept=swept_body(planner.body,pose,next_pose)
-        inside=None
+        road=getattr(lanes,'road_corridor',None)
+        inside=road.covers(swept) if road is not None else None
         clearance=polygon_distance(swept,static_obstacles)
         min_clearance=min(min_clearance,clearance)
         index=PolylineIndex(active_path);s=index.project(pose[:2]);reference=sample(active_path,s)
@@ -133,6 +137,8 @@ def run(speed=3.,side='left',radius=math.inf,origin=(0.,0.),yaw=0.,lateral_error
             inside=inside,body_clearance_m=clearance,wheel_rate_radps=wheel_rate))
         if clearance<=config.obstacle_margin_m:
             failure=dict(reason='ACTUAL_BODY_COLLISION',pose=next_pose,t=now+dt);break
+        if inside is False:
+            failure=dict(reason='ACTUAL_ROAD_DEPARTURE',pose=next_pose,t=now+dt);break
         pose=next_pose;measurements.append(pose);turn_history.append(actual_curvature);distance+=velocity*dt
         if brake_to_default and result.get('speed_cap_kmh') is not None:
             target=result['speed_cap_kmh']/3.6

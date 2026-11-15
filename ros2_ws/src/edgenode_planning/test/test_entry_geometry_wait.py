@@ -36,7 +36,7 @@ def scene(enabled=True, offset=0.):
     return avoidance, tick, data
 
 
-@pytest.mark.parametrize('offset', [0., -.5])
+@pytest.mark.parametrize('offset', [-.5])
 def test_real_entry_is_not_committed_until_geometry_becomes_feasible_ahead(offset):
     planner, tick, data = scene(offset=offset)
     result, reference = tick(2)
@@ -50,7 +50,7 @@ def test_real_entry_is_not_committed_until_geometry_becomes_feasible_ahead(offse
 
 
 def test_approach_still_stops_for_a_new_intrusion_and_invalid_sensor():
-    planner, tick, data = scene()
+    planner, tick, data = scene(offset=-.5)
     _, reference = tick(2)
     x, y, _ = data['pose']
     intrusion = [(x+dx, y+dy) for dx, dy in ((-1., 6.), (1., 6.), (1., 8.), (-1., 8.))]
@@ -59,8 +59,17 @@ def test_approach_still_stops_for_a_new_intrusion_and_invalid_sensor():
     assert result['blocked'] and planner.entry_commits == 0 and not result['points']
 
 
-def test_default_disabled_keeps_the_original_entry_rejection():
+def test_extended_entry_family_solves_recorded_scene_without_approach_wait():
     planner, tick, _ = scene(enabled=False)
     result, _ = tick(2)
+    assert result['state'] == 'AVOID_ENTRY' and not result['blocked']
+    assert planner.entry_commits == 1
+    assert planner.selected.transition_length_m > 20. or planner.selected.entry_start_offset_m > 0.
+    assert all(c.rejection for c in planner.candidates if c.transition_length_m in (12.,16.,20.)
+               and c.entry_start_offset_m == 0.)
+
+
+def test_wait_disabled_still_stops_when_all_expanded_candidates_are_unsafe():
+    planner, tick, _ = scene(enabled=False, offset=-.5)
+    result, _ = tick(2)
     assert result['blocked'] and result['reason'] == 'NO_SAFE_ENTRY'
-    assert planner.entry_commits == 0
