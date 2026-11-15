@@ -1,4 +1,4 @@
-"""Offline tests for preview curvature and robust three-level speed planning."""
+"""Offline tests for preview curvature and robust two-mode speed planning."""
 
 import math
 import unittest
@@ -43,8 +43,8 @@ class SpeedPlannerTest(unittest.TestCase):
 
     def test_straight_path_is_cruise_with_zero_curvature(self):
         result = self.planner.plan(self.straight)
-        self.assertEqual(result['speed_mode'], 'CRUISE')
-        self.assertEqual(result['target_speed_kmh'], 1.0)
+        self.assertEqual(result['speed_mode'], 'NORMAL')
+        self.assertEqual(result['target_speed_kmh'], 60.0)
         self.assertAlmostEqual(result['representative_curvature'], 0.0)
         self.assertAlmostEqual(result['max_curvature'], 0.0)
 
@@ -52,14 +52,14 @@ class SpeedPlannerTest(unittest.TestCase):
         result = self.planner.plan(circular_path(20.0))
         self.assertAlmostEqual(result['representative_curvature'], 0.05)
         self.assertAlmostEqual(result['max_curvature'], 0.05)
-        self.assertEqual(result['speed_mode'], 'CURVE')
-        self.assertEqual(result['target_speed_kmh'], 0.7)
+        self.assertEqual(result['speed_mode'], 'NORMAL')
+        self.assertEqual(result['target_speed_kmh'], 60.0)
 
     def test_sharp_curve_has_expected_curvature_and_speed(self):
         result = self.planner.plan(circular_path(5.0))
         self.assertAlmostEqual(result['representative_curvature'], 0.2)
         self.assertEqual(result['speed_mode'], 'SHARP_CURVE')
-        self.assertEqual(result['target_speed_kmh'], 0.5)
+        self.assertEqual(result['target_speed_kmh'], 30.0)
 
     def test_only_first_ten_metres_are_evaluated_with_interpolated_end(self):
         points = [[0, 0, 0], [4, 0, 0], [8, 0, 0], [12, 0, 0],
@@ -68,7 +68,7 @@ class SpeedPlannerTest(unittest.TestCase):
         self.assertEqual(result['evaluated_path_length_m'], 10.0)
         self.assertEqual(result['evaluated_point_count'], 4)
         self.assertEqual(result['max_curvature'], 0.0)
-        self.assertEqual(result['speed_mode'], 'CRUISE')
+        self.assertEqual(result['speed_mode'], 'NORMAL')
         full_result = SpeedPlanner(preview_distance_m=100.0).plan(points)
         self.assertGreater(full_result['representative_curvature'], 0.10)
         self.assertEqual(full_result['speed_mode'], 'SHARP_CURVE')
@@ -85,14 +85,14 @@ class SpeedPlannerTest(unittest.TestCase):
         result = self.planner.plan([[0, 0, 1], [3, 4, 2], [4.8, 6.4, 3]])
         self.assertAlmostEqual(result['evaluated_path_length_m'], 8.0)
         self.assertEqual(result['evaluated_point_count'], 3)
-        self.assertEqual(result['speed_mode'], 'CRUISE')
+        self.assertEqual(result['speed_mode'], 'NORMAL')
 
     def test_consecutive_duplicate_xy_points_are_ignored_even_with_different_z(self):
         points = [[0, 0, 1], [0, 0, 2], [3, 0, 3], [3, 0, 4], [6, 0, 5]]
         result = self.planner.plan(points)
         self.assertEqual(result['evaluated_point_count'], 3)
         self.assertEqual(result['evaluated_path_length_m'], 6.0)
-        self.assertEqual(result['speed_mode'], 'CRUISE')
+        self.assertEqual(result['speed_mode'], 'NORMAL')
 
     def test_single_point_spike_does_not_make_representative_match_maximum(self):
         points = [[index * 0.25, 0, 0] for index in range(31)]
@@ -100,8 +100,8 @@ class SpeedPlannerTest(unittest.TestCase):
         result = self.planner.plan(points)
         self.assertGreater(result['max_curvature'], 0.10)
         self.assertEqual(result['representative_curvature'], 0.0)
-        self.assertEqual(result['speed_mode'], 'CRUISE')
-        self.assertEqual(result['target_speed_kmh'], 1.0)
+        self.assertEqual(result['speed_mode'], 'NORMAL')
+        self.assertEqual(result['target_speed_kmh'], 60.0)
 
     def test_malformed_empty_and_nonfinite_paths_fail_closed(self):
         invalid = (
@@ -136,7 +136,7 @@ class SpeedPlannerTest(unittest.TestCase):
                 self.assertIsNone(self.planner.plan(points))
 
     def test_invalid_parameter_types_and_nonfinite_values_fail_closed(self):
-        fields = ('cruise_speed_kmh', 'curve_speed_kmh', 'sharp_curve_speed_kmh',
+        fields = ('cruise_speed_kmh', 'sharp_curve_speed_kmh',
                   'preview_distance_m', 'curve_curvature_threshold', 'sharp_curvature_threshold',
                   'curvature_smoothing_window_m', 'curvature_persistence_m', 'curvature_hysteresis')
         for field in fields:
@@ -146,7 +146,7 @@ class SpeedPlannerTest(unittest.TestCase):
                     self.assertIsNone(planner.plan(self.straight))
 
     def test_negative_speeds_and_nonpositive_preview_fail_closed(self):
-        for field in ('cruise_speed_kmh', 'curve_speed_kmh', 'sharp_curve_speed_kmh'):
+        for field in ('cruise_speed_kmh', 'sharp_curve_speed_kmh'):
             with self.subTest(field=field):
                 self.assertIsNone(SpeedPlanner(**{field: -0.1}).plan(self.straight))
         for preview in (0.0, -1.0):
@@ -177,19 +177,19 @@ class SpeedPlannerTest(unittest.TestCase):
         curvature = 2.0 / math.sqrt(2.0)
         planner = SpeedPlanner(curve_curvature_threshold=curvature,
                                sharp_curvature_threshold=2.0 * curvature)
-        self.assertEqual(planner.plan(points)['speed_mode'], 'CURVE')
+        self.assertEqual(planner.plan(points)['speed_mode'], 'NORMAL')
         planner = SpeedPlanner(curve_curvature_threshold=0.5 * curvature,
                                sharp_curvature_threshold=curvature)
         self.assertEqual(planner.plan(points)['speed_mode'], 'SHARP_CURVE')
         planner = SpeedPlanner(curve_curvature_threshold=math.nextafter(curvature, math.inf),
                                sharp_curvature_threshold=2.0 * curvature)
-        self.assertEqual(planner.plan(points)['speed_mode'], 'CRUISE')
+        self.assertEqual(planner.plan(points)['speed_mode'], 'NORMAL')
 
     def test_custom_speeds_preview_and_thresholds_are_used(self):
         planner = SpeedPlanner(cruise_speed_kmh=0.9, curve_speed_kmh=0.6,
                                sharp_curve_speed_kmh=0.3, preview_distance_m=5.0,
                                curve_curvature_threshold=0.03, sharp_curvature_threshold=0.08)
-        for points, speed in ((self.straight, 0.9), (circular_path(20), 0.6),
+        for points, speed in ((self.straight, 0.9), (circular_path(20), 0.9),
                               (circular_path(5), 0.3)):
             with self.subTest(speed=speed):
                 result = planner.plan(points)
@@ -218,7 +218,7 @@ class StableCurvatureSpeedPlannerTest(unittest.TestCase):
 
     def test_nearly_straight_curvature_stays_at_ten_kmh(self):
         result = self.planner.plan(curvature_profile_path([(0.0005, 12, 0.5)]))
-        self.assertEqual(result['speed_mode'], 'CRUISE')
+        self.assertEqual(result['speed_mode'], 'NORMAL')
         self.assertEqual(result['target_speed_kmh'], 10.0)
         self.assertAlmostEqual(result['representative_curvature'], 0.0005, places=6)
 
@@ -227,7 +227,7 @@ class StableCurvatureSpeedPlannerTest(unittest.TestCase):
         result = self.planner.plan(points)
         self.assertAlmostEqual(result['max_curvature'], 0.125, places=6)
         self.assertLess(result['filtered_max_curvature'], 0.04)
-        self.assertEqual(result['speed_mode'], 'CRUISE')
+        self.assertEqual(result['speed_mode'], 'NORMAL')
         self.assertEqual(result['target_speed_kmh'], 10.0)
 
     def test_short_dense_spikes_do_not_dominate_by_point_count(self):
@@ -242,23 +242,23 @@ class StableCurvatureSpeedPlannerTest(unittest.TestCase):
                     # the distance-based decision rejects the same geometry.
                     self.assertGreater(result['raw_representative_curvature'], 0.04)
                     self.assertLess(result['representative_curvature'], 0.04)
-                    self.assertEqual(result['speed_mode'], 'CRUISE')
+                    self.assertEqual(result['speed_mode'], 'NORMAL')
 
     def test_short_joint_decision_is_independent_of_vertex_density(self):
         for spacing in (0.01, 0.05, 0.1, 0.2):
             with self.subTest(spacing=spacing):
                 points = curvature_profile_path([(0.001, 4, 0.5), (0.12, 0.4, spacing), (0.001, 6, 0.5)])
                 result = self.planner.plan(points)
-                self.assertEqual(result['speed_mode'], 'CRUISE')
+                self.assertEqual(result['speed_mode'], 'NORMAL')
                 self.assertEqual(result['target_speed_kmh'], 10.0)
 
-    def test_sustained_variable_curve_is_five_kmh(self):
+    def test_sustained_variable_curve_keeps_normal_target(self):
         profile = [(0.001, 3, 0.5)]
         profile += [(k, 0.5, 0.1) for k in (0.055, 0.061, 0.073, 0.080, 0.076, 0.068)]
         profile += [(0.001, 5, 0.5)]
         result = self.planner.plan(curvature_profile_path(profile))
-        self.assertEqual(result['speed_mode'], 'CURVE')
-        self.assertEqual(result['target_speed_kmh'], 5.0)
+        self.assertEqual(result['speed_mode'], 'NORMAL')
+        self.assertEqual(result['target_speed_kmh'], 10.0)
         self.assertGreater(result['representative_curvature'], 0.04)
         self.assertLess(result['representative_curvature'], 0.10)
 
@@ -274,8 +274,8 @@ class StableCurvatureSpeedPlannerTest(unittest.TestCase):
                 result = self.planner.plan(curvature_profile_path([
                     (0.001, 3, 0.5), (0.06, 4, spacing), (0.001, 4, 0.5),
                 ]))
-                self.assertEqual(result['speed_mode'], 'CURVE')
-                self.assertEqual(result['target_speed_kmh'], 5.0)
+                self.assertEqual(result['speed_mode'], 'NORMAL')
+                self.assertEqual(result['target_speed_kmh'], 10.0)
 
     def test_disconnected_short_spikes_cannot_accumulate_persistence(self):
         planner = SpeedPlanner(curvature_smoothing_window_m=0.1, curvature_persistence_m=2.0)
@@ -285,11 +285,11 @@ class StableCurvatureSpeedPlannerTest(unittest.TestCase):
         result = planner.plan(curvature_profile_path(profile))
         self.assertGreater(result['filtered_max_curvature'], 0.10)
         self.assertLess(result['representative_curvature'], 0.04)
-        self.assertEqual(result['speed_mode'], 'CRUISE')
+        self.assertEqual(result['speed_mode'], 'NORMAL')
 
     def test_persistence_distance_is_configurable_and_not_a_sample_count(self):
         points = curvature_profile_path([(0.001, 3, 0.5), (0.12, 1, 0.05), (0.001, 6, 0.5)])
-        for distance, mode in ((2.0, 'CRUISE'), (0.5, 'SHARP_CURVE')):
+        for distance, mode in ((2.0, 'NORMAL'), (0.5, 'SHARP_CURVE')):
             with self.subTest(distance=distance):
                 planner = SpeedPlanner(curvature_smoothing_window_m=0.1, curvature_persistence_m=distance)
                 self.assertEqual(planner.plan(points)['speed_mode'], mode)
@@ -301,7 +301,7 @@ class StableCurvatureSpeedPlannerTest(unittest.TestCase):
             result = self.planner.plan(curvature_profile_path([(curvature, 12, 0.5)]), previous_speed_mode=previous)
             previous = result['speed_mode']
             modes.append(previous)
-        self.assertEqual(modes, ['CRUISE', 'CURVE', 'CURVE', 'CURVE', 'CURVE', 'CRUISE'])
+        self.assertEqual(modes, ['NORMAL'] * 6)
 
     def test_sharp_hysteresis_retains_then_releases_sharp_and_curve_modes(self):
         previous = None
@@ -310,17 +310,17 @@ class StableCurvatureSpeedPlannerTest(unittest.TestCase):
             result = self.planner.plan(curvature_profile_path([(curvature, 12, 0.5)]), previous_speed_mode=previous)
             previous = result['speed_mode']
             modes.append(previous)
-        self.assertEqual(modes, ['SHARP_CURVE'] * 4 + ['CURVE', 'CURVE', 'CRUISE'])
+        self.assertEqual(modes, ['SHARP_CURVE'] * 4 + ['NORMAL', 'NORMAL', 'NORMAL'])
 
     def test_hysteresis_can_be_disabled_and_planner_has_no_hidden_state(self):
         points = curvature_profile_path([(0.039, 12, 0.5)])
-        self.assertEqual(self.planner.plan(points, previous_speed_mode='CURVE')['speed_mode'], 'CURVE')
-        self.assertEqual(self.planner.plan(points)['speed_mode'], 'CRUISE')
+        self.assertEqual(self.planner.plan(points, previous_speed_mode='NORMAL')['speed_mode'], 'NORMAL')
+        self.assertEqual(self.planner.plan(points)['speed_mode'], 'NORMAL')
         no_hysteresis = SpeedPlanner(curvature_hysteresis=0.0)
-        self.assertEqual(no_hysteresis.plan(points, previous_speed_mode='CURVE')['speed_mode'], 'CRUISE')
+        self.assertEqual(no_hysteresis.plan(points, previous_speed_mode='NORMAL')['speed_mode'], 'NORMAL')
 
     def test_short_preview_uses_all_remaining_distance_without_division_errors(self):
-        for curvature, mode in ((0.0005, 'CRUISE'), (0.06, 'CURVE'), (0.12, 'SHARP_CURVE')):
+        for curvature, mode in ((0.0005, 'NORMAL'), (0.06, 'NORMAL'), (0.12, 'SHARP_CURVE')):
             with self.subTest(curvature=curvature):
                 result = self.planner.plan(curvature_profile_path([(curvature, 0.8, 0.1)]))
                 self.assertEqual(result['speed_mode'], mode)
@@ -333,7 +333,7 @@ class StableCurvatureSpeedPlannerTest(unittest.TestCase):
         original = [point.copy() for point in points]
         result = self.planner.plan(points)
         self.assertTrue(math.isfinite(result['max_curvature']))
-        self.assertEqual(result['speed_mode'], 'CRUISE')
+        self.assertEqual(result['speed_mode'], 'NORMAL')
         self.assertEqual(result['target_speed_kmh'], 10.0)
         self.assertEqual(result['representative_curvature'], 0.0)
         self.assertEqual(points, original)

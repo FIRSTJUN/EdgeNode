@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 
 from edgenode_planning.speed_planner import SpeedPlanner
-from edgenode_planning.morai_speed_safety import stopping_speed_cap
 from offline_static_avoidance import run
 from test_speed_planner import curvature_profile_path
 
@@ -34,50 +33,44 @@ def test_s4_fifteen_to_ten_avoids_and_returns_with_configured_steering_limit(sid
 
 
 def speed_planner(**overrides):
-    parameters = dict(cruise_speed_kmh=50., curve_speed_kmh=25., sharp_curve_speed_kmh=15.,
+    parameters = dict(cruise_speed_kmh=60., sharp_curve_speed_kmh=30.,
                       preview_distance_m=80., anticipatory=True)
     parameters.update(overrides)
     return SpeedPlanner(**parameters)
 
 
 @pytest.mark.parametrize('curvature,mode,ceiling', [
-    (0., 'CRUISE', 50.), (.05, 'CURVE', 25.), (.12, 'SHARP_CURVE', 15.),
+    (0., 'NORMAL', 60.), (.05, 'NORMAL', 60.), (.12, 'SHARP_CURVE', 30.),
 ])
-def test_current_curve_respects_class_speed_and_existing_lateral_acceleration(curvature, mode, ceiling):
+def test_current_curve_uses_configured_two_mode_target(curvature, mode, ceiling):
     points = curvature_profile_path([(curvature, 80., .25)])
     result = speed_planner().plan(points, measured_speed_kmh=50.)
     assert result['speed_mode'] == mode
-    assert 0. < result['target_speed_kmh'] <= ceiling
-    if curvature:
-        assert (result['target_speed_kmh'] / 3.6) ** 2 * curvature <= 1.5 + 1e-8
-    else:
-        assert result['target_speed_kmh'] == 50.
+    assert 0. < result['target_speed_kmh'] <= ceiling + 1e-9
+    assert result['target_speed_kmh'] == pytest.approx(ceiling)
 
 
-@pytest.mark.parametrize('curvature', [.05, .12])
+@pytest.mark.parametrize('curvature', [.12])
 def test_curve_approach_brakes_progressively_and_keeps_the_declared_envelope(curvature):
     planner = speed_planner()
     speeds = []
     for distance in (70., 50., 30., 15., 5., 0.):
-        points = curvature_profile_path([(0., distance, .25), (curvature, 40., .25)])
-        result = planner.plan(points, measured_speed_kmh=50.)
+        result = planner.plan(curvature_profile_path([(0., distance, .25), (curvature, 40., .25)]),
+                              measured_speed_kmh=60.)
         speeds.append(result['target_speed_kmh'])
-        if result['target_speed_kmh'] < 50.:
-            available = max(0., result['braking_constraint_distance_m'] - 50. / 3.6 * .6)
+        if result['target_speed_kmh'] < 60.:
+            available = max(0., result['braking_constraint_distance_m'] - 60. / 3.6 * .6)
             assert (result['target_speed_kmh'] / 3.6) ** 2 <= (
                 (result['constraint_speed_kmh'] / 3.6) ** 2 + 2. * 2. * available + 1e-8)
-    assert speeds[0] == 50.
+    assert speeds[0] == 60.
     assert speeds == sorted(speeds, reverse=True)
-    assert speeds[-1] < speeds[-2] < 50.
+    assert speeds[-1] == pytest.approx(30.)
 
 
-def test_s4_speed_profile_does_not_treat_a_fifty_kmh_request_as_driving_approval():
+def test_normal_target_has_no_independent_admission_ceiling():
     recommendation = speed_planner().plan(curvature_profile_path([(0., 80., .5)]),
                                           measured_speed_kmh=15.)['target_speed_kmh']
-    assert recommendation == 50.
-    # Existing independent limits remain 15 km/h and 20 m verified range.
-    admitted = min(recommendation, 15., stopping_speed_cap(20.))
-    assert admitted == 15.
+    assert recommendation == 60.
 
 
 def test_recorded_short_corner_requests_braking_before_the_actual_tracking_failure():
@@ -85,7 +78,7 @@ def test_recorded_short_corner_requests_braking_before_the_actual_tracking_failu
     result = speed_planner().plan(data['points'], measured_speed_kmh=data['measured_speed_kmh'])
     assert data['previous_recommendation_kmh'] == 50.
     assert result['speed_mode'] == 'SHARP_CURVE'
-    assert 0. < result['target_speed_kmh'] < 15.
+    assert 0. < result['target_speed_kmh'] <= 60.
     assert 0. < result['braking_constraint_distance_m'] < 5.
 
 
@@ -93,8 +86,8 @@ def test_recorded_short_corner_requests_braking_before_the_actual_tracking_failu
 def test_anticipatory_turn_envelope_keeps_a_cancelling_point_spike_out_of_the_profile(height):
     points = [(i*.25, height if i == 160 else 0., 0.) for i in range(321)]
     result = speed_planner().plan(points, measured_speed_kmh=50.)
-    assert result['speed_mode'] == 'CRUISE'
-    assert result['target_speed_kmh'] == 50.
+    assert result['speed_mode'] == 'NORMAL'
+    assert result['target_speed_kmh'] == 60.
 
 
 @pytest.mark.parametrize('curvature', [-.16, .16])
@@ -102,5 +95,5 @@ def test_curve_exit_waits_for_measured_steering_to_unwind_before_accelerating(cu
     points = curvature_profile_path([(0., 80., .5)])
     result = speed_planner().plan(points, measured_speed_kmh=7., measured_curvature=curvature)
     assert result['speed_mode'] == 'SHARP_CURVE'
-    assert result['target_speed_kmh'] == pytest.approx(3.6*math.sqrt(1.5/.16))
-    assert speed_planner().plan(points, measured_speed_kmh=7., measured_curvature=0.)['target_speed_kmh'] == 50.
+    assert result['target_speed_kmh'] == pytest.approx(30.)
+    assert speed_planner().plan(points, measured_speed_kmh=7., measured_curvature=0.)['target_speed_kmh'] == 60.

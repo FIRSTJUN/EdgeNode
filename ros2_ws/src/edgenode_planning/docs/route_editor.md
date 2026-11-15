@@ -149,19 +149,12 @@ ros2 topic echo /planning/map_match_status --once
 `GLOBAL_PATH_READY`, `MATCHED` 및 RViz의 녹색 Global Path 형상과 waypoint 순서를
 확인한다. 편집 시작 이후 차량이 이동했다면 Preview와 활성 경로를 다시 비교한다.
 
-그 뒤 현재 프로젝트 기준인 **10 km/h / 60초** 테스트를 수행한다.
+주행 시작·목표 속도·정지의 현재 절차는
+[수동 MORAI 매뉴얼](../../../../docs/morai_manual.md)을 사용한다.
+NORMAL은 `cruise_speed_kmh`, 급커브는 `sharp_curve_speed_kmh`다.
+기본 목표는 60/30이며, 새 세션마다 기존 저속 시험을 반복하지 않는다.
 
-```bash
-ros2 param set /planning_node enable_drive false
-ros2 param set /planning_node max_drive_speed_kmh 10.0
-ros2 param set /planning_node drive_duration_sec 60.0
-sleep 1
-ros2 param set /planning_node enable_drive true
-```
-
-기존 YAML의 cruise speed는 10 km/h다. 기존 곡선 감속과 주행 lease는 유지된다.
-즉 10 km/h는 직선 기준/상한이며 곡선에서 기존 속도 계획이 더 낮은 속도를
-선택할 수 있다. 직접 정지하려면:
+직접 정지하려면:
 
 ```bash
 ros2 param set /planning_node enable_drive false

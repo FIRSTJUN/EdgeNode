@@ -66,12 +66,12 @@ def test_curved_body_sweep_detects_collision_outside_vehicle_forward_axis():
     assert planner._normal_hazards(reference,[polygon])
 
 
-def test_braking_preview_reduces_before_future_curve_and_does_not_slow_whole_80m():
+def test_braking_preview_reduces_before_future_sharp_curve_and_does_not_slow_whole_80m():
     p=SpeedPlanner(cruise_speed_kmh=50.,curve_speed_kmh=25.,sharp_curve_speed_kmh=15.,
         preview_distance_m=80.,anticipatory=True)
     def road(straight):
         return [(i*.5,0.,0.) for i in range(int(straight*2)+1)]+[
-            (straight+15.*math.sin(i*.03),15.*(1-math.cos(i*.03)),0.) for i in range(1,101)]
+            (straight+8.*math.sin(i*.03),8.*(1-math.cos(i*.03)),0.) for i in range(1,101)]
     far=p.plan(road(70.),measured_speed_kmh=50.)
     near=p.plan(road(15.),measured_speed_kmh=50.)
     assert far['target_speed_kmh']==50.

@@ -181,7 +181,7 @@ class LocalPathPlannerTest(unittest.TestCase):
         self.assertEqual(result['path_length_m'], 20.0)
         self.assertEqual(result['nearest_index'], 0)
         self.assertEqual(points, [[0, 0, 0], [30, 0, 3], [40, 0, 4]])
-        self.assertEqual(SpeedPlanner().plan(result['points'])['speed_mode'], 'CRUISE')
+        self.assertEqual(SpeedPlanner().plan(result['points'])['speed_mode'], 'NORMAL')
 
     def test_reported_mgeo_segment_supplies_valid_speed_preview(self):
         points = [[99.29995859932387, 1253.3509978000075, -0.5369995269775387],
@@ -244,7 +244,7 @@ class LocalPathPlannerTest(unittest.TestCase):
                             for a, b in zip(result['points'], result['points'][1:])))
 
     def test_resampling_preserves_existing_curve_speed_decisions(self):
-        for radius, mode in ((20, 'CURVE'), (5, 'SHARP_CURVE')):
+        for radius, mode in ((20, 'NORMAL'), (5, 'SHARP_CURVE')):
             points = [[radius * math.sin(i * 0.1),
                        radius * (1 - math.cos(i * 0.1)), i] for i in range(6)]
             with self.subTest(radius=radius):

@@ -175,8 +175,8 @@ class PlanningNodeTest(unittest.TestCase):
 
     def test_runtime_readback_20_replaces_cached_3_5_in_every_speed_mode(self):
         for curvature, expected_mode, parameter in (
-                (0.0, 'CRUISE', 'cruise_speed_kmh'),
-                (0.07, 'CURVE', 'curve_speed_kmh'),
+                (0.0, 'NORMAL', 'cruise_speed_kmh'),
+                (0.07, 'NORMAL', 'cruise_speed_kmh'),
                 (0.15, 'SHARP_CURVE', 'sharp_curve_speed_kmh')):
             with self.subTest(mode=expected_mode):
                 self.setUp()
@@ -201,8 +201,7 @@ class PlanningNodeTest(unittest.TestCase):
                 self.assertEqual(self.output('speed_mode'), expected_mode)
                 self.assertEqual(self.output('recommended_speed'), 20.0)
                 self.assertEqual(self.output('target_speed'), 20.0)
-                for topic in ('runtime_cruise_speed', 'runtime_curve_speed',
-                              'runtime_sharp_curve_speed', 'runtime_max_drive_speed'):
+                for topic in ('runtime_cruise_speed', 'runtime_sharp_curve_speed'):
                     self.assertEqual(self.output(topic), 20.0)
 
 
@@ -415,7 +414,7 @@ class PlanningNodeTest(unittest.TestCase):
         points = [[x, 0, x / 10.0] for x in range(31)]
         self.set_speed_route(points)
         PlanningNode.plan(self.node)
-        self.assert_speed_preview(1.0, 'CRUISE', 0.0)
+        self.assert_speed_preview(1.0, 'NORMAL', 0.0)
         self.assert_path(points)
         self.assert_path(points[:21], topic='local_path')
         self.node.speed_planner.plan.assert_called_once_with(points[:21], previous_speed_mode=None)
@@ -427,7 +426,7 @@ class PlanningNodeTest(unittest.TestCase):
                   for i in range(6)]
         self.set_speed_route(points)
         PlanningNode.plan(self.node)
-        self.assert_speed_preview(0.7, 'CURVE', 0.05)
+        self.assert_speed_preview(1.0, 'NORMAL', 0.05)
         self.assert_path(points)
         self.assert_path(points, topic='local_path')
 
@@ -446,7 +445,7 @@ class PlanningNodeTest(unittest.TestCase):
         points = [[x, 0, 0] for x in range(21)]
         self.set_speed_route(points)
         PlanningNode.plan(self.node)
-        self.assert_speed_preview(1.0, 'CRUISE', 0.0)
+        self.assert_speed_preview(1.0, 'NORMAL', 0.0)
         self.node.speed_planner.plan.return_value = None
         PlanningNode.plan(self.node)
         self.assert_invalid_speed_preview()
@@ -471,7 +470,7 @@ class PlanningNodeTest(unittest.TestCase):
     def test_two_original_points_with_sufficient_length_have_valid_speed_preview(self):
         self.set_speed_route([[0, 0, 1], [5, 0, 2]])
         PlanningNode.plan(self.node)
-        self.assert_speed_preview(1.0, 'CRUISE', 0.0)
+        self.assert_speed_preview(1.0, 'NORMAL', 0.0)
         self.assert_local_subdivision([[0, 0, 1], [5, 0, 2]], 5.0)
 
 
@@ -490,7 +489,7 @@ class PlanningNodeTest(unittest.TestCase):
         self.assertEqual(self.node._progress_index, 527)
         self.assert_drive('ACTIVE', 50.0)
         self.assertEqual(self.output('recommended_speed'), 50.0)
-        self.assertEqual(self.output('speed_mode'), 'CRUISE')
+        self.assertEqual(self.output('speed_mode'), 'NORMAL')
         self.assertAlmostEqual(self.output('speed_curvature'), 0.0)
         self.assert_path(points)
         self.assert_local_subdivision([[263.5, 0, 0], [283.5, 0, 0]], 20.0)
@@ -529,7 +528,7 @@ class PlanningNodeTest(unittest.TestCase):
             self.assertAlmostEqual(self.output('local_path_progress'), x)
             self.assertIsInstance(self.node.local_path_progress_pub.publish.call_args.args[0], Float64)
             self.assert_local_subdivision([[x, 0, 0], [x + 20, 0, 0]], 20.0)
-            self.assertEqual(self.output('speed_mode'), 'CRUISE')
+            self.assertEqual(self.output('speed_mode'), 'NORMAL')
         self.node.dijkstra_planner.plan.assert_called_once()
 
 
@@ -549,12 +548,12 @@ class PlanningNodeTest(unittest.TestCase):
         for x in (0.0, 1.0, 2.0):
             self.node.latest_pose = (x, 0.0, 0.0)
             PlanningNode.plan(self.node)
-            self.assert_speed_preview(1.0, 'CRUISE', 0.0)
+            self.assert_speed_preview(1.0, 'NORMAL', 0.0)
         self.node.dijkstra_planner.plan.assert_called_once()
         self.assertEqual(self.node.speed_planner.plan.call_args_list, [
             call(points[:21], previous_speed_mode=None),
-            call(points[1:22], previous_speed_mode='CRUISE'),
-            call(points[2:23], previous_speed_mode='CRUISE'),
+            call(points[1:22], previous_speed_mode='NORMAL'),
+            call(points[2:23], previous_speed_mode='NORMAL'),
         ])
         for name in ('global_path', 'local_path', 'recommended_speed', 'speed_mode',
                      'speed_curvature', 'speed_max_curvature'):
@@ -565,7 +564,7 @@ class PlanningNodeTest(unittest.TestCase):
         points = [[x, 0, 0] for x in range(21)]
         self.set_speed_route(points)
         PlanningNode.plan(self.node)
-        self.assert_speed_preview(1.0, 'CRUISE', 0.0)
+        self.assert_speed_preview(1.0, 'NORMAL', 0.0)
         match = self.node.map_matcher.match.return_value
         self.node.map_matcher.match.return_value = None
         PlanningNode.plan(self.node)
@@ -606,7 +605,7 @@ class PlanningNodeTest(unittest.TestCase):
         }
         PlanningNode.plan(self.node)
         self.assertIs(self.node.speed_planner.plan.call_args.args[0], local_points)
-        self.assert_speed_preview(1.0, 'CRUISE', 0.0)
+        self.assert_speed_preview(1.0, 'NORMAL', 0.0)
         self.assert_path(local_points, topic='local_path')
 
 
@@ -615,7 +614,7 @@ class PlanningNodeTest(unittest.TestCase):
         points[15][1] = 1.0
         self.set_speed_route(points)
         PlanningNode.plan(self.node)
-        self.assertEqual(self.output('speed_mode'), 'CRUISE')
+        self.assertEqual(self.output('speed_mode'), 'NORMAL')
         self.assertEqual(self.output('recommended_speed'), 1.0)
         self.assertEqual(self.output('speed_curvature'), 0.0)
         self.assertGreater(self.output('speed_max_curvature'), 0.10)
@@ -630,14 +629,14 @@ class PlanningNodeTest(unittest.TestCase):
         self.assertEqual(self.node._drive_session_start_ns, 123_000_000_456)
 
 
-    def test_drive_activation_gentle_curve_targets_point_seven_kmh(self):
+    def test_drive_activation_gentle_curve_uses_normal_target(self):
         points = [[20 * math.sin(i * 0.1), 20 * (1 - math.cos(i * 0.1)), i]
                   for i in range(6)]
         self.set_speed_route(points)
         self.parameters['enable_drive'] = True
         PlanningNode.plan(self.node)
-        self.assert_drive('ACTIVE', 0.7)
-        self.assertEqual(self.output('speed_mode'), 'CURVE')
+        self.assert_drive('ACTIVE', 1.0)
+        self.assertEqual(self.output('speed_mode'), 'NORMAL')
 
 
     def test_drive_activation_sharp_curve_targets_point_five_kmh(self):
@@ -650,7 +649,7 @@ class PlanningNodeTest(unittest.TestCase):
         self.assertEqual(self.output('speed_mode'), 'SHARP_CURVE')
 
 
-    def test_drive_hard_cap_is_independent_of_recommended_speed(self):
+    def test_retired_drive_cap_cannot_override_operator_target(self):
         self.parameters['cruise_speed_kmh'] = 3.0
         self.node.speed_planner = SpeedPlanner(cruise_speed_kmh=3.0)
         self.enable_straight_drive()
@@ -658,9 +657,9 @@ class PlanningNodeTest(unittest.TestCase):
             with self.subTest(limit=limit):
                 self.parameters['max_drive_speed_kmh'] = limit
                 PlanningNode.plan(self.node)
-                self.assert_drive('ACTIVE', limit)
+                self.assert_drive('ACTIVE', 3.0)
                 self.assertEqual(self.output('recommended_speed'), 3.0)
-                self.assertLessEqual(self.output('target_speed'), limit)
+                self.assertEqual(self.output('target_speed'), 3.0)
 
 
     def test_drive_map_match_loss_is_not_ready_and_recovers_with_same_session(self):
@@ -736,7 +735,7 @@ class PlanningNodeTest(unittest.TestCase):
         PlanningNode.plan(self.node)
         self.assert_drive('EXPIRED')
         self.assertEqual(self.output('recommended_speed'), 1.0)
-        self.assertEqual(self.output('speed_mode'), 'CRUISE')
+        self.assertEqual(self.output('speed_mode'), 'NORMAL')
 
 
     def test_expired_drive_stays_expired_while_true_and_after_duration_increase(self):
@@ -778,7 +777,7 @@ class PlanningNodeTest(unittest.TestCase):
         PlanningNode.plan(self.node)
         self.assert_drive('DISABLED')
         self.assertEqual(self.output('recommended_speed'), 1.0)
-        self.assertEqual(self.output('speed_mode'), 'CRUISE')
+        self.assertEqual(self.output('speed_mode'), 'NORMAL')
 
 
     def test_live_duration_increase_does_not_extend_session_and_decrease_expires_it(self):
@@ -801,9 +800,9 @@ class PlanningNodeTest(unittest.TestCase):
         self.assert_drive('EXPIRED')
 
 
-    def test_invalid_drive_duration_and_max_speed_fail_closed(self):
+    def test_invalid_drive_duration_fails_closed(self):
         self.enable_straight_drive()
-        for name in ('max_drive_speed_kmh', 'drive_duration_sec'):
+        for name in ('drive_duration_sec',):
             for value in (0.0, -1.0, math.nan, math.inf, -math.inf,
                           None, 'bad', True, [], 10 ** 400):
                 with self.subTest(name=name, value=value):
@@ -1103,7 +1102,7 @@ class PlanningNodeTest(unittest.TestCase):
                     self.assertIsInstance(node.local_path_planner, LocalPathPlanner)
                     self.assertIsInstance(node.speed_planner, SpeedPlanner)
                     self.assertFalse(declared['enable_drive'])
-                    self.assertEqual(declared['max_drive_speed_kmh'], 1.0)
+                    self.assertNotIn('max_drive_speed_kmh', declared)
                     self.assertEqual(declared['drive_duration_sec'], 15.0)
                     self.assertEqual(declared['drive_status_topic'], '/planning/drive_status')
                     self.assertFalse(node._drive_was_enabled)
@@ -1111,9 +1110,9 @@ class PlanningNodeTest(unittest.TestCase):
                     self.assertFalse(node._drive_session_expired)
                     self.assertIsNone(node._drive_session_duration_sec)
                     self.assertIsNone(node._drive_last_time_ns)
-                    self.assertEqual(declared['cruise_speed_kmh'], 1.0)
-                    self.assertEqual(declared['curve_speed_kmh'], 0.7)
-                    self.assertEqual(declared['sharp_curve_speed_kmh'], 0.5)
+                    self.assertEqual(declared['cruise_speed_kmh'], 60.0)
+                    self.assertNotIn('curve_speed_kmh', declared)
+                    self.assertEqual(declared['sharp_curve_speed_kmh'], 30.0)
                     self.assertEqual(declared['speed_preview_distance_m'], 10.0)
                     self.assertEqual(declared['curve_curvature_threshold'], 0.04)
                     self.assertEqual(declared['sharp_curvature_threshold'], 0.10)
@@ -1126,7 +1125,7 @@ class PlanningNodeTest(unittest.TestCase):
                     self.assertIsNone(node._previous_speed_mode)
                     for name in ('recommended_speed', 'speed_mode', 'speed_curvature', 'speed_max_curvature'):
                         self.assertEqual(declared[name + '_topic'], '/planning/' + name)
-                    for name in ('cruise_speed_kmh', 'curve_speed_kmh', 'sharp_curve_speed_kmh',
+                    for name in ('cruise_speed_kmh', 'sharp_curve_speed_kmh',
                                  'curve_curvature_threshold', 'sharp_curvature_threshold'):
                         self.assertEqual(getattr(node.speed_planner, name), overrides[name])
                     self.assertEqual(node.speed_planner.preview_distance_m, 5.0)
@@ -1314,22 +1313,22 @@ class PlanningNodeTest(unittest.TestCase):
         self.parameters.update(max_drive_speed_kmh=10.0, cruise_speed_kmh=10.0,
                                curve_speed_kmh=5.0, sharp_curve_speed_kmh=3.5)
         for curvature, mode, speed in (
-                (0.0395, 'CRUISE', 10.0), (0.0405, 'CURVE', 5.0),
-                (0.0395, 'CURVE', 5.0), (0.0405, 'CURVE', 5.0),
-                (0.0395, 'CURVE', 5.0), (0.034, 'CRUISE', 10.0)):
+                (0.0995, 'NORMAL', 10.0), (0.1005, 'SHARP_CURVE', 3.5),
+                (0.0995, 'SHARP_CURVE', 3.5), (0.1005, 'SHARP_CURVE', 3.5),
+                (0.096, 'SHARP_CURVE', 3.5), (0.094, 'NORMAL', 10.0)):
             self.set_local_curvature(curvature)
             PlanningNode.plan(self.node)
             self.assertEqual(self.output('speed_mode'), mode)
             self.assert_drive('ACTIVE', speed)
         self.assertEqual([c.kwargs['previous_speed_mode'] for c in self.node.speed_planner.plan.call_args_list],
-                         [None, 'CRUISE', 'CURVE', 'CURVE', 'CURVE', 'CURVE'])
+                         [None, 'NORMAL', 'SHARP_CURVE', 'SHARP_CURVE', 'SHARP_CURVE', 'SHARP_CURVE'])
         self.node.dijkstra_planner.plan.assert_called_once()
 
 
     def test_match_loss_resets_only_speed_hysteresis_and_recovers_without_replan(self):
         self.set_local_curvature(0.041)
         PlanningNode.plan(self.node)
-        self.assertEqual(self.node._previous_speed_mode, 'CURVE')
+        self.assertEqual(self.node._previous_speed_mode, 'NORMAL')
         match = self.node.map_matcher.match.return_value
         self.node.map_matcher.match.return_value = None
         PlanningNode.plan(self.node)
@@ -1338,18 +1337,18 @@ class PlanningNodeTest(unittest.TestCase):
         self.node.map_matcher.match.return_value = match
         self.set_local_curvature(0.039)
         PlanningNode.plan(self.node)
-        self.assertEqual(self.output('speed_mode'), 'CRUISE')
+        self.assertEqual(self.output('speed_mode'), 'NORMAL')
         self.node.dijkstra_planner.plan.assert_called_once()
 
 
     def test_route_change_does_not_carry_old_curve_hysteresis(self):
         self.set_local_curvature(0.041)
         PlanningNode.plan(self.node)
-        self.assertEqual(self.node._previous_speed_mode, 'CURVE')
+        self.assertEqual(self.node._previous_speed_mode, 'NORMAL')
         self.parameters['goal_node_id'] = 'new_speed_test_goal'
         self.set_local_curvature(0.039)
         PlanningNode.plan(self.node)
-        self.assertEqual(self.output('speed_mode'), 'CRUISE')
+        self.assertEqual(self.output('speed_mode'), 'NORMAL')
         self.assertEqual(self.node.dijkstra_planner.plan.call_count, 2)
 
 
@@ -1365,4 +1364,4 @@ class PlanningNodeTest(unittest.TestCase):
         self.assert_invalid_speed_preview()
         self.set_local_curvature(0.039)
         PlanningNode.plan(self.node)
-        self.assertEqual(self.output('speed_mode'), 'CRUISE')
+        self.assertEqual(self.output('speed_mode'), 'NORMAL')

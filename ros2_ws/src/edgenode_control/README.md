@@ -84,64 +84,8 @@ git -C /workspace diff --check
 
 ## MORAI 재실행
 
-각 터미널에서 ROS와 새 `install/setup.bash`를 source한다. 기존 autonomy 프로세스를
-종료한 뒤 위 빌드 결과로 다시 실행한다.
-
-```bash
-cd /workspace/ros2_ws
-source /opt/ros/humble/setup.bash
-source install/setup.bash
-ros2 launch edgenode_bringup autonomy.launch.py
-```
-
-차량/센서 설정과 비교 경로, 출발 pose는 이전 실험과 동일하게 맞춘다.
-`enable_drive=false` 상태에서 아래를 실행하고, `/planning/drive_status`가
-`DISABLED`인 것을 확인한다. 속도 단계는 `20.0 → 25.0 → 30.0 → 40.0 → 50.0`이다.
-각 단계는 `max_drive_speed_kmh`로 제한한다. CRUISE/CURVE/SHARP_CURVE 설정과
-threshold는 그대로 유지하므로 실제 target은 SpeedPlanner 권고보다 높아지지 않는다.
-
-```bash
-stage_kmh=20.0
-ros2 param set /planning_node enable_drive false
-ros2 topic echo /planning/drive_status --once
-ros2 param set /planning_node max_drive_speed_kmh "$stage_kmh"
-ros2 param get /planning_node drive_duration_sec
-ros2 param get /control_node lookahead_min_m
-ros2 param get /control_node lookahead_max_m
-ros2 param get /control_node lookahead_preview_time_sec
-
-run_dir="/workspace/rosbags/dynamic_lookahead_${stage_kmh}_$(date +%Y%m%d_%H%M%S)"
-mkdir -p "$run_dir"
-ros2 param dump /control_node > "$run_dir/control_parameters.yaml"
-ros2 param dump /planning_node > "$run_dir/planning_parameters.yaml"
-ros2 param dump /localization_node > "$run_dir/localization_parameters.yaml"
-ros2 bag record -o "$run_dir/bag" \
-  /ego_vehicle_status /control/lookahead_distance \
-  /control/path_error /control/pure_pursuit_steering /ctrl_cmd \
-  /control/target_left /control/target_forward \
-  /planning/map_match_distance /planning/map_match_heading_diff \
-  /gps /Imu \
-  /planning/target_speed /planning/recommended_speed /planning/speed_mode \
-  /planning/drive_status /planning/map_match_status /planning/current_link \
-  /planning/local_path /planning/global_path /planning/local_path_progress_m \
-  /localization/odometry
-```
-
-bag recorder가 모든 토픽을 구독한 것을 확인하고 별도 터미널에서 시작한다.
-
-```bash
-ros2 param set /planning_node enable_drive true
-```
-
-기존 운행 lease는 config상 60초다. 단계 종료/중단 시
-`ros2 param set /planning_node enable_drive false`를 실행하고 정지 후 bag을 닫는다.
-다음 단계도 `DISABLED` 확인 → cap 설정 → 기록 시작 → enable 순서로 진행한다.
-lease 만료 후 재시작에도 관측된 false → true 전환이 필요하다.
-
-각 bag에서 actual speed는 status velocity의 크기 × 3.6으로 계산하고,
-actual lookahead는 `/control/lookahead_distance`, front steer는
-`/ctrl_cmd.front_steer`로 확인한다. path_error RMS/최대값, PP steering,
-front_steer 포화 비율과 진동, target_left/forward, Map Matching 거리/heading diff,
-raw GPS/IMU를 동일 경로 구간에서 이전 baseline과 비교한다.
-50 km/h 안정화가 확인되면 추가 고속화는 중단하고 S1~S13 시나리오 구현으로 넘어간다.
-실제 MORAI 주행 안정성은 이 절차로 별도 확인해야 한다.
+현재 실행 절차는 [수동 MORAI 매뉴얼](../../../docs/morai_manual.md)을 사용한다.
+2026-11-15부터 NORMAL(직선·일반 커브) 60 / SHARP_CURVE 30 / S4 10km/h가
+기본 목표이며 `cruise_speed_kmh`, `sharp_curve_speed_kmh`로 조정한다.
+`max_drive_speed_kmh`와 별도 CURVE 모드는 삭제됐다. 위 검증 집계는 당시 구현의 기록이다.
+기존 성공 속도 실험을 세션 시작마다 다시 반복하지 않는다.

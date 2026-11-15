@@ -153,7 +153,7 @@ class PolylineIndex:
 
 
 class LaneNetwork:
-    """Reuse indexed MGeo records; directed neighbor fields declare lane changes.
+    """Reuse indexed MGeo adjacency; crossing evidence is a separate policy.
 
     Synthetic lazy lane-change links are metadata only and never trajectories.
     Reciprocal neighbor relation, valid ordinary endpoints, same direction and
@@ -163,6 +163,7 @@ class LaneNetwork:
         if type(require_explicit_permission) is not bool:
             raise ValueError('explicit permission policy must be boolean')
         self.require_explicit_permission = require_explicit_permission
+        self.boundaries = None
         self.links = planner.links_by_id
         self.valid = {edge['link_id'] for edges in planner.graph.values() for edge in edges}
 
@@ -178,13 +179,19 @@ class LaneNetwork:
         target_id = original.get(side + '_lane_change_dst_link_idx')
         if target_id not in self.valid:
             return 'NO_VALID_ADJACENT_LANE'
-        default = None if self.require_explicit_permission else True
-        values = (original.get('can_move_' + side + '_lane', default),)
-        if any(value is False for value in values):
+        boundary = self.boundaries
+        value = original.get('can_move_' + side + '_lane')
+        if value is False:
             return 'LANE_CHANGE_FORBIDDEN'
-        if any(value is not True for value in values):
+        if 'can_move_' + side + '_lane' in original and value is not True:
             return 'UNKNOWN_LANE_CHANGE_PERMISSION'
-        if self.require_explicit_permission and any(
+        if boundary is not None:
+            reason = boundary.permission_reason(original_id, target_id)
+            if reason:
+                return reason
+        elif value is not True and self.require_explicit_permission:
+            return 'UNKNOWN_LANE_CHANGE_PERMISSION'
+        if (self.require_explicit_permission or boundary is not None) and any(
                 link.get('link_type') not in ('6', 6) for link in (original, self.links[target_id])):
             # NGII 2019 table 24: only ordinary travel lanes are in this S4
             # verification profile. Intersection/bus/reversible/unknown types

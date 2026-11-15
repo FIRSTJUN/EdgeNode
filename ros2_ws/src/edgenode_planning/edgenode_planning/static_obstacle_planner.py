@@ -204,6 +204,11 @@ class StaticObstaclePlanner:
 
     def _body_safety(self, first, second, obstacles, *, prepared=None):
         swept,bounds,axle_bounds,sagitta=self._body_geometry(first,second) if prepared is None else prepared
+        boundaries = getattr(self.network, 'boundaries', None)
+        if boundaries is not None:
+            boundary_reason = boundaries.swept_reason(swept)
+            if boundary_reason:
+                return boundary_reason
         for obstacle in obstacles:
             obstacle=tuple(map(tuple,obstacle))
             other=self._obstacle_bounds.get(obstacle)
@@ -544,12 +549,11 @@ class StaticObstaclePlanner:
         return self._result(center_suffix(reference,ego,min(stop,index.lengths[-1])))
 
     def _entry_approach(self, pose, speed, actual_curvature, body_cache):
-        """Creep only on a verified original-lane path; entry stays uncommitted."""
+        """Use the S4 target only on an independently verified original-lane path."""
         reason=self._validate_active(self._entry_wait_path,pose,speed,actual_curvature,body_cache)
         if reason:return self._block(reason)
         self.reason='WAIT_ENTRY_GEOMETRY'
         result=self._result(self._entry_wait_path)
-        result['speed_cap_kmh']=min(3.,self.config.avoid_speed_kmh)
         return result
 
     def _confirm_normal_hazards(self,blocking,detected,stamp):
@@ -707,8 +711,8 @@ class StaticObstaclePlanner:
             safe=[(c,p) for p,cs in pairs for c in cs if not c.rejection]
             if not safe:
                 # A lane junction may have safe entry geometry a little ahead.
-                # Never waive candidate rejection: at most a bounded 3km/h
-                # approach may use the independently validated original lane.
+                # Never waive candidate rejection. The S4 target may be used
+                # only on the independently validated original lane.
                 retryable=bool(all_candidates) and all(c.rejection in
                     ('CURVATURE','INSUFFICIENT_ENTRY_SUPPORT','ENTRY_START_BEFORE_LANE') for c in all_candidates)
                 progress=PolylineIndex(self._global_path).project(pose[:2])

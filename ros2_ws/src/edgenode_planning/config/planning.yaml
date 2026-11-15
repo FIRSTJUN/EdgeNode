@@ -49,13 +49,11 @@ planning_node:
     map_match_connected_link_bonus: 0.7
     map_match_unrelated_link_penalty: 1.0
 
-    # Driving is opt-in, bounded by an independent speed cap and session lease.
+    # Driving is opt-in with a session lease; NORMAL has one operator target.
     enable_drive: false
-    max_drive_speed_kmh: 50.0
     drive_duration_sec: 60.0
-    cruise_speed_kmh: 50.0
-    curve_speed_kmh: 25.0
-    sharp_curve_speed_kmh: 15.0
+    cruise_speed_kmh: 60.0
+    sharp_curve_speed_kmh: 30.0
     speed_preview_distance_m: 80.0
     speed_anticipatory_enabled: true
     curve_curvature_threshold: 0.04
@@ -64,7 +62,7 @@ planning_node:
     speed_curvature_smoothing_window_m: 2.0
     speed_curvature_persistence_m: 2.0
     # Release margin in 1/m; entry thresholds above are unchanged.
-    # Default release thresholds: CURVE 0.035, SHARP_CURVE 0.095.
+    # SHARP_CURVE releases below 0.095; ordinary curves remain NORMAL.
     speed_curvature_hysteresis: 0.005
 
     # lidar_obstacle_node preserves ordered eight-point groups in PoseArray.

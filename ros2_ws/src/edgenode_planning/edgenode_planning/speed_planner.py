@@ -1,4 +1,4 @@
-"""ROS-independent three-level speed suggestions from local path geometry.
+"""ROS-independent two-mode speed targets from local path geometry.
 
 This module only returns a suggestion; it does not publish vehicle commands.
 """
@@ -117,14 +117,15 @@ class SpeedPlanner:
     and curvature thresholds in inverse metres.
     """
 
-    def __init__(self, cruise_speed_kmh=1.0, curve_speed_kmh=0.7,
-                 sharp_curve_speed_kmh=0.5, preview_distance_m=10.0,
+    def __init__(self, cruise_speed_kmh=60.0, curve_speed_kmh=None,
+                 sharp_curve_speed_kmh=30.0, preview_distance_m=10.0,
                  curve_curvature_threshold=0.04, sharp_curvature_threshold=0.10,
                  curvature_smoothing_window_m=2.0, curvature_persistence_m=2.0,
                  curvature_hysteresis=0.005, anticipatory=False,
                  braking_deceleration_mps2=2., reaction_time_s=.6,
                  max_lateral_acceleration_mps2=1.5):
         self.cruise_speed_kmh = cruise_speed_kmh
+        # Accepted for old callers only; ordinary curves use the NORMAL target.
         self.curve_speed_kmh = curve_speed_kmh
         self.sharp_curve_speed_kmh = sharp_curve_speed_kmh
         self.preview_distance_m = preview_distance_m
@@ -155,7 +156,7 @@ class SpeedPlanner:
         An optional previous mode enables lower release thresholds; callers
         own that state, so this planner remains stateless and ROS-independent.
         """
-        speeds = (self.cruise_speed_kmh, self.curve_speed_kmh, self.sharp_curve_speed_kmh)
+        speeds = (self.cruise_speed_kmh, self.sharp_curve_speed_kmh)
         parameters = (*speeds, self.preview_distance_m,
                       self.curve_curvature_threshold, self.sharp_curvature_threshold,
                       self.curvature_smoothing_window_m, self.curvature_persistence_m,
@@ -169,7 +170,7 @@ class SpeedPlanner:
         if (self.curvature_smoothing_window_m <= 0 or self.curvature_persistence_m <= 0
                 or self.curvature_hysteresis < 0):
             return None
-        if previous_speed_mode not in (None, 'CRUISE', 'CURVE', 'SHARP_CURVE'):
+        if previous_speed_mode not in (None, 'NORMAL', 'SHARP_CURVE'):
             return None
         if not isinstance(local_path_points, (list, tuple)) or len(local_path_points) < 3:
             return None
@@ -251,58 +252,51 @@ class SpeedPlanner:
                         for median, mean in zip(filtered, turn_mean)]
         filtered = [abs(value) for value in filtered]
         representative = _persistent_curvature(filtered, boundaries, self.curvature_persistence_m)
-        curve_release = max(0.0, self.curve_curvature_threshold - self.curvature_hysteresis)
         sharp_release = max(0.0, self.sharp_curvature_threshold - self.curvature_hysteresis)
-        if (representative >= self.sharp_curvature_threshold
-                or (previous_speed_mode == 'SHARP_CURVE' and representative >= sharp_release)):
-            speed_mode, speed = 'SHARP_CURVE', self.sharp_curve_speed_kmh
-        elif (representative >= self.curve_curvature_threshold
-              or (previous_speed_mode in ('CURVE', 'SHARP_CURVE') and representative >= curve_release)):
-            speed_mode, speed = 'CURVE', self.curve_speed_kmh
-        else:
-            speed_mode, speed = 'CRUISE', self.cruise_speed_kmh
+        threshold = sharp_release if previous_speed_mode == 'SHARP_CURVE' else self.sharp_curvature_threshold
+        speed_mode = 'SHARP_CURVE' if representative >= threshold else 'NORMAL'
+        speed = self.sharp_curve_speed_kmh if speed_mode == 'SHARP_CURVE' else self.cruise_speed_kmh
         ordered = sorted(abs(value) for value in curvatures)
-        constraint_distance=0.;profile_speed=speed
+        constraint_distance = 0.0
+        profile_speed = speed
         if self.anticipatory:
             if (not all(_finite_number(v) for v in (measured_speed_kmh, measured_curvature,
-                    self.braking_deceleration_mps2,self.reaction_time_s,self.max_lateral_acceleration_mps2))
-                    or measured_speed_kmh<0 or self.braking_deceleration_mps2<=0
-                    or self.reaction_time_s<0 or self.max_lateral_acceleration_mps2<=0):return None
-            masks=[]
-            for threshold in (1e-4,curve_release if previous_speed_mode in ('CURVE','SHARP_CURVE')
-                              else self.curve_curvature_threshold,
-                              sharp_release if previous_speed_mode=='SHARP_CURVE' else self.sharp_curvature_threshold):
-                mask=[False]*len(filtered);begin=0
-                while begin<len(filtered):
-                    if filtered[begin]<threshold:begin+=1;continue
-                    end=begin+1
-                    while end<len(filtered) and filtered[end]>=threshold:end+=1
-                    if boundaries[end]-boundaries[begin]>=min(self.curvature_persistence_m,evaluated_length)-1e-9:
-                        mask[begin:end]=[True]*(end-begin)
-                    begin=end
-                masks.append(mask)
-            speed=self.cruise_speed_kmh;profile_speed=speed;speed_mode='CRUISE'
-            reaction_distance=measured_speed_kmh/3.6*self.reaction_time_s
-            for i,k in enumerate(filtered):
-                mode,limit=('SHARP_CURVE',self.sharp_curve_speed_kmh) if masks[2][i] else (
-                    ('CURVE',self.curve_speed_kmh) if masks[1][i] else ('CRUISE',self.cruise_speed_kmh))
-                if masks[0][i]:limit=min(limit,3.6*math.sqrt(self.max_lateral_acceleration_mps2/k))
-                distance=max(0.,boundaries[i]-reaction_distance)
-                allowed=3.6*math.sqrt((limit/3.6)**2+2*self.braking_deceleration_mps2*distance)
-                if allowed<speed:
-                    speed=allowed;speed_mode=mode;profile_speed=limit;constraint_distance=boundaries[i]
-            # The preview can already be straight while the actual vehicle is
-            # still turning. Do not accelerate out of the same lateral limit
-            # until the measured wheel curvature has unwound.
-            if abs(measured_curvature) > 1e-4:
-                measured_cap = 3.6 * math.sqrt(
-                    self.max_lateral_acceleration_mps2 / abs(measured_curvature))
-                if measured_cap < speed:
-                    speed = profile_speed = measured_cap
-                    constraint_distance = 0.
-                    speed_mode = ('SHARP_CURVE' if abs(measured_curvature) >= self.sharp_curvature_threshold
-                                  else 'CURVE' if abs(measured_curvature) >= self.curve_curvature_threshold
-                                  else 'CRUISE')
+                    self.braking_deceleration_mps2, self.reaction_time_s))
+                    or measured_speed_kmh < 0 or self.braking_deceleration_mps2 <= 0
+                    or self.reaction_time_s < 0):
+                return None
+            # Only the configured SHARP_CURVE target causes anticipatory braking.
+            # There is no curvature-derived or measured-steering speed ceiling.
+            mask = [False] * len(filtered)
+            begin = 0
+            while begin < len(filtered):
+                if filtered[begin] < threshold:
+                    begin += 1
+                    continue
+                end = begin + 1
+                while end < len(filtered) and filtered[end] >= threshold:
+                    end += 1
+                if boundaries[end] - boundaries[begin] >= min(
+                        self.curvature_persistence_m, evaluated_length) - 1e-9:
+                    mask[begin:end] = [True] * (end - begin)
+                begin = end
+            speed = profile_speed = self.cruise_speed_kmh
+            speed_mode = 'NORMAL'
+            reaction_distance = measured_speed_kmh / 3.6 * self.reaction_time_s
+            for i, is_sharp in enumerate(mask):
+                if not is_sharp:
+                    continue
+                limit = self.sharp_curve_speed_kmh
+                distance = max(0.0, boundaries[i] - reaction_distance)
+                allowed = 3.6 * math.sqrt((limit / 3.6) ** 2
+                    + 2 * self.braking_deceleration_mps2 * distance)
+                if allowed < speed:
+                    speed, speed_mode = allowed, 'SHARP_CURVE'
+                    profile_speed, constraint_distance = limit, boundaries[i]
+            # Maintain the configured sharp target until actual steering unwinds.
+            if abs(measured_curvature) >= threshold and self.sharp_curve_speed_kmh < speed:
+                speed = profile_speed = self.sharp_curve_speed_kmh
+                speed_mode, constraint_distance = 'SHARP_CURVE', 0.0
         return {
             'target_speed_kmh': float(speed),
             'representative_curvature': representative,

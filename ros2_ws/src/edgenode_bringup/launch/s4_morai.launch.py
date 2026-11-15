@@ -1,4 +1,4 @@
-"""MORAI speed profiles, disarmed and limited to independently verified speeds."""
+"""MORAI operator targets; starts disarmed without admission speed ceilings."""
 import os
 import yaml
 from ament_index_python.packages import get_package_share_directory
@@ -51,9 +51,7 @@ def launch_nodes(context):
              parameters=[config('edgenode_planning','planning'),geometry,mission,{
                  'enable_drive':value('enable_drive',bool),
                  'cruise_speed_kmh':value('cruise_speed_kmh',float),
-                 'curve_speed_kmh':value('curve_speed_kmh',float),
                  'sharp_curve_speed_kmh':value('sharp_curve_speed_kmh',float),
-                 'max_drive_speed_kmh':value('max_drive_speed_kmh',float),
                  'drive_duration_sec':value('drive_duration_sec',float),
                  'avoidance_avoid_speed_kmh':value('avoid_speed_kmh',float),
                  'avoidance_hold_duration_s':value('hold_duration_s',float),
@@ -62,9 +60,6 @@ def launch_nodes(context):
                  'avoidance_normal_obstacle_confirmations':2,
                  'avoidance_normal_detection_latency_s':1.6,
                  'avoidance_entry_geometry_wait_distance_m':6.,
-                 'morai_speed_admission_enabled':True,
-                 'morai_validated_speed_cap_kmh':value('validated_speed_cap_kmh',float),
-                 'morai_verified_detection_distance_m':value('verified_detection_distance_m',float),
                  's4_sensor_validation_enabled':True,
                  'avoidance_use_ego_status':True,
                  'avoidance_steering_slew_limit_radps':.6,
@@ -73,8 +68,9 @@ def launch_nodes(context):
                  # Keep live sensor validation; historical surveyed visibility
                  # evidence is separate from this simulator-only experiment.
                  's4_distance_validation_enabled':False,
-                 # Use directed MGeo neighbor fields; explicit denials still win.
-                 'avoidance_require_explicit_permission':False}],additional_env=env),
+                 # Keep directed topology and explicit denials; add original HD-map boundaries.
+                 'avoidance_require_explicit_permission':False,
+                 'avoidance_boundary_dir':'/workspace/local_data/kcity_hdmap'}],additional_env=env),
         Node(package='edgenode_control',executable='control_node',output='screen',parameters=[control,{
             'steering_slew_limit_radps':.6,'lookahead_max_m':value('lookahead_max_m',float),
             'normal_lookahead_min_m':value('normal_lookahead_min_m',float),
@@ -85,12 +81,10 @@ def launch_nodes(context):
 
 def generate_launch_description():
     arguments=[
-        ('enable_drive','false'),('speed_kmh','50.0'),
-        ('cruise_speed_kmh',LaunchConfiguration('speed_kmh')),('curve_speed_kmh','25.0'),
-        ('sharp_curve_speed_kmh','15.0'),('avoidance_speed_kmh','10.0'),
+        ('enable_drive','false'),('speed_kmh','60.0'),
+        ('cruise_speed_kmh',LaunchConfiguration('speed_kmh')),
+        ('sharp_curve_speed_kmh','30.0'),('avoidance_speed_kmh','10.0'),
         ('avoid_speed_kmh',LaunchConfiguration('avoidance_speed_kmh')),
-        ('max_drive_speed_kmh',LaunchConfiguration('speed_kmh')),
-        ('validated_speed_cap_kmh','15.0'),('verified_detection_distance_m','20.0'),
         ('hold_duration_s','3.0'),('drive_duration_sec','3600.0'),
         ('lookahead_max_m','12.0'),('lookahead_preview_time_sec','0.8'),
         ('normal_lookahead_min_m','3.5'),('lookahead_heading_budget_rad','1.6'),

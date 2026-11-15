@@ -41,7 +41,7 @@ def test_real_entry_is_not_committed_until_geometry_becomes_feasible_ahead(offse
     planner, tick, data = scene(offset=offset)
     result, reference = tick(2)
     assert result['reason'] == 'WAIT_ENTRY_GEOMETRY' and not result['blocked']
-    assert result['speed_cap_kmh'] == 3. and planner.entry_commits == 0
+    assert result['speed_cap_kmh'] == planner.config.avoid_speed_kmh and planner.entry_commits == 0
     assert not planner.needs_validation_stop(reference, [data['solid']])
     assert tick(3, advance=.5, speed=3.)[0]['state'] == 'DETECT'
     result, _ = tick(4, advance=2.1, speed=3.)

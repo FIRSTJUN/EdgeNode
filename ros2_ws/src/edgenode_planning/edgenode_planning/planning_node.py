@@ -42,7 +42,7 @@ from .return_search import ReturnSearch
 from .s4_distance_safety import DistancePolicy, DistanceSafety, load_evidence
 from .lane_geometry import arc
 from .route_resume import mission_suffix, link_index_at_progress
-from .morai_speed_safety import stopping_speed_cap, required_deceleration_distance
+from .morai_speed_safety import required_deceleration_distance
 
 
 # Only freshness/initial-pair gaps may suspend a maneuver temporarily. Invalid
@@ -106,10 +106,10 @@ class PlanningNode(Node):
             '/planning/state',
         )
 
-        # Recommendation is independent of the drive enablement and hard limit.
+        # NORMAL uses one operator target for straights and ordinary curves.
         self.declare_parameter(
             'cruise_speed_kmh',
-            1.0,
+            60.0,
         )
 
         self.declare_parameters(
@@ -129,12 +129,10 @@ class PlanningNode(Node):
                 ('local_path_index_topic', '/planning/local_path_index'),
                 ('local_path_progress_topic', '/planning/local_path_progress_m'),
                 ('enable_drive', False),
-                ('max_drive_speed_kmh', 1.0),
                 ('drive_duration_sec', 15.0),
                 ('drive_status_topic', '/planning/drive_status'),
                 ('fsm_state_topic', '/planning/fsm_state'),
-                ('curve_speed_kmh', 0.7),
-                ('sharp_curve_speed_kmh', 0.5),
+                ('sharp_curve_speed_kmh', 30.0),
                 ('speed_preview_distance_m', 10.0),
                 ('curve_curvature_threshold', 0.04),
                 ('sharp_curvature_threshold', 0.10),
@@ -178,7 +176,6 @@ class PlanningNode(Node):
         self.local_path_planner = LocalPathPlanner()
         self.speed_planner = SpeedPlanner(
             cruise_speed_kmh=self.get_parameter('cruise_speed_kmh').value,
-            curve_speed_kmh=self.get_parameter('curve_speed_kmh').value,
             sharp_curve_speed_kmh=self.get_parameter('sharp_curve_speed_kmh').value,
             preview_distance_m=self.get_parameter('speed_preview_distance_m').value,
             curve_curvature_threshold=self.get_parameter('curve_curvature_threshold').value,
@@ -187,21 +184,12 @@ class PlanningNode(Node):
             curvature_persistence_m=self.get_parameter('speed_curvature_persistence_m').value,
             curvature_hysteresis=self.get_parameter('speed_curvature_hysteresis').value,
         )
-        for name,value in (('speed_anticipatory_enabled',False),('speed_deceleration_mps2',2.),
-                ('speed_reaction_time_s',.6),('speed_max_lateral_acceleration_mps2',1.5),
-                ('morai_speed_admission_enabled',False),('morai_validated_speed_cap_kmh',5.),
-                ('morai_verified_detection_distance_m',20.),('morai_braking_delay_s',1.6)):
-            self.declare_parameter(name,value,ParameterDescriptor(read_only=True))
-        self.speed_planner.anticipatory=self.get_parameter('speed_anticipatory_enabled').value
-        self.speed_planner.braking_deceleration_mps2=self.get_parameter('speed_deceleration_mps2').value
-        self.speed_planner.reaction_time_s=self.get_parameter('speed_reaction_time_s').value
-        self.speed_planner.max_lateral_acceleration_mps2=self.get_parameter('speed_max_lateral_acceleration_mps2').value
-        self._morai_speed_policy=None
-        if self.get_parameter('morai_speed_admission_enabled').value:
-            self._morai_speed_policy={name:self.get_parameter('morai_'+name).value for name in
-                ('validated_speed_cap_kmh','verified_detection_distance_m','braking_delay_s')}
-            if not all(_finite_number(v) and v>0 for v in self._morai_speed_policy.values()):
-                raise ValueError('positive measured MORAI speed/range/delay limits required')
+        for name, value in (('speed_anticipatory_enabled', False),
+                ('speed_deceleration_mps2', 2.), ('speed_reaction_time_s', .6)):
+            self.declare_parameter(name, value, ParameterDescriptor(read_only=True))
+        self.speed_planner.anticipatory = self.get_parameter('speed_anticipatory_enabled').value
+        self.speed_planner.braking_deceleration_mps2 = self.get_parameter('speed_deceleration_mps2').value
+        self.speed_planner.reaction_time_s = self.get_parameter('speed_reaction_time_s').value
 
         self.declare_parameter('obstacle_topic', '/planning/obstacles')
         self.declare_parameter('obstacle_points_per_cluster', 8, ParameterDescriptor(read_only=True))
@@ -239,6 +227,11 @@ class PlanningNode(Node):
             config=AvoidanceConfig(**values),
             weights=CostWeights(**{name:self.get_parameter('avoidance_cost_'+name).value
                                    for name in weights.__dict__}))
+        self.declare_parameter('avoidance_boundary_dir', '', ParameterDescriptor(read_only=True))
+        boundary_dir = self.get_parameter('avoidance_boundary_dir').value
+        if boundary_dir:
+            from .hdmap_boundaries import HDMapBoundaries
+            self.avoidance_planner.network.boundaries = HDMapBoundaries(boundary_dir, mgeo_dir)
         self.distance_safety = None
         for name, value in DistancePolicy().__dict__.items():
             self.declare_parameter('s4_distance_' + name, value, ParameterDescriptor(read_only=True))
@@ -282,7 +275,7 @@ class PlanningNode(Node):
         self.avoidance_stage_pub = self.create_publisher(String, '/planning/avoidance_stage', 10)
         self.avoidance_debug_pub = self.create_publisher(String, '/planning/avoidance_debug', 10)
         self.candidate_pub = self.create_publisher(MarkerArray, '/planning/lattice_candidate_markers', 10)
-        for name in ('runtime_cruise_speed','runtime_curve_speed','runtime_sharp_curve_speed','runtime_max_drive_speed'):
+        for name in ('runtime_cruise_speed','runtime_sharp_curve_speed'):
             setattr(self,name+'_pub',self.create_publisher(Float32,'/planning/'+name,10))
         self._avoidance_path_publishers = {name:self.create_publisher(Path, '/planning/'+name, 10)
             for name in ('original_lane_center','left_lane_center','right_lane_center',
@@ -811,7 +804,7 @@ class PlanningNode(Node):
         PlanningNode.refresh_sensor(self, self.get_clock().now().nanoseconds)
         if s4_started is not None:
             self.refresh_distance(s4_started)
-        for name in ('cruise_speed_kmh', 'curve_speed_kmh', 'sharp_curve_speed_kmh'):
+        for name in ('cruise_speed_kmh', 'sharp_curve_speed_kmh'):
             setattr(self.speed_planner, name, self.get_parameter(name).value)
         avoidance_result = None
         state_value = 'WAIT_FOR_LOCALIZATION'
@@ -1149,10 +1142,8 @@ class PlanningNode(Node):
         requested_target_speed = 0.0
         drive_status = 'DISABLED'
         if enable_drive:
-            max_speed = self.get_parameter('max_drive_speed_kmh').value
             duration = self.get_parameter('drive_duration_sec').value
-            if (not _finite_number(max_speed) or max_speed <= 0
-                    or not _finite_number(duration) or duration <= 0):
+            if not _finite_number(duration) or duration <= 0:
                 drive_status = 'INVALID_CONFIG'
             else:
                 # Live duration changes may shorten, but never extend a session.
@@ -1168,7 +1159,7 @@ class PlanningNode(Node):
                 elif (state_value == 'GLOBAL_PATH_READY' and status_value == 'MATCHED'
                       and local_result is not None and speed_result is not None
                       and speed_valid):
-                    requested_target_speed = float(min(recommended_speed, max_speed))
+                    requested_target_speed = float(recommended_speed)
                     drive_status = 'ACTIVE'
                 else:
                     drive_status = 'NOT_READY'
@@ -1212,17 +1203,6 @@ class PlanningNode(Node):
         else:
             target_speed.data = 0.0
 
-        if s4_started is not None:
-            target_speed.data = min(target_speed.data, self.distance_safety.policy.speed_cap_kmh)
-        admission=getattr(self,'_morai_speed_policy',None)
-        admitted_cap=None
-        if admission is not None:
-            available=max(0.,local_result['path_length_m']-
-                self.avoidance_planner.body.wheelbase_m-self.avoidance_planner.body.front_overhang_m) if local_result else 0.
-            admitted_cap=min(admission['validated_speed_cap_kmh'],stopping_speed_cap(
-                min(available,admission['verified_detection_distance_m']),
-                self.avoidance_planner.config.deceleration_mps2,admission['braking_delay_s']))
-            target_speed.data=min(target_speed.data,admitted_cap)
         if hasattr(self,'diagnostics_pub'):
             self.diagnostics_pub.publish(String(data=json.dumps(dict(
                 planning_elapsed_ms=(time.monotonic()-plan_started)*1000.,
@@ -1232,8 +1212,7 @@ class PlanningNode(Node):
                 route_error=getattr(self,'_route_error',''),
                 remaining_waypoints=self._route_result.get('remaining_waypoints') if self._route_result else None,
                 configured_cruise_kmh=self.get_parameter('cruise_speed_kmh').value,
-                recommended_speed_kmh=recommended_speed,admitted_speed_cap_kmh=admitted_cap,
-                speed_admission=admission,reset_history=getattr(self,'_reset_history',[]),
+                recommended_speed_kmh=recommended_speed,reset_history=getattr(self,'_reset_history',[]),
                 safety_history=getattr(self,'_safety_history',[]),
                 deceleration_to_avoidance_m=required_deceleration_distance(
                     max(0.,self.latest_speed_kmh),self.avoidance_planner.config.avoid_speed_kmh,
@@ -1263,8 +1242,7 @@ class PlanningNode(Node):
         self.speed_max_curvature_pub.publish(Float32(data=speed_max_curvature))
         self.drive_status_pub.publish(String(data=drive_status))
         for topic,parameter in (('runtime_cruise_speed','cruise_speed_kmh'),
-                ('runtime_curve_speed','curve_speed_kmh'),('runtime_sharp_curve_speed','sharp_curve_speed_kmh'),
-                ('runtime_max_drive_speed','max_drive_speed_kmh')):
+                ('runtime_sharp_curve_speed','sharp_curve_speed_kmh')):
             value=self.get_parameter(parameter).value
             getattr(self,topic+'_pub').publish(Float32(data=float(value) if _finite_number(value) else math.nan))
 

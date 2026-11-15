@@ -15,7 +15,7 @@ def test_accepted_ros_parameter_change_reaches_actual_sharp_speed_next_cycle(rou
     prefix = '/runtime_speed_test_' + uuid.uuid4().hex[:8]
     args = ['--ros-args', '-r', '__ns:=' + prefix,
             '-p', f'mgeo_dir:={route_editor_map}', '-p', 'goal_node_id:=D',
-            '-p', 'cruise_speed_kmh:=3.5', '-p', 'curve_speed_kmh:=3.5',
+            '-p', 'cruise_speed_kmh:=3.5',
             '-p', 'sharp_curve_speed_kmh:=3.5']
     # Absolute project topics must be remapped explicitly; no live input/output.
     topics = ('target_error', 'target_speed', 'state', 'current_link', 'map_match_status',
@@ -44,7 +44,7 @@ def test_accepted_ros_parameter_change_reaches_actual_sharp_speed_next_cycle(rou
         node.plan()
         assert node.speed_planner.plan(points)['target_speed_kmh'] == 3.5
         results = node.set_parameters([Parameter(name, value=20.) for name in (
-            'cruise_speed_kmh', 'curve_speed_kmh', 'sharp_curve_speed_kmh')])
+            'cruise_speed_kmh', 'sharp_curve_speed_kmh')])
         assert all(result.successful for result in results)
         assert node.get_parameter('sharp_curve_speed_kmh').value == 20.
         assert node.speed_planner.sharp_curve_speed_kmh == 3.5  # old cached state before cycle

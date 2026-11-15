@@ -78,8 +78,8 @@ def detect(node,points=None,frame='map',stamp=1.):
 
 def arm_isolated_node(node):
     assert all(node.get_parameter(name).value==False for name in ('enable_drive',))
-    result=node.set_parameters([Parameter('enable_drive',value=True),Parameter('max_drive_speed_kmh',value=20.),
-        Parameter('cruise_speed_kmh',value=20.),Parameter('curve_speed_kmh',value=20.),
+    result=node.set_parameters([Parameter('enable_drive',value=True),
+        Parameter('cruise_speed_kmh',value=20.),
         Parameter('sharp_curve_speed_kmh',value=20.)])
     assert all(r.successful for r in result)
 
