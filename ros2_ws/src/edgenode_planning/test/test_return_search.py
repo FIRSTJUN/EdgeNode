@@ -9,6 +9,21 @@ from edgenode_planning.static_obstacle_planner import StaticObstaclePlanner
 from test_static_obstacle_planner import setup, enter, acquire, plan
 
 
+def test_return_search_waits_for_measured_stop():
+    p,point,obstacle=setup();enter(p,point,obstacle);acquire(p,point,3.5)
+    assert plan(p,point,[],s=45.,offset=3.5,now=5.)['state']=='RETURN'
+    search=ReturnSearch(ThreadPoolExecutor(max_workers=1))
+    try:
+        for speed in (10.,1.,.21):
+            result=plan(p,point,[],s=45.,offset=3.5,speed=speed,now=5.1,return_search=search)
+            assert result['blocked'] and not result['points']
+            assert search._future is None and p.return_commits==0
+        plan(p,point,[],s=45.,offset=3.5,speed=.1,now=5.2,return_search=search)
+        assert search._future is not None
+        search._future.result(timeout=12.)
+    finally:search.close()
+
+
 def test_async_return_keeps_sequential_gates_and_rechecks_live_obstacles():
     p,point,obstacle=setup()
     enter(p,point,obstacle);acquire(p,point,3.5)
@@ -22,18 +37,18 @@ def test_async_return_keeps_sequential_gates_and_rechecks_live_obstacles():
     search=ReturnSearch(executor=ThreadPoolExecutor(max_workers=1))
     try:
         with patch.object(StaticObstaclePlanner,'_generate_return',slow):
-            r=plan(p,point,[],s=45.,offset=3.5,now=5.1,return_search=search)
+            r=plan(p,point,[],s=45.,offset=3.5,now=5.1,speed=0.,return_search=search)
             assert started.wait(1.)
             assert r['stage']=='RETURN' and r['blocked'] and not r['points']
             assert p.return_commits==0 and not p._return_path
             # Another ROS planning cycle remains available during the search.
-            r=plan(p,point,[],s=45.,offset=3.5,now=5.2,return_search=search)
+            r=plan(p,point,[],s=45.,offset=3.5,now=5.2,speed=0.,return_search=search)
             assert r['reason']=='RETURN_SEARCH_PENDING' and r['blocked']
             release.set();search._future.result(timeout=5.)
         # A newly observed solid on the return path must be revalidated even
         # though it was absent from the worker's snapshot.
         solid=obstacle(60.,64.,-1.,1.)
-        r=plan(p,point,[solid],s=45.,offset=3.5,now=5.3,return_search=search)
+        r=plan(p,point,[solid],s=45.,offset=3.5,now=5.3,speed=0.,return_search=search)
         assert r['blocked'] and not r['points'] and p.reason in ('BODY_COLLISION','REFERENCE_CLEARANCE')
         p.reset();search.cancel()
         assert p.state=='NORMAL' and search._future is None
@@ -48,11 +63,11 @@ def test_production_return_search_runs_outside_the_ros_process():
     search = ReturnSearch()
     try:
         assert isinstance(search._executor, ProcessPoolExecutor)
-        plan(planner, point, [], s=45., offset=3.5, now=5.1, return_search=search)
+        plan(planner, point, [], s=45., offset=3.5, now=5.1, speed=0.,return_search=search)
         reason, snapshot, generated, elapsed, pid = search._future.result(timeout=15.)
         assert pid != os.getpid() and not reason and snapshot._return_path
         assert planner.return_commits == 0
-        result = plan(planner, point, [], s=45., offset=3.5, now=5.2, return_search=search)
+        result = plan(planner, point, [], s=45., offset=3.5, now=5.2, speed=0.,return_search=search)
         assert not result['blocked'] and planner.return_commits == 1
     finally:
         search.close()

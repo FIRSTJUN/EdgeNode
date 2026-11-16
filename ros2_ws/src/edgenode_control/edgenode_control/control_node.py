@@ -29,24 +29,26 @@ class PID:
         self.integral = 0.0
         self.prev_error = None
 
-    def update(self, error: float, dt: float) -> float:
+    def update(self, error: float, dt: float, output_limits=None) -> float:
         if dt <= 1e-6:
             dt = 1e-3
 
-        self.integral += error * dt
-        self.integral = clamp(
-            self.integral, -self.integral_limit, self.integral_limit)
+        proposed=clamp(self.integral+error*dt,-self.integral_limit,self.integral_limit)
 
         derivative = 0.0
         if self.prev_error is not None:
             derivative = (error - self.prev_error) / dt
         self.prev_error = error
-
-        return (
-            self.kp * error +
-            self.ki * self.integral +
-            self.kd * derivative
-        )
+        output=self.kp*error+self.ki*proposed+self.kd*derivative
+        if output_limits is not None:
+            low,high=output_limits
+            if not all(math.isfinite(v) for v in (low,high)) or low>=high:return math.nan
+            # Saturated pedals cannot deliver the excess demand. Do not store
+            # that excess as an integral that later drives speed overshoot.
+            if (output>high and error>0) or (output<low and error<0):
+                return self.kp*error+self.ki*self.integral+self.kd*derivative
+        self.integral=proposed
+        return output
 
 
 class ControlNode(Node):
@@ -102,6 +104,9 @@ class ControlNode(Node):
         self.declare_parameter('normal_lookahead_min_m', self.get_parameter('lookahead_min_m').value)
         self.declare_parameter('normal_lookahead_heading_budget_rad',
                                self.get_parameter('lookahead_heading_budget_rad').value)
+        self.declare_parameter('normal_prediction_time_sec',0.)
+        self.declare_parameter('normal_max_front_steer_normalized',
+                               self.get_parameter('max_front_steer_normalized').value)
         self._avoidance_state = ''
         self._avoidance_state_stamp_ns = None
         self.create_subscription(String, '/planning/avoidance_state', self.avoidance_state_cb, 10)
@@ -109,6 +114,7 @@ class ControlNode(Node):
         self.target_error = 0.0
         self.target_speed_kmh = 0.0
         self.current_speed_kmh = 0.0
+        self.measured_curvature = 0.
         self.local_path_points = []
         self.latest_pose = None
         self._last_front_steer = 0.
@@ -213,6 +219,13 @@ class ControlNode(Node):
         vy = float(msg.velocity.y)
         vz = float(msg.velocity.z)
         self.current_speed_kmh = math.sqrt(vx * vx + vy * vy + vz * vz) * 3.6
+        angle=math.radians(float(msg.front_steer_angle))
+        wheelbase=float(self.get_parameter('wheelbase_m').value)
+        sign=float(self.get_parameter('steering_sign').value)
+        if (not math.isfinite(angle) or not math.isfinite(wheelbase) or wheelbase<=0
+                or sign not in (-1.,1.) or abs(angle)>self.get_parameter('max_wheel_angle_rad').value+1e-6):
+            self.measured_curvature=math.nan
+        else:self.measured_curvature=math.tan(angle/sign)/wheelbase
         self.status_stamp_ns = self.now_ns()
 
     def control_loop(self):
@@ -244,10 +257,12 @@ class ControlNode(Node):
         minimum = self.get_parameter('lookahead_min_m').value
         heading_budget = self.get_parameter('lookahead_heading_budget_rad').value
         state_stamp = getattr(self, '_avoidance_state_stamp_ns', None)
+        normal=False
         if (getattr(self, '_avoidance_state', '') == 'NORMAL' and state_stamp is not None
                 and 0 <= (now - state_stamp) / 1e9 <= self.get_parameter('command_timeout_sec').value):
             minimum = self.get_parameter('normal_lookahead_min_m').value
             heading_budget = self.get_parameter('normal_lookahead_heading_budget_rad').value
+            normal=True
         lookahead_distance_m = path_lookahead_distance(
             self.current_speed_kmh,self.local_path_points,self.latest_pose,
             lookahead_min_m=minimum,
@@ -261,10 +276,16 @@ class ControlNode(Node):
             return
 
         # Pure Pursuit is LEFT-positive; MORAI sign conversion happens here.
-        result = self.pure_pursuit.compute(
-            self.local_path_points, *self.latest_pose,
-            lookahead_distance_m=lookahead_distance_m,
-        )
+        prediction=float(self.get_parameter('normal_prediction_time_sec').value) if normal else 0.
+        if prediction!=0.:
+            result=self.pure_pursuit.compute_compensated(self.local_path_points,*self.latest_pose,
+                speed_kmh=self.current_speed_kmh,measured_curvature=self.measured_curvature,
+                prediction_time_sec=prediction,lookahead_distance_m=lookahead_distance_m)
+        else:
+            result = self.pure_pursuit.compute(
+                self.local_path_points, *self.latest_pose,
+                lookahead_distance_m=lookahead_distance_m,
+            )
         if result is None:
             self.publish_safe_stop()
             self.speed_pid.reset()
@@ -292,7 +313,8 @@ class ControlNode(Node):
         front_steer = to_morai_front_steer(
             result['steering_normalized'],
             steering_sign=self.get_parameter('steering_sign').value,
-            max_front_steer_normalized=self.get_parameter('max_front_steer_normalized').value,
+            max_front_steer_normalized=self.get_parameter(
+                'normal_max_front_steer_normalized' if normal else 'max_front_steer_normalized').value,
         )
         if front_steer is None:
             self.publish_safe_stop()
@@ -308,10 +330,11 @@ class ControlNode(Node):
         else:
             # Longitudinal PID in km/h -> normalized pedal command.
             speed_error = self.target_speed_kmh - self.current_speed_kmh
-            pedal = self.speed_pid.update(speed_error, dt)
-
             max_accel = float(self.get_parameter('max_accel_cmd').value)
             max_brake = float(self.get_parameter('max_brake_cmd').value)
+            pedal = self.speed_pid.update(speed_error, dt,output_limits=(-max_brake,max_accel))
+            if not math.isfinite(pedal):
+                self.publish_safe_stop();self.speed_pid.reset();return
 
             accel = clamp(pedal, 0.0, max_accel)
             brake = clamp(-pedal, 0.0, max_brake)

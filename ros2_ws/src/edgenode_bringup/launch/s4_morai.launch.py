@@ -1,5 +1,6 @@
 """MORAI operator targets; starts disarmed without admission speed ceilings."""
 import os
+import math
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -23,6 +24,13 @@ def launch_nodes(context):
     geometry.update(avoidance_lookahead_max_m=value('lookahead_max_m',float),
         avoidance_lookahead_preview_time_sec=value('lookahead_preview_time_sec',float),
         avoidance_lookahead_heading_budget_rad=value('lookahead_heading_budget_rad',float))
+    avoid_speed=float(LaunchConfiguration('avoid_speed_kmh').perform(context))/3.6
+    lookahead=max(settings['lookahead_min_m'],min(
+        float(LaunchConfiguration('lookahead_max_m').perform(context)),
+        avoid_speed*float(LaunchConfiguration('lookahead_preview_time_sec').perform(context))))
+    # Same two-delay-horizon rollout as StaticObstaclePlanner, plus window
+    # support. Extend output and validation together; no safety gate changes.
+    s4_horizon=max(20.,5.*math.ceil((4.*avoid_speed+lookahead+.6+2.)/5.))
     route_file=LaunchConfiguration('route_file').perform(context)
     mission={}
     if route_file:
@@ -57,8 +65,14 @@ def launch_nodes(context):
                  'drive_duration_sec':value('drive_duration_sec',float),
                  'avoidance_avoid_speed_kmh':value('avoid_speed_kmh',float),
                  'avoidance_hold_duration_s':value('hold_duration_s',float),
-                 'local_path_length_m':80.,'s4_control_horizon_m':20.,
+                 'local_path_length_m':80.,'s4_control_horizon_m':s4_horizon,
                  'speed_preview_distance_m':80.,'speed_anticipatory_enabled':True,
+                 # 60 km/h at k=.03 requires 8.33 m/s². Use the configured
+                 # 30 target before those turns; tighter turns also respect
+                 # the measured dry-MORAI friction budget (mu=1, g=9.81).
+                 'curve_curvature_threshold':.02,
+                 'sharp_curvature_threshold':value('normal_sharp_curvature_threshold',float),
+                 'normal_physical_lateral_acceleration_mps2':value('normal_lateral_limit_mps2',float),
                  'avoidance_normal_obstacle_confirmations':2,
                  'avoidance_normal_detection_latency_s':1.6,
                  'avoidance_entry_geometry_wait_distance_m':6.,
@@ -78,6 +92,8 @@ def launch_nodes(context):
             'normal_lookahead_min_m':value('normal_lookahead_min_m',float),
             # NORMAL limits corner cutting independently of the validated S4 rollout.
             'normal_lookahead_heading_budget_rad':value('normal_lookahead_heading_budget_rad',float),
+            'normal_prediction_time_sec':value('normal_prediction_time_sec',float),
+            'normal_max_front_steer_normalized':value('normal_max_front_steer_normalized',float),
             'lookahead_preview_time_sec':value('lookahead_preview_time_sec',float),
             'lookahead_heading_budget_rad':value('lookahead_heading_budget_rad',float)}],additional_env=env),
     ]
@@ -91,8 +107,10 @@ def generate_launch_description():
         ('avoid_speed_kmh',LaunchConfiguration('avoidance_speed_kmh')),
         ('hold_duration_s','3.0'),('drive_duration_sec','3600.0'),
         ('lookahead_max_m','12.0'),('lookahead_preview_time_sec','0.8'),
-        ('normal_lookahead_min_m','3.5'),('lookahead_heading_budget_rad','1.6'),
+        ('normal_lookahead_min_m','4.0'),('lookahead_heading_budget_rad','1.6'),
         ('normal_lookahead_heading_budget_rad','0.25'),
+        ('normal_prediction_time_sec','0.1'),('normal_max_front_steer_normalized','1.0'),
+        ('normal_sharp_curvature_threshold','0.03'),('normal_lateral_limit_mps2','9.0'),
         ('lidar_roi_max_x','100.0'),
         ('lidar_obstacle_max_z_m','0.3'),
         ('route_file','/workspace/local_data/kcity_routes/kcity_demo_route.yaml'),

@@ -413,7 +413,7 @@ class ControlNodeTest(unittest.TestCase):
         self.node.target_speed_cb(Float32(data=1.0))
         with patch.object(self.node.speed_pid, 'update', wraps=self.node.speed_pid.update) as update:
             command = self.command()
-            update.assert_called_once_with(1.0, 0.5)
+            update.assert_called_once_with(1.0, 0.5, output_limits=(-0.8, 0.6))
         reference = PID(0.14, 0.015, 0.02, 12.0)
         expected_accel = reference.update(1.0, 0.5)
         self.assertAlmostEqual(command.accel, expected_accel)

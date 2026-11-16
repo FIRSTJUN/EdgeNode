@@ -41,7 +41,7 @@ def run(speed=3.,side='left',radius=math.inf,origin=(0.,0.),yaw=0.,lateral_error
         disappear=False,interrupt_confirmation=False,duration=110.,
         reference_horizon_m=50.,observation_range_m=None,config_overrides=None,
         obstacle_front_m=35.,obstacle_length_m=4.,configure_network=None,
-        obstacle_width_m=1.,obstacle_heading_rad=0.):
+        obstacle_width_m=1.,obstacle_heading_rad=0.,control_horizon_m=20.):
     lanes, point, obstacle =world(side,radius=radius,origin=origin,yaw=yaw)
     if configure_network is not None:configure_network(lanes)
     config=production_config()
@@ -61,7 +61,7 @@ def run(speed=3.,side='left',radius=math.inf,origin=(0.,0.),yaw=0.,lateral_error
     pose=(*point(0.,lateral_error)[:2],yaw+heading_error)
     dt=1/config.control_rate_hz;velocity=speed/3.6;actual_curvature=0.;distance=0.
     phases=[];rows=[];timings=[];commands=[];measurements=[pose]
-    active_path=control_local_path(original,pose)
+    active_path=control_local_path(original,pose,control_horizon_m)
     pending_paths=[]
     command_delay_ticks=math.ceil(config.command_delay_s/dt-1e-12)+delay_steps
     next_plan=0.;plans=0;max_tracking=max_curvature=max_steer=max_heading=0.
@@ -89,7 +89,7 @@ def run(speed=3.,side='left',radius=math.inf,origin=(0.,0.),yaw=0.,lateral_error
             result=planner.plan(reference['points'],observations,
                 measurement,speed_kmh=velocity*3.6,actual_curvature=measured_turn,now_sec=now,global_reference=original,
                 current_link_id='O0' if (planner.pair is None or planner.pair.original_index.project(measurement)<50.) else 'A1',
-                route_link_ids=['O0','O1'])
+                route_link_ids=['O0','O1'],control_horizon_m=control_horizon_m)
             timings.append((time.perf_counter()-started)*1000);plans+=1
             if not phases or phases[-1]!=result['state']:phases.append(result['state'])
             if planner.selected:
@@ -105,7 +105,7 @@ def run(speed=3.,side='left',radius=math.inf,origin=(0.,0.),yaw=0.,lateral_error
                 break
             # This is the same progress-only window sent by PlanningNode.
             # Future body poses still come solely from the applied PP command.
-            output=control_local_path(result['points'],measurement) if result['active'] else result['points']
+            output=control_local_path(result['points'],measurement,control_horizon_m) if result['active'] else result['points']
             pending_paths.append((now+delay_steps*dt,output))
         while pending_paths and pending_paths[0][0]<=now+1e-12:
             active_path=pending_paths.pop(0)[1]

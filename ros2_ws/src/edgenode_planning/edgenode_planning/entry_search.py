@@ -35,6 +35,9 @@ class EntrySearch:
             return dict(planner._result(),state='VALIDATING',stage='DETECT',blocked=True,
                         points=(),reason='ENTRY_SEARCH_PENDING')
         if self._future is None:
+            # STOP must settle before capturing an expensive search origin.
+            # Speed is km/h. Keep servicing live inputs while coasting ends.
+            if not math.isfinite(speed) or abs(speed)>.2:return pending()
             snapshot=copy(planner);snapshot._obstacle_bounds=dict(planner._obstacle_bounds)
             snapshot._validated_paths={}
             snapshot._map_sweep_cache=type(planner._map_sweep_cache)()

@@ -128,6 +128,37 @@ def test_speed_aware_detection_retains_confirmed_far_hazard_across_empty_frames(
     assert planner.plan(reference,[],(30.,0.,0.),speed_kmh=5.,observation_stamp_ns=6)['state']=='DETECT'
 
 
+@pytest.mark.parametrize('speed',[10.,15.])
+def test_map_geometry_schedules_entry_without_generating_or_admitting_candidates(speed):
+    network,point,obstacle=world();reference=[point(i,0.) for i in range(81)]
+    cfg=AvoidanceConfig(avoid_speed_kmh=speed,steering_slew_limit_radps=.6,
+        lookahead_max_m=12.,lookahead_preview_time_sec=.8,normal_detection_latency_s=1.6)
+    planner=StaticObstaclePlanner(network,config=cfg)
+    result=planner.plan(reference,[obstacle(65.,69.)],(0.,0.,0.),speed_kmh=speed,
+        current_link_id='O0',route_link_ids=['O0','O1'])
+    basis=result['entry_distance_basis']
+    assert result['state']=='NORMAL' and result['points'] is reference
+    assert basis['source']=='map_kinematic_estimate' and basis['pairs']
+    assert 0.<basis['transition_m']<24.+4.
+    expected=(speed/3.6*cfg.normal_detection_latency_s+basis['transition_m']
+        +basis['preparation_m']+cfg.obstacle_margin_m+cfg.normal_detection_margin_m)
+    assert result['detection_trigger_distance_m']==pytest.approx(expected)
+    assert planner.generated_transition_count==0 and planner.selected is None
+    cached=next(iter(planner._detection_pairs.values()))
+    planner.plan(reference,[obstacle(65.,69.)],(1.,0.,0.),speed_kmh=speed,
+        current_link_id='O0',route_link_ids=['O0','O1'])
+    assert next(iter(planner._detection_pairs.values())) is cached
+    planner.reset()
+    assert not planner._detection_pairs and not planner._hazards
+
+
+def test_unknown_map_keeps_conservative_detection_reserve():
+    network,_,_=world();planner=StaticObstaclePlanner(network)
+    distance=planner._detection_entry_distance((0.,0.,0.),'missing',(),None)
+    assert planner._entry_distance_basis['source']=='conservative_fallback'
+    assert distance>=max(planner._entry_lengths())+max(planner.config.entry_start_offsets_m)
+
+
 def test_new_noise_next_to_a_separate_confirmed_hazard_needs_its_own_frames():
     network,point,obstacle=world();reference=[point(i,0.) for i in range(81)]
     planner=StaticObstaclePlanner(network,config=AvoidanceConfig(normal_obstacle_confirmations=2,

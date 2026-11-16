@@ -140,6 +140,7 @@ class StaticObstaclePlanner:
         self._collision_context={};self._failure_context={};self._check_phase=''
         self._map_sweep_cache=OrderedDict()
         self._fixed_sweep_cache=OrderedDict()
+        self._detection_pairs={};self._entry_distance_basis={}
 
     def invalidate_observation(self):
         self.confirmations=0
@@ -203,6 +204,7 @@ class StaticObstaclePlanner:
             obstacle_confirmation_frames=self._normal_detection_frames,
             confirmed_path_obstacles=self._confirmed_path_obstacles,
             detection_trigger_distance_m=self._detection_trigger_m,
+            entry_distance_basis=self._entry_distance_basis,
             clearance_m=self._min_clearance,clearance_is_lower_bound=True,curvature_limit=self.config.curvature_limit,
             entry_commits=self.entry_commits,return_commits=self.return_commits,
             generated_transition_count=self.generated_transition_count,
@@ -465,6 +467,54 @@ class StaticObstaclePlanner:
         # Bound work independently of a pathological parameter value.
         count=min(16,math.ceil((high-low)/step)+1)
         return tuple(sorted(set(base)|{low+i*step for i in range(count)}))
+
+    def _detection_entry_distance(self, pose, current, route, route_index):
+        """Schedule detection from map geometry; never authorize a trajectory.
+
+        A quintic lane displacement supplies curvature/rate lower bounds.
+        The full swept body, boundaries, tracking rollout and live solids
+        still decide every candidate. Missing/complex map evidence keeps the
+        former conservative family bound. Only immutable map pairs are cached.
+        """
+        cfg=self.config;velocity=cfg.avoid_speed_kmh/3.6
+        fallback=max(self._entry_lengths())+max(cfg.entry_start_offsets_m)
+        key=(current,tuple(route),route_index)
+        if key not in self._detection_pairs:
+            pairs=[]
+            for side in ('left','right'):
+                try:
+                    pair=self.network.pair(current,side,list(route),route_link_index=route_index)
+                    if pair is not None:pairs.append(pair)
+                except (ValueError,TypeError,IndexError,OverflowError):pass
+            if len(self._detection_pairs)>=16:self._detection_pairs.clear()
+            self._detection_pairs[key]=tuple(pairs)
+        lengths=[];details=[]
+        for pair in self._detection_pairs[key]:
+            station=pair.original_index.project(pose[:2])
+            rows=[pair.at(station+d) for d in (0.,6.,12.,18.,24.)]
+            if any(row is None for row in rows):continue
+            lateral=max(abs(row['separation']) for row in rows)
+            native=max(abs(k) for k in curvatures([row['original'][0] for row in rows]))
+            available=min(cfg.curvature_limit,cfg.max_lateral_acceleration_mps2/velocity**2)-native
+            rate=cfg.steering_slew_limit_radps or cfg.max_wheel_rate_radps
+            if available<=0 or rate<=0:continue
+            curvature_length=math.sqrt((10./math.sqrt(3.))*lateral/available)
+            rate_length=(60.*cfg.wheelbase_m*lateral*velocity/rate)**(1./3.)
+            required=max(curvature_length,rate_length)
+            supported=next((length for length in self._entry_lengths() if length>=required),None)
+            if supported is None:continue
+            lengths.append(supported)
+            details.append(dict(side=pair.side,separation_m=lateral,native_curvature=native,
+                curvature_length_m=curvature_length,steering_rate_length_m=rate_length,
+                transition_m=supported))
+        length=max(lengths) if lengths else fallback
+        lookahead=calculate_lookahead_distance(cfg.avoid_speed_kmh,cfg.lookahead_min_m,
+            cfg.lookahead_max_m,cfg.lookahead_preview_time_sec)
+        preparation=lookahead+velocity*cfg.command_delay_s
+        self._entry_distance_basis=dict(source='map_kinematic_estimate' if lengths else 'conservative_fallback',
+            transition_m=length,preparation_m=preparation,pairs=details,
+            latency_s=cfg.normal_detection_latency_s,deceleration_mps2=cfg.deceleration_mps2)
+        return length+preparation
 
     def _road_offsets(self, road, reference, side):
         """Probe actual map-supported cross-section, never a guessed width.
@@ -1047,6 +1097,7 @@ class StaticObstaclePlanner:
                 if not blocking:
                     self._normal_detection_frames=0;self._normal_candidate=()
                     self._normal_tracks=[];self._confirmed_path_obstacles=0
+                    self._hazards=();self._detection_trigger_m=None;self._entry_distance_basis={}
                     return self._result(normal_reference)
                 self._hazards=blocking
             front=min(index.project(p) for o in self._hazards for p in o)
@@ -1070,11 +1121,10 @@ class StaticObstaclePlanner:
                     distance=front-actual_front-self.config.obstacle_margin_m
                 if self.config.normal_detection_latency_s>0:
                     target=self.config.avoid_speed_kmh/3.6
-                    entry_lookahead=calculate_lookahead_distance(self.config.avoid_speed_kmh,
-                        self.config.lookahead_min_m,self.config.lookahead_max_m,self.config.lookahead_preview_time_sec)
+                    entry_distance=self._detection_entry_distance(pose,current_link_id,route_link_ids,route_link_index)
                     self._detection_trigger_m=(velocity*self.config.normal_detection_latency_s
                         +max(0.,velocity**2-target**2)/(2*self.config.deceleration_mps2)
-                        +max(self._entry_lengths())+max(self.config.entry_start_offsets_m)+entry_lookahead
+                        +entry_distance
                         +self.config.obstacle_margin_m+self.config.normal_detection_margin_m)
                     if distance>self._detection_trigger_m:return self._result(normal_reference)
                 saved=global_reference if global_reference is not None else reference

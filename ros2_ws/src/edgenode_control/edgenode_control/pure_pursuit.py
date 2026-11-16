@@ -31,6 +31,34 @@ class PurePursuit:
         self.wheelbase_m = wheelbase_m
         self.max_wheel_angle_rad = max_wheel_angle_rad
 
+    def compute_compensated(self, points, x, y, yaw, *, speed_kmh,
+                            measured_curvature, prediction_time_sec,
+                            lookahead_distance_m=2.5):
+        """PP at the predicted response pose, with measured-pose error retained.
+
+        Used only by NORMAL. The ordinary compute() and S4 rollout are
+        unchanged. A bounded constant-curvature prediction changes the target
+        calculation, never the map path or localization frame.
+        """
+        values=(speed_kmh,measured_curvature,prediction_time_sec)
+        if not all(_finite_number(v) for v in values) or speed_kmh<0 or not 0<=prediction_time_sec<=.5:
+            return None
+        measured=self.compute(points,x,y,yaw,lookahead_distance_m)
+        if measured is None or prediction_time_sec==0:return measured
+        distance=speed_kmh/3.6*prediction_time_sec
+        angle=yaw+measured_curvature*distance
+        if abs(measured_curvature)<1e-12:
+            px,py=x+distance*math.cos(yaw),y+distance*math.sin(yaw)
+        else:
+            px=x+(math.sin(angle)-math.sin(yaw))/measured_curvature
+            py=y+(math.cos(yaw)-math.cos(angle))/measured_curvature
+        result=self.compute(points,px,py,angle,lookahead_distance_m)
+        if result is None:return None
+        result['predicted_nearest_distance_m']=result['nearest_distance_m']
+        result['nearest_distance_m']=measured['nearest_distance_m']
+        result['prediction_pose']=(px,py,angle)
+        return result
+
     def compute(self, local_path_points, vehicle_x, vehicle_y, vehicle_yaw_rad,
                 lookahead_distance_m=2.5):
         """Return target/steering diagnostics, or None for unusable input.

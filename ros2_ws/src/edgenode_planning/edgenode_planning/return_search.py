@@ -3,6 +3,7 @@ from concurrent.futures import ProcessPoolExecutor
 from copy import copy
 from multiprocessing import get_context
 import os
+import math
 import time
 
 
@@ -41,6 +42,8 @@ class ReturnSearch:
         if self._context != context:
             self.cancel()
         if self._future is None:
+            if not math.isfinite(speed) or abs(speed)>.2:
+                return 'RETURN_SEARCH_PENDING'
             snapshot = copy(planner)
             snapshot._obstacle_bounds = dict(planner._obstacle_bounds)
             snapshot._validated_paths = {}

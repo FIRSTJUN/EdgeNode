@@ -36,7 +36,7 @@ from .planning_fsm import PlanningFSM
 from .lane_geometry import LaneNetwork
 from .static_obstacle_planner import AvoidanceConfig, StaticObstaclePlanner
 from .lattice_path import CostWeights, control_local_path, curvatures
-from .avoidance_visualization import candidate_markers, candidate_state_marker, diagnostic
+from .avoidance_visualization import candidate_markers, candidate_state_marker, diagnostic, json_safe
 from .sensor_readiness import SensorReadiness
 from .return_search import ReturnSearch
 from .entry_search import EntrySearch
@@ -191,6 +191,10 @@ class PlanningNode(Node):
         self.speed_planner.anticipatory = self.get_parameter('speed_anticipatory_enabled').value
         self.speed_planner.braking_deceleration_mps2 = self.get_parameter('speed_deceleration_mps2').value
         self.speed_planner.reaction_time_s = self.get_parameter('speed_reaction_time_s').value
+        self.declare_parameter('normal_physical_lateral_acceleration_mps2',0.,ParameterDescriptor(read_only=True))
+        self.speed_planner.physical_lateral_acceleration_mps2=self.get_parameter(
+            'normal_physical_lateral_acceleration_mps2').value
+        self.normal_speed_debug_pub=self.create_publisher(String,'/planning/normal_speed_debug',10)
 
         self.declare_parameter('obstacle_topic', '/planning/obstacles')
         self.declare_parameter('obstacle_points_per_cluster', 8, ParameterDescriptor(read_only=True))
@@ -1255,6 +1259,9 @@ class PlanningNode(Node):
         self.map_match_heading_diff_pub.publish(Float32(data=heading_diff))
         self.recommended_speed_pub.publish(Float32(data=recommended_speed))
         self.speed_mode_pub.publish(String(data=speed_mode))
+        normal_debug=getattr(self,'normal_speed_debug_pub',None)
+        if normal_debug is not None:
+            normal_debug.publish(String(data=json.dumps(json_safe(speed_result or {}),allow_nan=False)))
         self.speed_curvature_pub.publish(Float32(data=speed_curvature))
         self.speed_max_curvature_pub.publish(Float32(data=speed_max_curvature))
         self.drive_status_pub.publish(String(data=drive_status))

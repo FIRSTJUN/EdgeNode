@@ -90,6 +90,9 @@ def finish_entry_search(node):
     No new odometry stamp is invented: this must not satisfy the separate
     distinct-pose interlock tested below.
     """
+    if node._entry_search._future is None:
+        node.latest_speed_kmh=0.
+        node.plan()
     assert node._entry_search._future is not None
     node._entry_search._future.result(timeout=20.)
     node.latest_pose_received_ns=node.get_clock().now().nanoseconds
