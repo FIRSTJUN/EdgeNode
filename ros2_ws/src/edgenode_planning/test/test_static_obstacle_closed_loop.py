@@ -89,8 +89,10 @@ def test_current_preview_and_sensing_keep_low_speed_feasible_and_no_limiter_reje
         assert r['entry_commits']==r['return_commits']==1
     else:
         assert not r['success'] and r['failure']['reason']=='STEERING_RATE'
-        assert r['phases']==['NORMAL','DETECT','AVOID_ENTRY','BLOCKED']
-        assert r['entry_commits']==1 and r['return_commits']==0
+        # f4bd332 already reaches RETURN before the unchanged no-slew
+        # steering-rate gate rejects motion. Do not assert its older stage.
+        assert r['phases']==['NORMAL','DETECT','AVOID_ENTRY','AVOID_HOLD','RETURN','BLOCKED']
+        assert r['entry_commits']==r['return_commits']==1
     assert r['min_body_clearance_m']>.25
 
 
@@ -110,7 +112,7 @@ def test_actual_twenty_m_preview_with_early_known_obstacle_reports_current_rollo
         # actuator-rate violation. Pending steering commands are not observed
         # by Planning; every rollout initializes delay from measured turn.
         assert not r['success'] and r['failure']['reason']=='STEERING_RATE'
-        assert r['phases']==['NORMAL','DETECT','AVOID_ENTRY','BLOCKED']
+        assert r['phases']==['NORMAL','DETECT','AVOID_ENTRY','AVOID_HOLD','RETURN','BLOCKED']
         assert r['max_wheel_rate_radps']<.6 and r['clamp_count']==0
 
 

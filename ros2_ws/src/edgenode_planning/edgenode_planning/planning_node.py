@@ -36,7 +36,7 @@ from .planning_fsm import PlanningFSM
 from .lane_geometry import LaneNetwork
 from .static_obstacle_planner import AvoidanceConfig, StaticObstaclePlanner
 from .lattice_path import CostWeights, control_local_path, curvatures
-from .avoidance_visualization import candidate_markers, diagnostic
+from .avoidance_visualization import candidate_markers, candidate_state_marker, diagnostic
 from .sensor_readiness import SensorReadiness
 from .return_search import ReturnSearch
 from .entry_search import EntrySearch
@@ -664,14 +664,24 @@ class PlanningNode(Node):
         self.avoidance_stage_pub.publish(String(data=stage))
         debug=diagnostic(result);debug.setdefault('stage',stage)
         self.avoidance_debug_pub.publish(String(data=json.dumps(debug,allow_nan=False)))
-        key=(id(result.get('candidates')),stage,result['state'],result.get('reason'),result.get('selected_lane'))
+        key=id(result.get('candidates'))
         cache=getattr(self,'_candidate_cache',None)
+        steady=time.monotonic()
         if cache is None or cache[0]!=key:
             markers,self._candidate_marker_ids = candidate_markers(result,stamp,self._candidate_marker_ids)
             self._candidate_cache=(key,markers,result.get('candidates'))
+            self._candidate_bulk_at=steady
         else:
             markers=cache[1]
-            for marker in markers.markers:marker.header.stamp=stamp
+            # A HOLD/recovery text change must not reconstruct hundreds of
+            # fixed polylines or flood DDS/RViz at the sensor cadence. Refresh
+            # geometry within its 2 s lifetime; publish state every cycle.
+            state=candidate_state_marker(result,stamp)
+            if steady-getattr(self,'_candidate_bulk_at',-math.inf)>=.5:
+                markers.markers=[m for m in markers.markers if m.id!=0]+[state]
+                for marker in markers.markers:marker.header.stamp=stamp
+                self._candidate_bulk_at=steady
+            else:markers=MarkerArray(markers=[state])
         self.candidate_pub.publish(markers)
         paths = {'original_lane_center':result.get('original_lane',()),
                  'left_lane_center':result.get('left_lane',()), 'right_lane_center':result.get('right_lane',()),

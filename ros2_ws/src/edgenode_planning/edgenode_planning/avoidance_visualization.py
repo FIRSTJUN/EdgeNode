@@ -50,14 +50,23 @@ def candidate_markers(result, stamp, previous_ids=()):
         cost=f'{c.cost:.3f}' if math.isfinite(c.cost) else 'invalid'
         text.text=f'{c.side} L={c.transition_length_m:g} J={cost} {c.rejection or "SAFE"}'
         markers.append(text)
-    state=marker(0,Marker.TEXT_VIEW_FACING);state.scale.z=.7
-    reference=result.get('original_lane') or result.get('points') or ()
-    if reference:
-        p=reference[0];state.pose.position.x=float(p[0]);state.pose.position.y=float(p[1]);state.pose.position.z=2.
-    state.color.r,state.color.g,state.color.b=(1.,.3,.1) if result['blocked'] else (.2,1.,.4)
-    state.text=f'{result.get("stage",result["state"])} lane={result.get("selected_lane","")} {result.get("reason","")}'
+    state=candidate_state_marker(result,stamp);active.add(0)
     markers.append(state)
     for index in set(previous_ids)-active:
         m=Marker();m.header.frame_id='map';m.header.stamp=stamp
         m.ns='static_avoidance';m.id=index;m.action=Marker.DELETE;markers.append(m)
     return MarkerArray(markers=markers),active
+
+
+def candidate_state_marker(result, stamp):
+    """Small live state overlay, independent of immutable candidate geometry."""
+    state=Marker();state.header.frame_id='map';state.header.stamp=stamp
+    state.ns='static_avoidance';state.id=0;state.type=Marker.TEXT_VIEW_FACING
+    state.action=Marker.ADD;state.pose.orientation.w=1.;state.color.a=1.
+    state.lifetime.sec=2;state.scale.z=.7
+    reference=result.get('original_lane') or result.get('points') or ()
+    if reference:
+        p=reference[0];state.pose.position.x=float(p[0]);state.pose.position.y=float(p[1]);state.pose.position.z=2.
+    state.color.r,state.color.g,state.color.b=(1.,.3,.1) if result['blocked'] else (.2,1.,.4)
+    state.text=f'{result.get("stage",result["state"])} lane={result.get("selected_lane","")} {result.get("reason","")}'
+    return state

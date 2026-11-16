@@ -32,7 +32,7 @@ def test_long_preview_preserves_normal_twenty_metre_output_and_route_progress(no
     assert arc(points)[-1] == pytest.approx(20.)
     assert output(node, 'local_path').poses[-1].pose.position.x == pytest.approx(20.)
     assert kwargs['control_horizon_m'] == 20.
-    assert output(node, 'target_speed').data == 3.
+    assert output(node, 'target_speed').data == node.get_parameter('cruise_speed_kmh').value
     assert node._progress_arc_m == pytest.approx(10.)  # Synthetic route starts at x=-10.
     node.plan(); node.dijkstra_planner.plan.assert_called_once()
 

@@ -40,7 +40,8 @@ def run(speed=3.,side='left',radius=math.inf,origin=(0.,0.),yaw=0.,lateral_error
         heading_error=0.,periods=(.05,),delay_steps=0,brake_to_default=False,
         disappear=False,interrupt_confirmation=False,duration=110.,
         reference_horizon_m=50.,observation_range_m=None,config_overrides=None,
-        obstacle_front_m=35.,obstacle_length_m=4.,configure_network=None):
+        obstacle_front_m=35.,obstacle_length_m=4.,configure_network=None,
+        obstacle_width_m=1.,obstacle_heading_rad=0.):
     lanes, point, obstacle =world(side,radius=radius,origin=origin,yaw=yaw)
     if configure_network is not None:configure_network(lanes)
     config=production_config()
@@ -49,7 +50,13 @@ def run(speed=3.,side='left',radius=math.inf,origin=(0.,0.),yaw=0.,lateral_error
     planner=StaticObstaclePlanner(lanes,config=config)
     local=LocalPathPlanner();pp=PurePursuit(config.wheelbase_m,config.max_wheel_angle_rad)
     original=lanes.links['O0']['points']+lanes.links['O1']['points'][1:]
-    footprint=obstacle(obstacle_front_m,obstacle_front_m+obstacle_length_m)
+    footprint=obstacle(obstacle_front_m,obstacle_front_m+obstacle_length_m,
+                       -obstacle_width_m/2,obstacle_width_m/2)
+    if obstacle_heading_rad:
+        center=point(obstacle_front_m+obstacle_length_m/2,0.)
+        c,s=math.cos(obstacle_heading_rad),math.sin(obstacle_heading_rad)
+        footprint=[(center[0]+c*(x-center[0])-s*(y-center[1]),
+                    center[1]+s*(x-center[0])+c*(y-center[1])) for x,y in footprint]
     obstacles=[footprint];static_obstacles=tuple(tuple(p) for p in footprint)
     pose=(*point(0.,lateral_error)[:2],yaw+heading_error)
     dt=1/config.control_rate_hz;velocity=speed/3.6;actual_curvature=0.;distance=0.

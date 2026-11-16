@@ -136,8 +136,10 @@ class StaticObstaclePlanner:
         self._boundary_contact_reason=''
         self._boundary_check_mode='diagnostic'
         self._road_area=None
+        self._planning_tracking_reserve=0.
         self._collision_context={};self._failure_context={};self._check_phase=''
         self._map_sweep_cache=OrderedDict()
+        self._fixed_sweep_cache=OrderedDict()
 
     def invalidate_observation(self):
         self.confirmations=0
@@ -228,7 +230,7 @@ class StaticObstaclePlanner:
         # Only fixed sampled sweeps use this cache; rollout poses are always
         # checked from the current measured state. Never cache solid clearance.
         boundaries=getattr(self.network,'boundaries',None)
-        key=(self._geometry_context(),id(boundaries),tuple(first),tuple(second)) if prepared is not None else None
+        key=(self._geometry_context(),tuple(first),tuple(second)) if prepared is not None else None
         if key is not None and key in self._map_sweep_cache:
             reason,context=self._map_sweep_cache[key]
             self._map_sweep_cache.move_to_end(key)
@@ -241,13 +243,25 @@ class StaticObstaclePlanner:
         if reason:return reason
         return self._obstacle_safety(first,second,obstacles,prepared=geometry)
 
+    def _fixed_body_geometry(self, first, second):
+        """Reuse exact sampled solids, never quantize measured/rollout poses."""
+        key=(self.body,tuple(first),tuple(second))
+        geometry=self._fixed_sweep_cache.get(key)
+        if geometry is None:
+            geometry=self._body_geometry(first,second)
+            self._fixed_sweep_cache[key]=geometry
+            if len(self._fixed_sweep_cache)>12000:self._fixed_sweep_cache.popitem(last=False)
+        else:self._fixed_sweep_cache.move_to_end(key)
+        return geometry
+
     def _map_sweep_reason(self,first,second,geometry,boundaries):
         if self._road_area is not None:
-            contained=inflate(geometry[0],self.config.tracking_limit_m)
+            margin=self.config.tracking_limit_m+self._planning_tracking_reserve
+            contained=inflate(geometry[0],margin)
             if not self._road_area.covers(contained):
                 self._collision_context=dict(phase=self._check_phase,first_pose=first,second_pose=second,
                     swept_polygon=geometry[0],containment_polygon=contained,
-                    tracking_margin_m=self.config.tracking_limit_m,road_source=self._road_area.source)
+                    tracking_margin_m=margin,road_source=self._road_area.source)
                 return 'ROAD_AREA_UNPROVEN'
         if boundaries is not None:
             boundary_reason = boundaries.swept_reason(geometry[0])
@@ -288,7 +302,10 @@ class StaticObstaclePlanner:
         return ''
 
     def _geometry_context(self):
-        return (id(self.network),self.body,self.config,self._observation_curvature_limit,id(self._road_area))
+        # Retain the loaded map objects, so object-ID reuse cannot revive an
+        # old proof. Map reloads replace these objects; live LiDAR is excluded.
+        return (self.network,getattr(self.network,'boundaries',None),self.body,
+                self.config,self._observation_curvature_limit,self._road_area,self._planning_tracking_reserve)
 
     def _path_safety(self, points, obstacles, speed, geometry_check=True, body_cache=None, curvature_points=None):
         self._check_phase='PATH_SWEEP'
@@ -306,14 +323,14 @@ class StaticObstaclePlanner:
             path_poses=poses(points)
             for a,b in zip(path_poses,path_poses[1:]):
                 if body_cache is None:
-                    reason=self._body_safety(a,b,obstacles)
+                    reason=self._body_safety(a,b,obstacles,prepared=self._fixed_body_geometry(a,b))
                 else:
                     key=(a,b)
                     cached=body_cache.get(key)
                     if cached is None:
                         previous=self._min_clearance;self._min_clearance=math.inf
                         try:
-                            reason=self._body_safety(a,b,obstacles)
+                            reason=self._body_safety(a,b,obstacles,prepared=self._fixed_body_geometry(a,b))
                         finally:
                             clearance=self._min_clearance
                             self._min_clearance=min(previous,clearance)
@@ -449,27 +466,52 @@ class StaticObstaclePlanner:
         count=min(16,math.ceil((high-low)/step)+1)
         return tuple(sorted(set(base)|{low+i*step for i in range(count)}))
 
-    def _road_offsets(self, road, reference, side, required):
+    def _road_offsets(self, road, reference, side):
         """Probe actual map-supported cross-section, never a guessed width.
 
         Sparse initial LiDAR faces need not limit the available passing gap.
         Every proposed value still gets whole-trajectory and PP validation.
-        Stop at the first unsupported interval, including an interior gap.
+        Sample every supported interval, including space beyond a map hole.
+        Full swept containment still rejects trajectories crossing that hole.
         """
         index=PolylineIndex(reference)
         front=min(index.project(p) for o in self._hazards for p in o)
         row=sample(reference,max(0.,min(index.lengths[-1],front)))
         point,tangent=row;sign=1 if side=='left' else -1
-        yaw=math.atan2(tangent[1],tangent[0]);supported=[]
-        for i in range(32):
-            offset=required+i*.2
-            solid=self.body.polygon(point[0]-sign*offset*tangent[1],
-                point[1]+sign*offset*tangent[0],yaw)
-            if not road.covers(inflate(solid,self.config.tracking_limit_m)):break
-            supported.append(offset)
+        yaw=math.atan2(tangent[1],tangent[0]);normal=(-sign*tangent[1],sign*tangent[0])
+        intervals=road.cross_section(point[:2],normal)
+        # Nominal offset search leaves room for the admitted tracking error
+        # AND the next measured-pose rollout's unchanged tracking envelope.
+        margin=2*self.config.tracking_limit_m
+        half=self.body.width_m/2+margin
+        supported=[]
+        def covered(offset):
+            solid=self.body.polygon(point[0]+offset*normal[0],point[1]+offset*normal[1],yaw)
+            return road.covers(inflate(solid,margin))
+        for low,high in intervals:
+            low=max(.2,low+half);high-=half
+            if high<low:continue
+            divisions=max(1,math.ceil((high-low)/.2))
+            previous=None
+            for i in range(divisions+1):
+                offset=low+(high-low)*i/divisions
+                valid=covered(offset)
+                if valid:supported.append(offset)
+                if previous is not None and valid!=previous[1]:
+                    a,b=previous[0],offset
+                    # Refine only an observed validity transition. Each kept
+                    # point has its own proof; never infer coverage of a gap.
+                    for _ in range(8):
+                        mid=(a+b)/2
+                        if covered(mid)==previous[1]:a=mid
+                        else:b=mid
+                    supported.append(a if previous[1] else b)
+                previous=(offset,valid)
         if not supported:return ()
-        low,high=supported[0],supported[-1]
-        return tuple(sorted({low+(high-low)*fraction for fraction in (0.,.25,.5,.75,1.)}))
+        supported=sorted(set(supported))
+        # Bound expensive trajectory searches while spanning the whole proven
+        # section. Solids reject candidates later; they never clip this range.
+        return tuple(sorted({supported[round((len(supported)-1)*i/8)] for i in range(9)}))
 
     def _hazard_clearance(self, points):
         minimum=math.inf
@@ -510,7 +552,10 @@ class StaticObstaclePlanner:
         candidates=[];projection_cache={}
         obstacles=self._entry_obstacles(pair)
         original_area=self._road_area
+        original_reserve=self._planning_tracking_reserve
         self._road_area=getattr(pair,'road_area',None)
+        self._planning_tracking_reserve=(self.config.tracking_limit_m
+            if getattr(pair,'mode','lane')=='road_offset' else 0.)
         def generate(length, offset):
             entry=path=();end=prepared_s+offset+length;cost=math.inf;terms={};clearance=0.
             try:
@@ -570,11 +615,11 @@ class StaticObstaclePlanner:
                         generate(length,offset)
         finally:
             self._road_area=original_area
+            self._planning_tracking_reserve=original_reserve
         return candidates
 
     def _search_entry(self, reference, pose, speed_kmh, actual_curvature, current_link_id,
                       route_link_ids, route_link_index, distance, body_cache=None):
-        ego=max(0.,min(arc(reference)[-1],PolylineIndex(reference).project(pose[:2])))
         pairs=[];all_candidates=[]
         self._entry_context=dict(current_link_id=current_link_id,
             route_occurrences=list(route_link_ids).count(current_link_id),pose=tuple(pose),sides={})
@@ -613,21 +658,32 @@ class StaticObstaclePlanner:
         for road in roads:
             for side in ('left','right'):
                 if side not in road.allowed_sides:continue
-                row=sample(reference,ego);normal=(-row[1][1],row[1][0])
-                laterals=[(p[0]-row[0][0])*normal[0]+(p[1]-row[0][1])*normal[1]
-                          for o in self._hazards for p in o]
-                required=(max(laterals) if side=='left' else -min(laterals))+self.body.width_m/2+self.config.obstacle_margin_m
-                offsets=self._road_offsets(road,reference,side,max(self.body.width_m/2,required))
+                offsets=self._road_offsets(road,reference,side)
                 if not offsets:
                     all_candidates.append(LatticeCandidate(side,(),math.nan,math.nan,math.nan,
                         0.,math.inf,{},'ROAD_AREA_UNPROVEN',mode='road_offset',obstacle_clearance_m=0.))
-                for offset in offsets:
+                explored={}
+                def evaluate_offset(offset):
                     pair=road.offset_pair(self.network,current_link_id,side,list(route_link_ids),
                         offset,route_link_index)
-                    if pair is None:continue
+                    if pair is None:return
                     front_s=min(pair.original_index.project(p) for o in self._hazards for p in o)
                     cs=self._generate_entry(pair,pose,speed_kmh,actual_curvature,front_s,body_cache)
                     all_candidates.extend(cs);pairs.append((pair,cs))
+                    explored[offset]=any(not c.rejection for c in cs)
+                for offset in offsets:evaluate_offset(offset)
+                # Cross-section fit alone does not prove a curved transition.
+                # Refine the gap beyond the farthest WHOLE-trajectory success
+                # instead of losing up to one coarse step of usable road.
+                for _ in range(4):
+                    safe_offsets=[value for value,valid in explored.items() if valid]
+                    if not safe_offsets:break
+                    low=max(safe_offsets)
+                    higher=[value for value in explored if value>low]
+                    if not higher:break
+                    high=min(higher)
+                    if high-low<.01:break
+                    evaluate_offset((low+high)/2)
         self.candidates=tuple(all_candidates)
         safe=[(c,p) for p,cs in pairs for c in cs if not c.rejection]
         if not safe:
@@ -750,21 +806,14 @@ class StaticObstaclePlanner:
         # estimate at those vertices. Use the native centerline for HOLD's
         # curvature, while checking collisions on the entire sampled path.
         if path is self._hold_path:
-            start=self.pair.adjacent_index.project(pose[:2])
-            end=self.pair.adjacent_index.project(path[-1])
-            first=max(0,bisect_right(self.pair.adjacent_arc,start)-2)
-            last=min(len(self.pair.adjacent),bisect_right(self.pair.adjacent_arc,end)+2)
-            kinematic_points=self.pair.adjacent[first:last]
+            kinematic_points=self._hold_kinematic_points(path,pose)
         else:
             kinematic_points=(self.selected.kinematic_points if path is self._return_path
                               and self.selected.kinematic_points else path)
-        key=(id(path),self.remembered)
-        if key not in self._validated_paths:
-            future=fixed_path_suffix(path,station)
-            reason=self._path_safety(future,self.remembered,speed,body_cache=body_cache,curvature_points=kinematic_points)
-            if not reason:self._validated_paths[key]=(path,future)
-        else:
-            reason=self._path_safety(self._validated_paths[key][1],(),speed,geometry_check=False,curvature_points=kinematic_points)
+        # Only map proofs are persistent. Check all current solids against the
+        # remaining path every call, even when a new frame has equal vertices.
+        future=fixed_path_suffix(path,station)
+        reason=self._path_safety(future,self.remembered,speed,body_cache=body_cache,curvature_points=kinematic_points)
         if not reason:reason=self._rollout(path,pose,speed,actual_curvature,self.remembered)
         return reason
 
@@ -775,10 +824,60 @@ class StaticObstaclePlanner:
             end=min(self.pair.adjacent_arc[-1]-self.body.wheelbase_m-self.body.front_overhang_m-1.,
                     station+self.config.prediction_distance_m)
             if end<=station:return self._block('ADJACENT_LANE_END')
-            self._hold_path=center_suffix(self.pair.adjacent,station,end)
+            path=center_suffix(self.pair.adjacent,station,end)
+            if self._road_area is not None:
+                end,reason=self._hold_kinematic_end(station,end,speed)
+                path=center_suffix(self.pair.adjacent,station,end) if end>station else ()
+                path,map_reason=self._map_supported_prefix(path)
+                minimum=max(self._control_horizon_m,self._rollout_distance(speed)+1.)
+                if not path or arc(path)[-1]<minimum:
+                    return self._block(map_reason or reason or 'ROAD_AREA_UNPROVEN')
+            self._hold_path=path
             self._validated_paths.clear()
         reason=self._validate_active(self._hold_path,pose,speed,actual_curvature,body_cache)
         return self._block(reason) if reason else self._result(self._hold_path)
+
+    def _hold_kinematic_points(self, path, pose):
+        start=self.pair.adjacent_index.project(pose[:2])
+        end=self.pair.adjacent_index.project(path[-1])
+        first=max(0,bisect_right(self.pair.adjacent_arc,start)-2)
+        last=min(len(self.pair.adjacent),bisect_right(self.pair.adjacent_arc,end)+2)
+        return self.pair.adjacent[first:last]
+
+    def _hold_kinematic_end(self, start, end, speed):
+        """Stop the guide before a future untrackable corner, never smooth it."""
+        first=max(0,bisect_right(self.pair.adjacent_arc,start)-2)
+        last=min(len(self.pair.adjacent),bisect_right(self.pair.adjacent_arc,end)+2)
+        native=self.pair.adjacent[first:last]
+        for i,k in enumerate(curvatures(native)):
+            reason=('OBSERVATION_CURVATURE_SCOPE' if self._observation_curvature_limit is not None
+                    and abs(k)>self._observation_curvature_limit else
+                    'CURVATURE' if abs(k)>self.config.curvature_limit else
+                    'LATERAL_ACCELERATION' if (speed/3.6)**2*abs(k)>self.config.max_lateral_acceleration_mps2 else '')
+            if reason:
+                # _hold_kinematic_points includes two native neighbors beyond
+                # the guide endpoint. Keep that SAME conservative stencil.
+                return min(end,self.pair.adjacent_arc[first+i]-1e-6),reason
+        return end,''
+
+    def _map_supported_prefix(self, points):
+        """End HOLD before the first unproven sweep; never bridge a map gap.
+
+        Recheck the clipped endpoint's headings as well. The caller requires
+        full control/rollout support and validates every live solid afterward.
+        """
+        reason=''
+        while len(points)>2:
+            self._check_phase='HOLD_MAP_SUPPORT'
+            path_poses=poses(points)
+            for i,(a,b) in enumerate(zip(path_poses,path_poses[1:])):
+                failure=self._body_safety(a,b,(),prepared=self._fixed_body_geometry(a,b))
+                if failure:
+                    reason=failure
+                    points=tuple(points[:i])
+                    break
+            else:return points,reason
+        return (),reason
 
     def _return_clearance_ready(self,pose):
         """Use the same STEP 4 clearance for its pre-search STOP and execution.

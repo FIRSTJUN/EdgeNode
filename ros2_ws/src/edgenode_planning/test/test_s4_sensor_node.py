@@ -147,7 +147,9 @@ def test_armed_mock_outputs_stop_on_failure_and_reset_is_rejected(node, clock):
     feed(node, clock)
     arm_isolated_node(node)  # Only mocked publishers; never a live Control.
     node.plan()
-    assert output(node, 'target_speed').data == 3.  # S4 prospective speed admission cap.
+    # Clear NORMAL uses its configured target; the retired admission cap is
+    # independent of the sensor fault/armed-reset safety contract below.
+    assert output(node, 'target_speed').data == node.get_parameter('cruise_speed_kmh').value
     clock.ns += 1_000_000
     feed(node, clock, seq=2, frame=2, state='INVALID_INPUT')
     assert_stop(node)

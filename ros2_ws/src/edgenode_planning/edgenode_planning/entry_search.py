@@ -38,6 +38,7 @@ class EntrySearch:
             snapshot=copy(planner);snapshot._obstacle_bounds=dict(planner._obstacle_bounds)
             snapshot._validated_paths={}
             snapshot._map_sweep_cache=type(planner._map_sweep_cache)()
+            snapshot._fixed_sweep_cache=type(planner._fixed_sweep_cache)()
             arguments=(reference,pose,speed,curvature,current,route,route_index,distance,{})
             self._context=context;self._pose=pose
             self._future=self._executor.submit(self._search,snapshot,arguments)

@@ -88,6 +88,32 @@ class VerifiedRoadCorridor:
             if len(pieces)>256:return False
         return False
 
+    def cross_section(self, origin, direction):
+        """Exact line intervals in the cell union; preserve unsupported gaps.
+
+        This only bounds offset search. It never proves vehicle containment.
+        """
+        intervals=[]
+        for cell,_ in self.cells:
+            low,high=-math.inf,math.inf
+            for a,b in zip(cell,cell[1:]+cell[:1]):
+                edge=(b[0]-a[0],b[1]-a[1])
+                value=cross(edge,(origin[0]-a[0],origin[1]-a[1]))
+                slope=cross(edge,direction)
+                if abs(slope)<1e-12:
+                    if value<0:break
+                elif slope>0:low=max(low,-value/slope)
+                else:high=min(high,-value/slope)
+                if low>high:break
+            else:
+                if math.isfinite(low) and math.isfinite(high) and low<=high:
+                    intervals.append((low,high))
+        merged=[]
+        for low,high in sorted(intervals):
+            if merged and low<=merged[-1][1]:merged[-1]=(merged[-1][0],max(high,merged[-1][1]))
+            else:merged.append((low,high))
+        return tuple(merged)
+
     def offset_pair(self, network, current, side, route, offset, route_index=None):
         if side not in self.allowed_sides or not math.isfinite(offset) or offset<=0:return None
         if route_index is None:

@@ -188,3 +188,63 @@ def test_road_offset_model_actually_passes_and_returns_inside_explicit_surface(s
     assert result['entry_commits']==result['return_commits']==1
     assert result['min_body_clearance_m']>.25
     assert all(row['inside'] for row in result['rows'])
+
+
+@pytest.mark.parametrize('side,front,length,width,angle', [
+    ('left', 32., 2., 1.6, 20.), ('right', 39., 5., 1.8, -15.),
+    ('left', 47., 6., 2.1, -25.), ('right', 55., 3., 2.4, 30.)])
+def test_sized_rotated_obstacles_pass_and_return_with_independent_road_ground_truth(
+        side, front, length, width, angle):
+    from offline_static_avoidance import run
+    def configure(lanes):
+        lanes.road_corridor=corridor()
+    result=run(10.,side,obstacle_front_m=front,obstacle_length_m=length,
+        obstacle_width_m=width,obstacle_heading_rad=math.radians(angle),
+        configure_network=configure,brake_to_default=True,periods=(.1,),
+        duration=60.,reference_horizon_m=80.,
+        config_overrides=dict(avoid_speed_kmh=10.,steering_slew_limit_radps=.6))
+    assert result['success'],result['failure']
+    assert result['entry_commits']==result['return_commits']==1
+    assert result['min_body_clearance_m']>.25
+    assert all(row['inside'] for row in result['rows'])
+
+
+def test_road_offset_can_pass_and_return_before_a_distant_unproven_map_cap():
+    from offline_static_avoidance import run
+    def configure(lanes):
+        for key in ('O0','O1'):lanes.links[key]['left_lane_change_dst_link_idx']=None
+        lanes.road_corridor=VerifiedRoadCorridor([rect(-15.,95.,-5.5,5.5)],
+            source='surveyed finite road strip; no evidence beyond x=95m',
+            link_ids=('O0','O1'),allowed_sides=('left',))
+    result=run(10.,'left',obstacle_front_m=41.,configure_network=configure,
+        brake_to_default=True,periods=(.1,),duration=50.,reference_horizon_m=80.,
+        config_overrides=dict(avoid_speed_kmh=10.,steering_slew_limit_radps=.6))
+    assert result['success'],result['failure']
+    assert result['entry_commits']==result['return_commits']==1
+    assert result['min_body_clearance_m']>.25
+    assert all(row['inside'] for row in result['rows'])
+
+
+def test_offset_search_refines_whole_path_support_between_coarse_probes():
+    from unittest.mock import patch
+    from edgenode_planning.lattice_path import LatticeCandidate
+    lanes,point,obstacle=world()
+    for key in ('O0','O1'):lanes.links[key]['left_lane_change_dst_link_idx']=None
+    lanes.road_corridor=VerifiedRoadCorridor([rect(-15.,140.,-5.5,5.5)],
+        source='independent synthetic road',link_ids=('O0','O1'),allowed_sides=('left',))
+    p=StaticObstaclePlanner(lanes,config=replace(AvoidanceConfig(),avoid_speed_kmh=10.))
+    tick(p,point,[obstacle()])
+    # Isolate the search policy: the trajectory validator admits a tighter
+    # range than the cross-section probes. Every added probe uses that gate.
+    def validate(pair,*args):
+        offset=pair.adjacent[0][1]-pair.original[0][1]
+        path=tuple(point(i,offset) for i in range(61))
+        rejection='' if offset<=2.6 else 'ROAD_AREA_UNPROVEN'
+        return [LatticeCandidate('left',path,20.,math.nan,math.nan,12.,0.,{},rejection,
+            entry_path=path,mode='road_offset',obstacle_clearance_m=offset)]
+    with patch.object(p,'_road_offsets',return_value=(.2,1.8,3.4,4.2)), \
+            patch.object(p,'_generate_entry',side_effect=validate):
+        result=tick(p,point,[])
+    assert result['state']=='AVOID_ENTRY'
+    assert 2.5<p.selected.obstacle_clearance_m<=2.6
+    assert all(c.rejection for c in p.candidates if c.obstacle_clearance_m>2.6)
