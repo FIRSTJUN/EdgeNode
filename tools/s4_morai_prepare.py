@@ -61,8 +61,12 @@ def main():
         if not future.done() or future.result() is None:raise RuntimeError('service timeout')
         return future.result()
     try:
-        end=time.monotonic()+1.
-        while time.monotonic()<end:rclpy.spin_once(node,timeout_sec=.05)
+        end=time.monotonic()+5.
+        while time.monotonic()<end:
+            rclpy.spin_once(node,timeout_sec=.05)
+            if all(time.monotonic()-received.get(k,0)<.6
+                   for k in ('link','ego','collision')):
+                break
         getter=node.create_client(GetParameters,'/planning_node/get_parameters')
         names=['enable_drive','mgeo_dir']
         params=dict(zip(names,map(parameter_value_to_python,

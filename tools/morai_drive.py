@@ -129,7 +129,7 @@ def main():
         raise KeyboardInterrupt()
     for sig in (signal.SIGTERM, signal.SIGINT): signal.signal(sig, interrupt)
     try:
-        node.spin(1.5)
+        node.spin(5.0)
         if args.command == 'stop':
             summary['stop_confirmed'] = node.stop()
             if not summary['stop_confirmed']: raise RuntimeError('physical stop not confirmed')
