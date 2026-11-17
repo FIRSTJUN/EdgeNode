@@ -21,7 +21,8 @@ def diagnostic(result):
     values['candidates']=[dict(side=c.side,entry_end_s=c.entry_end_s,return_start_s=c.return_start_s,
         return_end_s=c.return_end_s,transition_length_m=c.transition_length_m,cost=c.cost,
         cost_terms=c.cost_terms,rejection=c.rejection,mode=c.mode,
-        entry_start_offset_m=c.entry_start_offset_m,obstacle_clearance_m=c.obstacle_clearance_m)
+        entry_start_offset_m=c.entry_start_offset_m,obstacle_clearance_m=c.obstacle_clearance_m,
+        complete_offset=c.complete_offset,complete_return=c.complete_return)
         for c in result.get('candidates',())]
     return json_safe(values)
 

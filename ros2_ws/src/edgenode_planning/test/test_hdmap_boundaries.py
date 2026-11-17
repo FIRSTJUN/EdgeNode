@@ -79,3 +79,39 @@ def test_explicit_return_denial_invalidates_even_a_cached_offset_certificate(bou
 def test_current_unmarked_intersection_cannot_supply_an_offset_certificate(boundaries):
     network=LaneNetwork(DijkstraPlanner(ROOT/'local_data/kcity_mgeo'));network.boundaries=boundaries
     assert network.pair('A219BS010469','right',['A219BS010469']) is None
+
+
+def native_ring_world():
+    from types import SimpleNamespace
+    network=SimpleNamespace(valid={'lane'},links={'lane':dict(link_type='6',
+        points=[(0.,0.,0.),(10.,0.,0.),(20.,0.,0.)])})
+    boundary=HDMapBoundaries.__new__(HDMapBoundaries)
+    boundary.aligned_links={'lane'};boundary.observed_sides={}
+    for side,y in (('right',-2.5),('left',2.5)):
+        boundary.observed_sides['lane',side]=[(dict(ID=side,Kind='505',Type='211'),
+            [[(0.,y,0.),(10.,y,0.),(20.,y,0.)]])]
+    return boundary,network
+
+
+def test_single_lane_ring_keeps_measured_caps_and_solid_boundaries():
+    from shapely.geometry import Polygon,Point
+    boundary,network=native_ring_world()
+    key,ring,ids=next(boundary.measured_lane_rings(network))
+    assert key=='lane' and ids==('right','left')
+    polygon=Polygon(ring)
+    assert polygon.covers(Point(10.,2.)) and not polygon.covers(Point(21.,0.))
+    # Geometry proves the interior; Type 211 has not become crossing permission.
+    assert boundary.observed_sides['lane','left'][0][0]['Type']=='211'
+
+
+@pytest.mark.parametrize('damage',['missing','ambiguous','unknown','caps','intersection','unaligned','self_crossing'])
+def test_uncertain_native_rings_never_create_surface_evidence(damage):
+    boundary,network=native_ring_world()
+    if damage=='missing':boundary.observed_sides.pop(('lane','left'))
+    elif damage=='ambiguous':boundary.observed_sides['lane','left']*=2
+    elif damage=='unknown':boundary.observed_sides['lane','left'][0][0]['Type']='999'
+    elif damage=='caps':boundary.observed_sides['lane','left'][0][1][0][0]=(5.,2.5,0.)
+    elif damage=='intersection':network.links['lane']['link_type']='1'
+    elif damage=='unaligned':boundary.aligned_links.clear()
+    else:boundary.observed_sides['lane','left'][0][1][0][1]=(10.,-3.,0.)
+    assert not list(boundary.measured_lane_rings(network))

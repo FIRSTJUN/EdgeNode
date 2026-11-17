@@ -88,13 +88,28 @@ def report(directory,run_safety_audit=True):
     physical_stops=0;moving=False;previous_target=None;previous_ego=None
     lane_index=None;lane_points=None;lane_id=None;acquired_since=None;acquired_measure=None
     rejoin_since=None;rejoin_measure=None
+    maneuver_rejoins={};maximum_commits=0
+    offset_selected=False;strategy_sequence=[]
+    resumed_targets=[];resumed_speeds=[];resumed_caps=[]
+    whole_drive_stops=whole_drive_zero_targets=0;whole_drive_moving=False;whole_drive_zero=False
+    whole_drive_motion_observed=False;stage_speeds={}
     for row in rows:
         values=row['values'];ego=values.get('/ego_vehicle_status',{});debug=values.get('/planning/avoidance_debug',{})
         if not ego:continue
+        maximum_commits=max(maximum_commits,debug.get('entry_commits',0))
         convergence=values.get('/localization/grid_convergence_deg',convergence)
         measure=dict(event_metrics(ego,convergence,index,target,body),t_s=row['t'])
         station=index.project((ego['x'],ego['y']));point,tangent=sample(route,max(0.,min(index.lengths[-1],station)))
         lateral=-tangent[1]*(ego['x']-point[0])+tangent[0]*(ego['y']-point[1])
+        offset_selected=offset_selected or debug.get('selected_mode')=='road_offset'
+        strategy=debug.get('selected_strategy')
+        if debug.get('entry_commits',0) and debug.get('stage') in ('AVOID_ENTRY','AVOID_HOLD','RETURN'):
+            if strategy and (not strategy_sequence or strategy!=strategy_sequence[-1]):strategy_sequence.append(strategy)
+            pose=(ego['x'],ego['y'],math.radians(ego['heading_deg']+convergence))
+            if ('obstacle_passed' not in events and ego['speed_kmh']>1. and
+                    min(index.project(p) for p in body.polygon(*pose))>max(index.project(p) for p in target)):
+                events['obstacle_passed']=dict(measure,global_cross_track_m=lateral,
+                    measurement='Moving measured Ego rear passed the measured obstacle front along the saved route')
         if initial_lateral is None:initial_lateral=lateral
         key=debug.get('state'),debug.get('reason')
         if key!=previous_key:
@@ -102,12 +117,24 @@ def report(directory,run_safety_audit=True):
             validation_waits+=key[1]=='WAIT_FRESH_VALIDATION' and (previous_key is None or previous_key[1]!='WAIT_FRESH_VALIDATION')
         previous_key=key
         stage=debug.get('stage');xy=(ego['x'],ego['y'])
+        stage_speeds.setdefault(stage,[]).append(ego['speed_kmh'])
+        if ego['speed_kmh']>1.:
+            whole_drive_moving=True;whole_drive_motion_observed=True
+        if whole_drive_moving and ego['speed_kmh']<.2:
+            whole_drive_stops+=1;whole_drive_moving=False
+        zero_after_motion=whole_drive_motion_observed and values.get('/planning/target_speed',0.)==0.
+        if zero_after_motion and not whole_drive_zero:whole_drive_zero_targets+=1
+        whole_drive_zero=zero_after_motion
+        if stage=='NORMAL' and debug.get('entry_commits',0)>0 and ego['speed_kmh']>1.:
+            resumed_targets.append(values.get('/planning/target_speed',0.))
+            resumed_speeds.append(ego['speed_kmh']);resumed_caps.append(debug.get('speed_cap_kmh'))
         planning_ms=values.get('/planning/diagnostics',{}).get('planning_elapsed_ms')
         if stage in ('AVOID_ENTRY','AVOID_HOLD','RETURN') and planning_ms is not None:planning_times.append(planning_ms)
         if stage=='AVOID_HOLD' and previous_stage=='AVOID_HOLD' and previous_xy is not None:
             lane_distance+=math.dist(previous_xy,xy)
         previous_xy,previous_stage=xy,stage
         token=debug.get('committed_lane_token') or debug.get('selected_lane')
+        if debug.get('selected_mode')=='road_offset':token='FIXED_OFFSET_MANEUVER'
         if token and debug.get('entry_commits',0) and (not lane_tokens or token!=lane_tokens[-1]):lane_tokens.append(token)
         if debug.get('entry_commits',0) and stage in ('AVOID_ENTRY','AVOID_HOLD','RETURN'):
             if ego['speed_kmh']>1.:moving=True
@@ -168,6 +195,8 @@ def report(directory,run_safety_audit=True):
         if not joined:rejoin_since=rejoin_measure=None
         if rejoin_since is not None and row['t']-rejoin_since>=.3 and 'global_rejoin_observed' not in events:
             events['global_rejoin_observed']=rejoin_measure
+        if rejoin_since is not None and row['t']-rejoin_since>=.3:
+            maneuver_rejoins.setdefault(debug['entry_commits'],rejoin_measure)
         if values.get('/planning/target_speed',0.)>0:movement_started=True
         if movement_started:
             empty=values.get('/planning/local_path',{}).get('points',0)<2
@@ -198,12 +227,15 @@ def report(directory,run_safety_audit=True):
         not any(integrity.get(k,1) for k in ('nonzero_collision_messages','empty_local_path_episodes',
             'sensor_hold_episodes','fresh_validation_wait_episodes','zero_target_episodes_during_avoidance')) and
         integrity.get('maximum_local_path_publication_gap_s',math.inf)<=.6)
+    actual_passage=('lateral_motion_start' in events and 'obstacle_passed' in events) if offset_selected else 'lane_change_complete' in events
+    all_maneuvers_rejoined=bool(maximum_commits and
+        set(range(1,maximum_commits+1)).issubset(maneuver_rejoins))
     strict=bool(summary.get('success') and summary.get('restored') and min_gap>0 and
         safety.get('road_area_checked_samples',0)>0 and safety.get('measured_ego_box_used') and
         not any((safety['collision_samples'],safety['forbidden_boundary_contact_samples'],
                  safety.get('measured_ego_box_boundary_contacts'),sensor_holds,validation_waits,
                  path_losses,stale_paths,stops,physical_stops)) and containment and complete_streams and
-        'lane_change_complete' in events and 'global_rejoin_observed' in events)
+        actual_passage and all_maneuvers_rejoined)
     def elapsed(first,last):
         begin,end=events.get(first),events.get(last)
         return end['t_s']-begin['t_s'] if begin and end and 't_s' in begin and 't_s' in end else None
@@ -216,12 +248,24 @@ def report(directory,run_safety_audit=True):
         lane_completion_measurement='Moving EgoStatus within 0.20 m and 3 degrees of the selected MGeo native centerline for >=0.30 s',
         global_rejoin_measurement='Moving NORMAL with ready sensors, GPS global cross-track <=0.20 m and heading error <=3 degrees for >=0.30 s',
         actual_lane_acquisition_observed='lane_change_complete' in events,
+        actual_offset_passage_observed=offset_selected and actual_passage,
+        strategy_sequence=strategy_sequence,
+        normal_resumed_max_target_kmh=max(resumed_targets,default=None),
+        normal_resumed_peak_actual_kmh=max(resumed_speeds,default=None),
+        s4_speed_cap_cleared_after_return=bool(resumed_caps) and all(cap is None for cap in resumed_caps),
         actual_global_rejoin_observed='global_rejoin_observed' in events,
+        committed_maneuver_count=maximum_commits,
+        all_committed_maneuvers_rejoined=all_maneuvers_rejoined,
+        observed_moving_global_rejoins=[dict(entry_commit=key,**measure) for key,measure in sorted(maneuver_rejoins.items())],
         minimum_measured_body_obstacle_gap_m=min_gap,maximum_lateral_tracking_error_m=max_error,
         sensor_hold_episodes=sensor_holds,fresh_validation_wait_episodes=validation_waits,
         local_path_loss_episodes=path_losses,stale_local_path_samples=stale_paths,
         zero_target_episodes_after_entry=stops,
         physical_stop_episodes_after_entry=physical_stops,
+        physical_stop_episodes_whole_drive=whole_drive_stops,
+        zero_target_episodes_whole_drive_after_motion=whole_drive_zero_targets,
+        whole_drive_stop_measurement='Measured speed above 1 km/h followed by below 0.2 km/h, including DETECT approach; supervisor restoration is outside samples',
+        stage_actual_speed_ranges_kmh={key:dict(minimum=min(speeds),maximum=max(speeds)) for key,speeds in stage_speeds.items()},
         lidar_detection_to_path_commit_s=elapsed('first_lidar_detection','lattice_committed'),
         planner_detection_to_path_commit_s=elapsed('planner_detection','lattice_committed'),
         lateral_movement_to_lane_change_complete_s=elapsed('lateral_motion_start','lane_change_complete'),

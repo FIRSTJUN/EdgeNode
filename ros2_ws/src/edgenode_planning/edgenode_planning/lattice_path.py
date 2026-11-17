@@ -126,6 +126,8 @@ class LatticeCandidate:
     entry_start_offset_m: float = 0.
     mode: str = 'lane'
     obstacle_clearance_m: float = math.inf
+    complete_offset: bool = False
+    complete_return: bool = False
 
 
 @dataclass(frozen=True)

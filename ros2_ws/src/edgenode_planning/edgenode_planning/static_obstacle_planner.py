@@ -18,6 +18,7 @@ from .lattice_path import (LatticeCandidate, CostWeights, center_suffix, control
 from .vehicle_geometry import sonata_geometry
 from .lane_continuation import continuation
 from .maneuver_selection import ManeuverSelection,Situation,Strategy
+from .planning_provenance import implementation_sha256
 
 
 @dataclass(frozen=True)
@@ -116,6 +117,7 @@ class StaticObstaclePlanner:
         self.config=config or AvoidanceConfig();self.weights=weights or CostWeights()
         self.body=sonata_geometry()
         self.pp=PurePursuit(self.config.wheelbase_m,self.config.max_wheel_angle_rad)
+        self._implementation_sha256=implementation_sha256()
         self.reset()
 
     def reset(self):
@@ -204,6 +206,7 @@ class StaticObstaclePlanner:
     def _result(self, path=(), *, speed_cap=None):
         active=self.state!='NORMAL' or speed_cap is not None
         return dict(state=self.state,stage=self.state,points=[] if self.state=='BLOCKED' else path,
+            implementation_sha256=self._implementation_sha256,
             blocked=self.state=='BLOCKED',reason=self.reason,active=active,
             boundary_contact_reason=self._boundary_contact_reason,
             boundary_check_mode=self._boundary_check_mode,
@@ -292,7 +295,16 @@ class StaticObstaclePlanner:
                     tracking_margin_m=margin,road_source=self._road_area.source)
                 return 'ROAD_AREA_UNPROVEN'
         if boundaries is not None:
-            boundary_reason = boundaries.swept_reason(geometry[0])
+            boundary_polygon=geometry[0]
+            if (getattr(self,'complete_offset_search',False) and
+                    (self._road_area is not None or getattr(self,'_complete_return_proof_active',False) or
+                     getattr(self.selected,'complete_return',False))):
+                # The original measured-body gate is still mandatory. A fixed
+                # offset also needs room for admitted tracking error at internal
+                # solid dividers, not only at the outside of the road polygon.
+                boundary_polygon=inflate(boundary_polygon,
+                    self.config.tracking_limit_m+self._planning_tracking_reserve)
+            boundary_reason = boundaries.swept_reason(boundary_polygon)
             if boundary_reason:
                 self._collision_context=dict(phase=self._check_phase,first_pose=first,second_pose=second,
                     swept_polygon=geometry[0],boundary_reason=boundary_reason)
@@ -350,16 +362,35 @@ class StaticObstaclePlanner:
                 if body_cache.get('context')!=context:
                     body_cache.clear();body_cache['context']=context
             path_poses=poses(points)
-            for a,b in zip(path_poses,path_poses[1:]):
+            segments=tuple((a,b,self._fixed_body_geometry(a,b)) for a,b in zip(path_poses,path_poses[1:]))
+            if obstacles and segments and getattr(self,'complete_offset_search',False):
+                # Exact bounds of the SAME swept solids/axle envelopes used
+                # below. A distant roadside cluster cannot violate either
+                # clearance floor; retain every possible collision for the
+                # unchanged polygon-distance check. No spatial quantization.
+                def union_bounds(values):
+                    return (min(v[0] for v in values),max(v[1] for v in values),
+                            min(v[2] for v in values),max(v[3] for v in values))
+                body_bounds=union_bounds([g[1] for a,b,g in segments])
+                axle_bounds=union_bounds([g[2] for a,b,g in segments])
+                nearby=[]
+                for obstacle in obstacles:
+                    bounds=polygon_bounds(obstacle);lower=bounds_distance(body_bounds,bounds)
+                    if (lower<=self.config.obstacle_margin_m or
+                            bounds_distance(axle_bounds,bounds)<self.config.reference_clearance_m):
+                        nearby.append(obstacle)
+                    else:self._min_clearance=min(self._min_clearance,lower)
+                obstacles=tuple(nearby)
+            for a,b,geometry in segments:
                 if body_cache is None:
-                    reason=self._body_safety(a,b,obstacles,prepared=self._fixed_body_geometry(a,b))
+                    reason=self._body_safety(a,b,obstacles,prepared=geometry)
                 else:
                     key=(a,b)
                     cached=body_cache.get(key)
                     if cached is None:
                         previous=self._min_clearance;self._min_clearance=math.inf
                         try:
-                            reason=self._body_safety(a,b,obstacles,prepared=self._fixed_body_geometry(a,b))
+                            reason=self._body_safety(a,b,obstacles,prepared=geometry)
                         finally:
                             clearance=self._min_clearance
                             self._min_clearance=min(previous,clearance)
@@ -589,13 +620,26 @@ class StaticObstaclePlanner:
         margin=2*self.config.tracking_limit_m
         half=self.body.width_m/2+margin
         supported=[]
+        complete_search=getattr(self,'complete_offset_search',False)
+        passage_solids=(tuple(inflate(o,2*self.config.tracking_limit_m+self.config.observation_padding_m)
+                              for o in self.remembered) if complete_search else self.remembered)
+        evidence=dict(source=road.source,side=side,probe_point_xy=tuple(point[:2]),
+            intervals_m=intervals,reference_body_covered=road.covers(inflate(
+                self.body.polygon(point[0],point[1],yaw),margin)),
+            road_fit_probes=0,obstacle_rejected_probes=0,boundary_rejected_probes=0)
+        self._entry_context.setdefault('road_cross_sections',[]).append(evidence)
         def covered(offset):
             solid=self.body.polygon(point[0]+offset*normal[0],point[1]+offset*normal[1],yaw)
             if not road.covers(inflate(solid,margin)):return False
+            evidence['road_fit_probes']+=1
             if self.config.continuous_lane_follow:
-                if any(polygon_distance(solid,o)<=self.config.obstacle_margin_m for o in self.remembered):return False
+                if any(polygon_distance(solid,o)<=self.config.obstacle_margin_m or
+                       complete_search and polygon_distance(((point[0]+offset*normal[0],point[1]+offset*normal[1]),),o)<self.config.reference_clearance_m
+                       for o in passage_solids):
+                    evidence['obstacle_rejected_probes']+=1;return False
                 boundaries=getattr(self.network,'boundaries',None)
-                if boundaries is not None and boundaries.swept_reason(solid):return False
+                if boundaries is not None and boundaries.swept_reason(solid):
+                    evidence['boundary_rejected_probes']+=1;return False
             return True
         for low,high in intervals:
             low=max(.2,low+half);high-=half
@@ -622,6 +666,9 @@ class StaticObstaclePlanner:
                         else:b=mid
                     supported.append(a if previous[1] else b)
                 previous=(offset,valid)
+        evidence['supported_probes']=len(supported)
+        evidence['classification']=('SUPPORTED_PASSING_SECTION' if supported else
+            'NO_PASSING_CLEARANCE' if evidence['reference_body_covered'] else 'ROAD_EVIDENCE_MISSING')
         if not supported:return ()
         supported=sorted(set(supported))
         # Bound expensive trajectory searches while spanning the whole proven
@@ -829,7 +876,8 @@ class StaticObstaclePlanner:
                 cfg.lookahead_max_m,cfg.lookahead_preview_time_sec))
 
     def _search_entry(self, reference, pose, speed_kmh, actual_curvature, current_link_id,
-                      route_link_ids, route_link_index, distance, body_cache=None):
+                      route_link_ids, route_link_index, distance, body_cache=None, *,
+                      lane_search_exhausted=False):
         pairs=[];all_candidates=[]
         self._entry_context=dict(current_link_id=current_link_id,
             route_occurrences=list(route_link_ids).count(current_link_id),pose=tuple(pose),sides={})
@@ -871,11 +919,13 @@ class StaticObstaclePlanner:
             chosen=self._maneuver_selection.select(Situation(
                 context=(current_link_id,tuple(route_link_ids)),static_path_blocked=True,
                 moving_conflict=getattr(self,'_moving_conflict',False),
-                lane_topology_clear=kind in ('6',6) and bool(pairs),road_area_verified=bool(roads),
+                lane_topology_clear=not lane_search_exhausted and kind in ('6',6) and bool(pairs),
+                road_area_verified=bool(roads),
                 replan_required=True))
             self._strategy=chosen.strategy
             self._entry_context.update(strategy=chosen.strategy.value,strategy_reason=chosen.reason,
                 strategy_generation=chosen.generation)
+            if lane_search_exhausted:self._entry_context['lane_search_exhausted']=True
             if chosen.strategy==Strategy.BLOCKED:return self._block(chosen.reason)
             if chosen.strategy==Strategy.DYNAMIC_TRAFFIC:
                 return self._block('DYNAMIC_TRAJECTORY_SEARCH_NOT_READY')
@@ -972,6 +1022,11 @@ class StaticObstaclePlanner:
         offset_return_proofs={}
         if self.config.continuous_lane_follow:
             feasible=[];rejected={}
+            # The complete-offset solver ranks by the same final cost. Prove
+            # the best candidate first and stop at its first complete success;
+            # proving every more expensive duplicate consumes the entry window.
+            complete_search=getattr(self,'complete_offset_search',False)
+            if complete_search:safe.sort(key=lambda row:(row[0].cost,-row[0].obstacle_clearance_m))
             for candidate,pair in safe:
                 if candidate.mode!='road_offset':
                     feasible.append((candidate,pair));continue
@@ -979,6 +1034,7 @@ class StaticObstaclePlanner:
                 if proof is not None:
                     feasible.append((candidate,pair))
                     offset_return_proofs[id(candidate)]=proof
+                    if complete_search:break
                 else:rejected[id(candidate)]=replace(candidate,rejection='OFFSET_RETURN_UNPROVEN')
             if rejected:
                 self.candidates=tuple(rejected.get(id(c),c) for c in self.candidates)
@@ -1194,7 +1250,10 @@ class StaticObstaclePlanner:
                 reason=''
                 if not getattr(self.network,'morai_unmarked_junction_experiment',False):
                     end,reason=self._hold_kinematic_end(station,end,speed)
-                path=center_suffix(self.pair.adjacent,station,end) if end>station else ()
+                # station/end belong to the selected continuation guide.
+                # A surveyed native lane may extend beyond the original pair;
+                # never interpret its stations on that shorter polyline.
+                path=center_suffix(guide,station,end) if end>station else ()
                 path,map_reason=self._map_supported_prefix(path)
                 minimum=(self._rollout_distance(speed)+1. if self.config.continuous_lane_follow else
                          max(self._control_horizon_m,self._rollout_distance(speed)+1.))
@@ -1554,6 +1613,8 @@ class StaticObstaclePlanner:
         if not pending_return:
             reason=self._accept_motion_progress(progress)
             if reason:return self._block(reason)
+        if getattr(self.selected,'complete_return',False):
+            return self._follow_complete_maneuver(normal_reference,pose,speed_kmh,actual_curvature,progress,body_cache)
         if self.state=='AVOID_ENTRY':
             reason=self._validate_active(self.selected.entry_path,pose,speed_kmh,actual_curvature,body_cache)
             if reason:

@@ -7,7 +7,7 @@ import math
 import sqlite3
 from pathlib import Path
 
-from edgenode_planning.avoidance_geometry import obstacle_polygons, polygon_distance, swept_body
+from edgenode_planning.avoidance_geometry import obstacle_polygons, polygon_distance, swept_body, polygon_bounds, bounds_distance
 from edgenode_planning.vehicle_geometry import sonata_geometry,VerifiedVehicleGeometry
 from edgenode_planning.hdmap_boundaries import HDMapBoundaries
 from edgenode_planning.dijkstra_planner import DijkstraPlanner
@@ -128,12 +128,12 @@ def bag_integrity(directory,summary):
         fresh_validation_wait_episodes=waits,zero_target_episodes_during_avoidance=stops)
 
 
-def audit(directory):
+def audit(directory,*,boundaries=None):
     summary=json.loads((directory/'summary.json').read_text())
     rows=[json.loads(line) for line in (directory/'samples.jsonl').read_text().splitlines()]
     if rows and 'solids' not in rows[0] and (directory/'bag').exists():rows=bag_rows(directory)
     body=sonata_geometry()
-    boundaries=HDMapBoundaries('/workspace/local_data/kcity_hdmap','/workspace/local_data/kcity_mgeo')
+    boundaries=boundaries or HDMapBoundaries('/workspace/local_data/kcity_hdmap','/workspace/local_data/kcity_mgeo')
     area=None
     for row in rows:
         debug=row['values'].get('/planning/avoidance_debug',{})
@@ -141,7 +141,10 @@ def audit(directory):
         if not (start and side):continue
         routing=DijkstraPlanner('/workspace/local_data/kcity_mgeo')
         saved=yaml.safe_load(Path('/workspace/local_data/kcity_routes/kcity_demo_route.yaml').read_text())
-        route=mission_suffix(routing,'A219BS010380',saved['waypoint_node_ids'],start)
+        goal=summary.get('trial_spec',{}).get('alternate_goal_node')
+        route=(routing.plan_route(start,[goal]) if goal else
+               mission_suffix(routing,'A219BS010380',saved['waypoint_node_ids'],start))
+        if not route:raise ValueError('recorded alternate route has no directed map connection')
         network=LaneNetwork(routing,morai_unmarked_junction_experiment=debug.get(
             'entry_context',{}).get('morai_unmarked_junction_experiment',False))
         network.boundaries=boundaries
@@ -224,7 +227,10 @@ def audit(directory):
                 if measured_polygon is not None and not area.covers(measured_polygon):
                     measured_outside.append(dict(t_s=row['t'],stage=stage))
             solids=obstacle_polygons(row.get('solids',[]))
-            if solids:clearance=min(clearance,*(polygon_distance(polygon,solid) for solid in solids))
+            bounds=polygon_bounds(polygon)
+            for solid in solids:
+                if bounds_distance(bounds,polygon_bounds(solid))<clearance:
+                    clearance=min(clearance,polygon_distance(polygon,solid))
     stop_values=summary.get('before_restore',{}).get('values',{})
     stopped_ego=stop_values.get('/ego_vehicle_status',{})
     stop_convergence=stop_values.get('/localization/grid_convergence_deg')

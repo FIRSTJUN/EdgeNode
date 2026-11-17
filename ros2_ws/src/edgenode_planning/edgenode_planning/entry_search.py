@@ -21,12 +21,14 @@ class EntrySearch:
         self.elapsed_ms=0.
         self._prefix=()
         self._pending_prefix=()
+        self._anchor={}
 
     def cancel(self):
         if self._future is not None:self._future.cancel()
         self._future=self._context=self._pose=None
         self._prefix=()
         self._pending_prefix=()
+        self._anchor={}
 
     def close(self):
         self.cancel();self._executor.shutdown(wait=False,cancel_futures=True)
@@ -83,6 +85,7 @@ class EntrySearch:
                 guide=planner._entry_replan_guide or planner._global_path
                 index=PolylineIndex(guide);station=max(0.,index.project(pose[:2]))
                 advance=max(4.,max(speed,planner.config.avoid_speed_kmh)/3.6*max(2.,self.elapsed_ms/1000.+1.))
+                requested_advance=advance
                 if planner.config.optimize_entry_onset:
                     target_speed=planner.config.avoid_speed_kmh/3.6;velocity=max(0.,speed)/3.6
                     braking=max(0.,velocity**2-target_speed**2)/(2*planner.config.deceleration_mps2)
@@ -94,11 +97,29 @@ class EntrySearch:
                 if planner._entry_replan_guide:
                     available=arc(planner._entry_pending_path)[-1]
                     advance=min(advance,max(1.,available-planner._rollout_distance(speed)))
+                elif not planner.config.optimize_entry_onset:
+                    # A slow previous solver must not move this search origin
+                    # through the CURRENT obstruction. Reserve the native
+                    # transition and PP preparation before its nearest face.
+                    basis=planner._entry_distance_basis
+                    transition=(basis['transition_m'] if basis.get('source')=='map_kinematic_estimate'
+                                else min(planner.config.transition_lengths_m))
+                    velocity=max(speed,planner.config.avoid_speed_kmh)/3.6
+                    from edgenode_control.dynamic_lookahead import calculate_lookahead_distance
+                    preparation=calculate_lookahead_distance(velocity*3.6,planner.config.lookahead_min_m,
+                        planner.config.lookahead_max_m,planner.config.lookahead_preview_time_sec)+velocity*planner.config.command_delay_s
+                    budget=max(0.,distance-transition-preparation-
+                        planner.config.tracking_limit_m-planner.config.observation_padding_m)
+                    advance=min(advance,budget)
+                    self._anchor=dict(requested_advance_m=requested_advance,advance_m=advance,
+                        available_obstacle_gap_m=distance,transition_reserve_m=transition,
+                        preparation_reserve_m=preparation,previous_search_ms=self.elapsed_ms)
                 target=sample(guide,station+advance)
                 if target is None:return pending()
                 point,tangent=target;search_pose=(*point[:2],math.atan2(tangent[1],tangent[0]))
                 search_curvature=curvature_at(guide,station+advance)
-                prefix=center_suffix(guide,station,station+advance)
+                if advance>1e-6:prefix=center_suffix(guide,station,station+advance)
+                else:search_pose=pose;search_curvature=curvature
                 if planner.config.optimize_entry_onset and not planner._entry_replan_guide:
                     entry_distance=planner._detection_entry_distance(pose,current,route,route_index)
                     basis=planner._entry_distance_basis
@@ -129,6 +150,7 @@ class EntrySearch:
         if planner.config.optimize_entry_onset and speed>planner.config.avoid_speed_kmh+.2:
             return pending()  # Compute during braking; never execute a lateral maneuver at that speed.
         future=self._future;search_pose=self._pose;prefix=self._prefix
+        anchor=self._anchor
         self._future=self._context=self._pose=None
         self._prefix=()
         result,snapshot,generated,self.elapsed_ms=future.result()
@@ -142,7 +164,7 @@ class EntrySearch:
         for name in ('candidates','_entry_context','left_lane','right_lane','candidate_lane_batches'):
             setattr(planner,name,getattr(snapshot,name))
         planner._entry_context['entry_search_elapsed_ms']=self.elapsed_ms
-        planner._entry_context['entry_search_elapsed_ms']=self.elapsed_ms
+        if anchor:planner._entry_context['entry_search_anchor']=anchor
         if result['blocked']:
             if planner.config.continuous_lane_follow:
                 if result['reason']=='OFFSET_RETURN_UNPROVEN':
@@ -161,7 +183,13 @@ class EntrySearch:
                 path=prefix+planner.selected.entry_path[1:]
                 curve=prefix+planner.selected.kinematic_points[1:]
                 planner.selected=replace(planner.selected,points=path,entry_path=path,kinematic_points=curve)
-            reason=planner._validate_active(planner.selected.entry_path,pose,speed,curvature,{})
+            # The original-lane bridge is part of the maneuver, including any
+            # portion beyond the live control window. Never attach a bridge
+            # through an obstacle to a safe trajectory that starts beyond it.
+            reason=(planner._path_safety(prefix,planner.remembered,speed,
+                native_reference=getattr(planner.network,'morai_unmarked_junction_experiment',False))
+                if len(prefix)>=3 else '')
+            if not reason:reason=planner._validate_active(planner.selected.entry_path,pose,speed,curvature,{})
             if reason:
                 if planner.config.continuous_lane_follow:
                     for name,value in previous.items():setattr(planner,name,value)

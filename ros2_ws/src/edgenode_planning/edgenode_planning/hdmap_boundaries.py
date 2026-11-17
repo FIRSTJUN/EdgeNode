@@ -157,6 +157,14 @@ class HDMapBoundaries:
                 if corridor is not None:
                     cells.extend(cell for cell,bounds in corridor.cells)
                     sources.append(corridor.source)
+        # A single ordinary lane needs no adjacent-lane crossing permission
+        # to prove its own interior. Keep both surveyed sides and their actual
+        # end caps; the exact union does not extend them across a junction.
+        for key,ring,identifiers in self.measured_lane_rings(network):
+            try:triangles=triangulate(ring)
+            except ValueError:continue
+            cells.extend(triangles)
+            sources.append('HDMAP_B2_NATIVE_LANE:'+key+':'+','.join(identifiers))
         # Omit sub-tolerance slivers conservatively; never replace them by a
         # convex patch. The same lower area floor is enforced by the corridor.
         cells=[cell for cell in cells if area(cell)>1e-8 and not any(intersects(cell,excluded) for excluded in exclusions)]
@@ -167,3 +175,43 @@ class HDMapBoundaries:
             link_ids=network.valid & self.aligned_links,allowed_sides=('left','right'),exact_union_backend=True)
         result.provenance=provenance
         return result
+
+    def measured_lane_rings(self,network):
+        """Exact ordinary-lane interiors, without inferring road width.
+
+        This is geometric evidence only. A solid boundary, explicit crossing
+        denial or exclusion still rejects the maneuver independently.
+        Ambiguous, reversed, missing or self-intersecting sides prove nothing.
+        """
+        from .hdmap_audit import marking_definition
+        from .lane_geometry import PolylineIndex
+        from shapely.geometry import Polygon,Point
+        for key in sorted(network.valid & self.aligned_links):
+            link=network.links[key]
+            if link.get('link_type') not in ('6',6):continue
+            index=PolylineIndex(link['points']);sides=[]
+            for side in ('right','left'):
+                options=[]
+                for attributes,parts in self.observed_sides.get((key,side),()):
+                    if (len(parts)!=1 or attributes['Kind'] not in ('501','503','505','506')
+                            or attributes['Type']=='999'
+                            or not marking_definition(attributes['Type'],attributes['Kind'])['definition_confirmed']):continue
+                    line=parts[0]
+                    if index.project(line[-1])<index.project(line[0]):line=tuple(reversed(line))
+                    mismatch=abs(index.project(line[0]))+abs(index.project(line[-1])-index.lengths[-1])
+                    options.append((mismatch,attributes['ID'],line))
+                options.sort(key=lambda row:(row[0],row[1]))
+                if (not options or options[0][0]>2. or
+                        len(options)>1 and abs(options[0][0]-options[1][0])<=1e-9):break
+                sides.append(options[0])
+            if len(sides)!=2:continue
+            right,left=sides
+            ring=[]
+            for p in list(right[2])+list(reversed(left[2])):
+                xy=tuple(p[:2])
+                if not ring or xy!=ring[-1]:ring.append(xy)
+            if ring and ring[0]==ring[-1]:ring.pop()
+            polygon=Polygon(ring)
+            if (polygon.is_empty or not polygon.is_valid or
+                    not polygon.covers(Point(link['points'][len(link['points'])//2][:2]))):continue
+            yield key,tuple(ring),(right[1],left[1])

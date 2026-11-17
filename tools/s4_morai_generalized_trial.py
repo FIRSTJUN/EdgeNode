@@ -19,6 +19,7 @@ from std_msgs.msg import String,Float32
 from edgenode_planning.dijkstra_planner import DijkstraPlanner
 from edgenode_planning.lane_geometry import sample,PolylineIndex
 from edgenode_planning.route_resume import mission_suffix
+from edgenode_planning.planning_provenance import implementation_sha256
 import yaml
 from pyproj import Proj,Transformer
 from edgenode_localization.map_heading import grid_convergence
@@ -26,9 +27,13 @@ p=argparse.ArgumentParser();p.add_argument('--link',required=True);p.add_argumen
 p.add_argument('--follow-distance-m',type=float,help='Follow this saved-route distance without spawning an obstacle')
 p.add_argument('--obstacle-link',help='Place the primary obstacle on this link instead of the start link')
 p.add_argument('--obstacle-lateral-m',type=float,default=0.,help='Signed map-tangent lateral displacement, left positive')
+p.add_argument('--obstacle-scale',type=float,default=1.,help='Independent XY Actor scale; uniform unless height is overridden; never supplied to Planning')
+p.add_argument('--obstacle-height-scale',type=float,help='Independent height scale for tall narrow static test objects')
+p.add_argument('--minimum-progress-m',type=float,default=0.,help='Keep supervising through NORMAL resumes until this route distance is travelled')
+p.add_argument('--alternate-goal-node',help='Temporary directed MGeo route from the trial link to this goal; saved mission file is preserved')
 p.add_argument('--tracking-only-seconds',type=float,help='Keep Ego disarmed while measuring a moving temporary NPC')
 p.add_argument('--actor-motion-kmh',type=float,default=0.)
-p.add_argument('--additional-obstacle',action='append',default=[],metavar='LINK:STATION:YAW_DEG',
+p.add_argument('--additional-obstacle',action='append',default=[],metavar='LINK:STATION:YAW_DEG[:LATERAL_M[:SCALE]]',
  help='Additional independent actors; used only for placement and post-run audit')
 p.add_argument('--approach-speed-kmh',type=float,default=10.)
 p.add_argument('--seconds',type=float,default=100.)
@@ -40,10 +45,20 @@ if a.follow_distance_m is None and a.obstacle is None:p.error('--obstacle or --f
 if a.follow_distance_m is not None and (a.obstacle is not None or not math.isfinite(a.follow_distance_m) or a.follow_distance_m<=0):p.error('positive follow distance without obstacle required')
 if not all(math.isfinite(v) for v in (a.start,a.obstacle_yaw_deg,a.obstacle_lateral_m) if v is not None):p.error('finite station, offset and yaw required')
 if a.obstacle is not None and not math.isfinite(a.obstacle):p.error('finite obstacle station required')
+if not math.isfinite(a.obstacle_scale) or not .4<=a.obstacle_scale<=2.:p.error('obstacle scale must be in [0.4, 2]')
+if a.obstacle_height_scale is not None and (not math.isfinite(a.obstacle_height_scale) or not .4<=a.obstacle_height_scale<=2.):p.error('obstacle height scale must be in [0.4, 2]')
+if not math.isfinite(a.minimum_progress_m) or a.minimum_progress_m<0:p.error('nonnegative finite minimum progress required')
 if a.tracking_only_seconds is not None and (a.obstacle is None or not math.isfinite(a.tracking_only_seconds) or a.tracking_only_seconds<=0 or not math.isfinite(a.actor_motion_kmh) or a.actor_motion_kmh<=0):p.error('tracking requires an obstacle, positive duration and NPC speed')
 if a.actor_motion_kmh and a.tracking_only_seconds is None:p.error('moving NPC currently requires --tracking-only-seconds')
 if not all(math.isfinite(v) and v>0 for v in (a.approach_speed_kmh,a.seconds)):p.error('positive finite speed and duration required')
 a.output.mkdir(exist_ok=False)
+def trial_route(planner,saved):
+ if a.alternate_goal_node:
+  route=planner.plan_route(a.link,[a.alternate_goal_node])
+  if not route:raise RuntimeError('alternate trial requires a connected directed MGeo route')
+  return dict(route,remaining_waypoints=[a.alternate_goal_node])
+ full=yaml.safe_load(saved.read_text())
+ return mission_suffix(planner,full.get('start_link_id') or 'A219BS010380',full['waypoint_node_ids'],a.link)
 class Recorder(Monitor):
  def __init__(self):
   super().__init__();self.paths={};self.solids=[]
@@ -85,7 +100,9 @@ class Recorder(Monitor):
   candidates=debug.pop('candidates',[])
   key=(debug.get('generated_transition_count'),debug.get('candidate_lane_batches'),
        debug.get('entry_commits'),debug.get('return_commits'),len(candidates),
-       debug.get('entry_context',{}).get('current_link_id'))
+       debug.get('entry_context',{}).get('current_link_id'),
+       tuple((c.get('side'),c.get('rejection'),c.get('entry_end_s'),c.get('return_start_s'),
+              c.get('return_end_s'),c.get('transition_length_m')) for c in candidates))
   if key!=self._candidate_key:
    from collections import Counter
    self._candidate_key=key;self._candidate_ref='c'+str(self._candidate_serial);self._candidate_serial+=1
@@ -97,6 +114,24 @@ class Recorder(Monitor):
   values['/planning/avoidance_debug']=debug
   return dict(t=time.monotonic()-start,solids=self.solids,
    local_path_points=self.paths.get('control_local_path',[]),**snapshot)
+def resize_trial_actor(monitor,actor,footprint_scale,height_scale):
+ # MORAI's vehicle pool can retain the previous actor's scale. Establish a
+ # measured unit model before applying an absolute scale, including scale 1.
+ unit=call('actor.Actor','SetScale',dict(actor_info=actor,scale=dict(x=1.,y=1.,z=1.)))
+ if unit.get('status')!='STATUS_CODE_SUCCESS':raise RuntimeError('Actor unit-scale reset failed: '+str(unit))
+ monitor.spin(.15);baseline=call('actor.Actor','GetActorState',actor)
+ reply=call('actor.Actor','SetScale',dict(actor_info=actor,
+  scale=dict(x=footprint_scale,y=height_scale,z=footprint_scale)))
+ if reply.get('status')!='STATUS_CODE_SUCCESS':raise RuntimeError('Actor scale failed: '+str(reply))
+ expected={key:baseline['bounding_box']['extent'][key]*factor for key,factor in
+           (('x',footprint_scale),('y',footprint_scale),('z',height_scale))}
+ for _ in range(5):
+  monitor.spin(.1);scaled=call('actor.Actor','GetActorState',actor)
+  if all(abs(scaled['bounding_box']['extent'][key]-value)<=max(.01,.01*value) for key,value in expected.items()):break
+ else:raise RuntimeError('Actor scale axes/geometry verification failed')
+ return baseline,scaled,dict(unit_scale_reset=unit,scale_reply=reply,expected_extent=expected,
+  measured_extent=scaled['bounding_box']['extent'],verified=True,
+  scale_axes='MORAI model X width, Y height, Z length; measured box X width, Y length, Z height')
 def interrupted(*args):raise KeyboardInterrupt()
 for sig in (signal.SIGINT,signal.SIGTERM):signal.signal(sig,interrupted)
 rclpy.init(signal_handler_options=SignalHandlerOptions.NO);n=Recorder();summary={};rows=[];path_fingerprints={};new_actor=None;spawned_actors=[];ego=None;original=None;mission=None;bag=None;bag_log=None
@@ -107,7 +142,11 @@ try:
  summary['trial_spec']=dict(link=a.link,start_m=a.start,obstacle_m=a.obstacle,
   obstacle_yaw_deg=a.obstacle_yaw_deg,approach_speed_kmh=a.approach_speed_kmh,seconds=a.seconds,
   follow_distance_m=a.follow_distance_m,obstacle_link=a.obstacle_link or a.link,
-  obstacle_lateral_m=a.obstacle_lateral_m,prepare_before_spawn=a.prepare_before_spawn)
+  obstacle_lateral_m=a.obstacle_lateral_m,obstacle_scale=a.obstacle_scale,
+  obstacle_height_scale=a.obstacle_height_scale if a.obstacle_height_scale is not None else a.obstacle_scale,
+  minimum_progress_m=a.minimum_progress_m,additional_obstacles=a.additional_obstacle,
+  alternate_goal_node=a.alternate_goal_node,
+  prepare_before_spawn=a.prepare_before_spawn)
  summary['verification']='MORAI_TRACKING_ONLY' if a.tracking_only_seconds else 'MORAI_LIVE'
  names=['clipped_footprints','footprint_tile_size_m','publish_debug_clouds','time_aligned_obstacles','roi_max_x','ground_z_threshold','source_pair_wait_sec','source_pose_max_gap_sec']
  summary['perception_parameters']=dict(zip(names,map(parameter_value_to_python,n.call(
@@ -124,6 +163,11 @@ try:
                                 for name in changed if Path(name).is_file()}
  with tarfile.open(a.output/'source-snapshot.tar.gz','w:gz') as archive:
   for name in summary['working_files_sha256']:archive.add(name,arcname=name)
+ import edgenode_planning
+ runtime_source=Path(edgenode_planning.__file__).parent
+ summary['runtime_planning_files_sha256']={f.name:hashlib.sha256(f.read_bytes()).hexdigest() for f in sorted(runtime_source.glob('*.py'))}
+ with tarfile.open(a.output/'runtime-planning-source.tar.gz','w:gz') as archive:
+  for f in sorted(runtime_source.glob('*.py')):archive.add(f,arcname='edgenode_planning/'+f.name)
  if a.record_bag:
   topics=['/ego_vehicle_status','/ctrl_cmd','/localization/odometry','/control/path_error',
    '/control/lookahead_distance','/collision_data','/lidar/points','/Imu','/gps',
@@ -142,6 +186,11 @@ try:
  summary['original_parameters']=original;summary['original_mission']=mission
  inventory=call('actor.Actor','GetAllActorsState',dict(vehicle=True,pedestrian=True,obstacle=True));summary['actors_before']=inventory
  ego=call('actor.Actor','GetActorState',dict(id={'value':'Ego'},object_type='OBJECT_TYPE_VEHICLE'))
+ initial_ids={x['actor_info']['id']['value'] for x in inventory.get('states',[])}
+ summary['expected_implementation_sha256']=implementation_sha256()
+ summary['runtime_implementation_sha256']=n.values.get('/planning/avoidance_debug',{}).get('implementation_sha256')
+ if summary['runtime_implementation_sha256']!=summary['expected_implementation_sha256']:
+  raise RuntimeError('runtime Planning source fingerprint differs from the built trial code; reload the single stopped Planning node')
  planner=DijkstraPlanner('/workspace/local_data/kcity_mgeo');points=planner.links_by_id[a.link]['points'];xyz,tangent=sample(points,a.start)
  transform=dict(location=dict(x=xyz[0],y=xyz[1],z=xyz[2]+.35),rotation=dict(z=math.degrees(math.atan2(tangent[1],tangent[0]))))
  obstacle_transform=None
@@ -163,7 +212,7 @@ try:
   summary['preparation_relocation']=call('actor.Actor','SetTransform',dict(actor_info=ego['actor_info'],transform=transform))
   n.wait(lambda:n.fresh() and n.stopped() and n.values.get('/planning/current_link')==a.link and 'pose' in n.values and math.dist(n.values['pose'][:2],xyz[:2])<.4,15.)
   n.reset()
-  full=yaml.safe_load(saved.read_text());prepared_route=mission_suffix(planner,full.get('start_link_id') or 'A219BS010380',full['waypoint_node_ids'],a.link)
+  prepared_route=trial_route(planner,saved)
   n.set_parameters_remote(dict(route_start_link_id=a.link,route_node_ids=prepared_route['remaining_waypoints'],cruise_speed_kmh=a.approach_speed_kmh,sharp_curve_speed_kmh=min(30.,a.approach_speed_kmh),drive_duration_sec=a.seconds+30.,enable_drive=False))
   n.spin(.8);n.reset()
   n.wait(lambda:n.fresh() and n.stopped() and n.values.get('/planning/current_link')==a.link and n.values.get('/planning/fsm_state')=='READY' and n.values.get('/planning/avoidance_debug',{}).get('state') in ('NORMAL','DETECT') and n.values.get('/planning/map_match_status')=='MATCHED' and n.values.get('/planning/local_path',{}).get('points',0)>2 and n.values.get('/planning/s4_sensor_state',{}).get('ready'),30.)
@@ -186,13 +235,18 @@ try:
  else:raise RuntimeError('spawn response did not identify new actor: '+str(spawn))
  if new_actor is not None:
   assert new_actor['id']['value'] not in initial_ids
-  assert call('actor.Actor','GetActorState',new_actor)['actor_info']==new_actor
   spawned_actors.append(new_actor)
+  height=a.obstacle_height_scale if a.obstacle_height_scale is not None else a.obstacle_scale
+  unscaled,scaled,verification=resize_trial_actor(n,new_actor,a.obstacle_scale,height)
+  summary['obstacle_unscaled_state']=unscaled;summary['placement_scale_verification']=verification
  summary['additional_obstacles']=[]
  for number,specification in enumerate(a.additional_obstacle):
-  key,station,yaw=specification.split(':');station=float(station);yaw=float(yaw)
-  if not math.isfinite(station) or not math.isfinite(yaw):raise RuntimeError('finite additional actor station/yaw required')
+  fields=specification.split(':')
+  if not 3<=len(fields)<=5:raise RuntimeError('additional actor requires LINK:STATION:YAW[:LATERAL[:SCALE]]')
+  key=fields[0];station,yaw=map(float,fields[1:3]);lateral=float(fields[3]) if len(fields)>3 else 0.;scale=float(fields[4]) if len(fields)>4 else 1.
+  if not all(math.isfinite(v) for v in (station,yaw,lateral,scale)) or not .4<=scale<=2.:raise RuntimeError('finite additional actor geometry and scale in [0.4, 2] required')
   position,direction=sample(planner.links_by_id[key]['points'],station)
+  position=[position[0]-lateral*direction[1],position[1]+lateral*direction[0],position[2]]
   target=dict(location=dict(x=position[0],y=position[1],z=position[2]+.35),
    rotation=dict(z=math.degrees(math.atan2(direction[1],direction[0]))+yaw))
   locations=[x['transform']['location'] for x in inventory['states']]
@@ -202,15 +256,17 @@ try:
   reply=call('actor.Actor','SpawnVehicle',dict(spawn_info=dict(actor_info=actor,transform=target,
     model_name='2014_Kia_K7',label='independent next-lane obstacle'),velocity=0.,pause=True))
   if reply.get('status')!='STATUS_CODE_SUCCESS':raise RuntimeError('additional actor spawn failed: '+str(reply))
-  spawned_actors.append(actor);actual=call('actor.Actor','GetActorState',actor)
-  summary['additional_obstacles'].append(dict(specification=specification,state=actual))
+  spawned_actors.append(actor)
+  unscaled,actual,verification=resize_trial_actor(n,actor,scale,scale)
+  summary['additional_obstacles'].append(dict(specification=specification,state=actual,
+   unscaled_state=unscaled,placement_scale_verification=verification))
  summary['ego_before']=ego;summary['target']=transform;summary['obstacle_target']=obstacle_transform
  (a.output/'recovery-journal.json').write_text(json.dumps(dict(summary,new_actor=new_actor,new_actors=spawned_actors),indent=2))
  if not a.prepare_before_spawn:
   summary['relocation']=call('actor.Actor','SetTransform',dict(actor_info=ego['actor_info'],transform=transform))
  n.wait(lambda:n.fresh() and n.stopped() and n.values.get('/planning/current_link')==a.link and 'pose' in n.values and math.dist(n.values['pose'][:2],xyz[:2])<.4,15.)
  n.reset()
- full=yaml.safe_load(saved.read_text());route=mission_suffix(planner,full.get('start_link_id') or 'A219BS010380',full['waypoint_node_ids'],a.link)
+ route=trial_route(planner,saved)
  n.set_parameters_remote(dict(route_start_link_id=a.link,route_node_ids=route['remaining_waypoints'],cruise_speed_kmh=a.approach_speed_kmh,sharp_curve_speed_kmh=min(30.,a.approach_speed_kmh),drive_duration_sec=a.seconds+30.,enable_drive=False))
  n.spin(.8);n.reset()
  n.wait(lambda:n.fresh() and n.values.get('/planning/current_link')==a.link and n.values.get('/planning/fsm_state')=='READY' and n.values.get('/planning/avoidance_debug',{}).get('state') in ('NORMAL','DETECT') and n.values.get('/planning/map_match_status')=='MATCHED' and n.values.get('/planning/local_path',{}).get('points',0)>2 and n.values.get('/planning/s4_sensor_state',{}).get('ready') and not n.values['/planning/s4_sensor_state'].get('latched_reason'),30.)
@@ -265,8 +321,10 @@ try:
   if debug.get('boundary_check_mode')=='avoidance' and debug.get('boundary_contact_reason'):
    raise RuntimeError('measured boundary contact: '+debug['boundary_contact_reason'])
   if a.follow_distance_m is not None:
+   if v.get('/planning/fsm_state')=='EMERGENCY_STOP':
+    raise RuntimeError('normal mission emergency stop: '+debug.get('reason','FSM_EMERGENCY_STOP'))
    summary['followed_distance_m']=route_index.project(v['pose'][:2])-a.start
-   if v.get('/control/path_error',0.)>1.5:raise RuntimeError('normal tracking error exceeds 1.5m')
+   if abs(v.get('/control/path_error',0.))>1.5:raise RuntimeError('normal tracking error exceeds 1.5m')
    if summary['followed_distance_m']>=a.follow_distance_m:
     summary['success']=True;break
   if stage=='RETURN':seen_return=True
@@ -275,7 +333,9 @@ try:
    and v.get('/planning/fsm_state')=='NORMAL_DRIVE' and v.get('/planning/target_speed',0.)>0.
    and v.get('/ego_vehicle_status',{}).get('speed_kmh',0.)>1. and sensor.get('ready'))
   normal_since=(normal_since or time.monotonic()) if resumed else None
-  if normal_since is not None and time.monotonic()-normal_since>=1.:
+  progress=route_index.project(v['pose'][:2])-a.start
+  summary['followed_distance_m']=progress
+  if normal_since is not None and time.monotonic()-normal_since>=1. and progress>=a.minimum_progress_m:
    summary['normal_resumed_s']=time.monotonic()-normal_since;summary['success']=True;break
  else:
   if a.tracking_only_seconds:
@@ -289,12 +349,14 @@ try:
 except BaseException as error:
  summary['error']=str(error) or type(error).__name__
 finally:
+ # A second interrupt must not abort the physical stop/scene restoration.
+ for sig in (signal.SIGINT,signal.SIGTERM):signal.signal(sig,signal.SIG_IGN)
  try:summary['stop_confirmed']=n.stop()
  except Exception as error:summary['stop_error']=str(error)
  summary['before_restore']=n.snapshot();summary['candidate_and_selected_paths']=path_fingerprints
  if rows:
   summary['peak_speed_kmh']=max(r['values'].get('/ego_vehicle_status',{}).get('speed_kmh',0.) for r in rows)
-  summary['max_control_path_error_m']=max(r['values'].get('/control/path_error',0.) for r in rows)
+  summary['max_control_path_error_m']=max(abs(r['values'].get('/control/path_error',0.)) for r in rows)
   summary['phases']=[v for i,v in enumerate([r['values'].get('/planning/avoidance_debug',{}).get('stage') for r in rows]) if i==0 or v!=rows[i-1]['values'].get('/planning/avoidance_debug',{}).get('stage')]
  try:
   if not summary.get('stop_confirmed'):raise RuntimeError('restoration requires confirmed stationary Ego')
