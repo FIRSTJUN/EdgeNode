@@ -1,5 +1,6 @@
 """Original NGII boundary evidence for S4, without editing MGeo permissions."""
 import json
+import hashlib
 from pathlib import Path
 
 from .hdmap_audit import read_layer, translated, nearest
@@ -9,6 +10,7 @@ from .avoidance_geometry import intersects, polygon_bounds
 class HDMapBoundaries:
     def __init__(self, directory, mgeo_directory):
         origin = json.loads((Path(mgeo_directory) / 'global_info.json').read_text())['local_origin_in_global']
+        self.directory=Path(directory);self.origin=origin
         mgeo = {row['idx']: row for row in json.loads((Path(mgeo_directory) / 'link_set.json').read_text())}
         self.aligned_links = set()
         for feature in read_layer(Path(directory) / 'A2_LINK'):
@@ -121,4 +123,47 @@ class HDMapBoundaries:
             result.crossings=tuple(row for a,b in pair.ids for row in
                 ((a,pair.side,b),(b,reverse,a)))
         self._road_corridor_cache[key]=result
+        return result
+
+    def road_surface_corridor(self,network):
+        """MORAI experiment: actual A3 surfaces plus proved ordinary strips.
+
+        NGII 2019 p61-64 identifies Kind 1 as a driving section. Only supplied
+        single rings are triangulated; absent areas, multipart rings and caps
+        are never filled. This is local surface evidence, not a whole-map mask.
+        B2 forbidden boundaries and current LiDAR solids remain separate gates.
+        """
+        from .road_surface import triangulate
+        from .avoidance_geometry import area
+        from .road_corridor import VerifiedRoadCorridor
+        cells=[];sources=[]
+        sections=read_layer(self.directory/'A3_DRIVEWAYSECTION')
+        exclusions=[tuple(p[:2] for p in part) for f in sections if f['attributes']['Kind']=='7'
+                    for part in translated(f,self.origin)]
+        for feature in sections:
+            attr=feature['attributes']
+            if attr['Kind']!='1' or attr['RoadType']!='1' or len(feature['parts'])!=1:continue
+            ring=translated(feature,self.origin)[0]
+            try:triangles=triangulate(ring)
+            except ValueError:continue
+            cells.extend(triangles);sources.append(attr['ID'])
+        # Preserve the exact observed lane strips before/after a junction.
+        for key in sorted(network.valid & self.aligned_links):
+            if network.links[key].get('link_type') not in ('6',6):continue
+            for side in ('left','right'):
+                pair=network.pair(key,side,[key])
+                if pair is None:continue
+                corridor=self.road_corridor_for_pair(network,pair)
+                if corridor is not None:
+                    cells.extend(cell for cell,bounds in corridor.cells)
+                    sources.append(corridor.source)
+        # Omit sub-tolerance slivers conservatively; never replace them by a
+        # convex patch. The same lower area floor is enforced by the corridor.
+        cells=[cell for cell in cells if area(cell)>1e-8 and not any(intersects(cell,excluded) for excluded in exclusions)]
+        if not cells:return None
+        provenance=tuple(sorted(set(sources)))
+        digest=hashlib.sha256(json.dumps(provenance).encode()).hexdigest()
+        result=VerifiedRoadCorridor(cells,source='MORAI_HDMap_SURFACES:sha256:'+digest,
+            link_ids=network.valid & self.aligned_links,allowed_sides=('left','right'),exact_union_backend=True)
+        result.provenance=provenance
         return result

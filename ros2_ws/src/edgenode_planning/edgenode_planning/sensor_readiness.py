@@ -25,7 +25,7 @@ class SensorReadiness:
     readiness, but the owner alone controls the latched avoidance STOP/reset.
     """
     def __init__(self, timeout_sec=.6, max_age_sec=.6, future_tolerance_sec=.05,
-                 steady_time_ns=time.monotonic_ns):
+                 steady_time_ns=time.monotonic_ns,allow_transient_history=False):
         for value in (timeout_sec, max_age_sec, future_tolerance_sec):
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
                 raise ValueError('positive finite S4 sensor time limits required')
@@ -44,6 +44,16 @@ class SensorReadiness:
         self.failure = ''
         self.steady_time_ns = steady_time_ns
         self.status_steady_ns = None
+        if type(allow_transient_history) is not bool:raise ValueError('boolean recovery policy required')
+        self.allow_transient_history=allow_transient_history
+
+    def _paired_frame_fresh(self,now_ns):
+        if self.matched is None:return False
+        status,points,received_ns,steady_ns=self.matched
+        return (0<=now_ns-received_ns<=self.timeout_ns and
+                self.steady_time_ns()-steady_ns<=self.timeout_ns and
+                -self.future_ns<=now_ns-status['frame_received_ns']<=self.timeout_ns and
+                -self.future_ns<=now_ns-status['source_stamp_ns']<=self.max_age_ns)
 
     def _clock(self, now_ns):
         if self.last_clock_ns is not None and now_ns < self.last_clock_ns:
@@ -67,6 +77,35 @@ class SensorReadiness:
             del self.frames[next(iter(self.frames))]
         self._match()
         return ''
+
+    def frame(self, payload, now_ns):
+        """Admit an atomic status/footprint envelope with the same strict proof.
+
+        KEEP_LAST may skip envelopes, never half a pair. Repeated heartbeats
+        still cannot renew the receipt or source age of an observation.
+        """
+        try:
+            if len(payload)>262144:raise ValueError('oversized frame')
+            envelope=json.loads(payload)
+            if envelope['schema_version']!=1 or envelope['frame_id']!='map':
+                raise ValueError('invalid envelope')
+            status=envelope['status'];points=envelope['points']
+            if not isinstance(status,dict) or not isinstance(points,list):
+                raise ValueError('invalid pair')
+            if status.get('state') in READY:
+                stamp=status['source_stamp_ns']
+                if footprint_digest('map',stamp,points)!=status['obstacle_digest']:
+                    raise ValueError('frame digest mismatch')
+                reason=self.observation(stamp,points,now_ns)
+                if reason:return reason
+            reason=self.receive(json.dumps(status,separators=(',',':')),now_ns)
+            # A producer restart clears earlier pairs in receive(). Admit the
+            # new producer's enclosed observation after that invalidation too.
+            if reason=='SENSOR_RESTARTED' and status.get('state') in READY:
+                self.observation(status['source_stamp_ns'],points,now_ns)
+            return reason
+        except (ValueError,TypeError,KeyError,OverflowError):
+            self.failure='INVALID_SENSOR_FRAME';return self.failure
 
     def receive(self, payload, now_ns):
         self._clock(now_ns)
@@ -122,6 +161,18 @@ class SensorReadiness:
             self.failure = 'SENSOR_FAULT_HISTORY_REGRESSION'
             return self.failure
         recovered_fault = status['fault_seq'] > self.fault_seq and status['state'] in READY
+        recovered_reason='SENSOR_FAULT_HISTORY'
+        if recovered_fault and self.allow_transient_history:
+            history=status.get('fault_history',[])
+            missed=[row for row in history if isinstance(row,dict) and type(row.get('seq')) is int
+                    and self.fault_seq<row['seq']<=status['fault_seq']]
+            if (len(missed)==status['fault_seq']-self.fault_seq and
+                    all(row['seq']==self.fault_seq+i+1 for i,row in enumerate(missed))
+                    and all(row.get('state') in ('LOCALIZATION_UNAVAILABLE','IMU_UNAVAILABLE','INPUT_TIMEOUT','STALE_INPUT') for row in missed)):
+                recovered_reason=missed[-1]['state']
+                if (all(row['state'] in ('LOCALIZATION_UNAVAILABLE','IMU_UNAVAILABLE') for row in missed)
+                        and self._paired_frame_fresh(now_ns)):
+                    recovered_reason=''
         self.fault_seq = status['fault_seq']
         if self.status is not None and not restarted and status['frame_seq'] < self.status['frame_seq']:
             self.failure = 'SENSOR_FRAME_REGRESSION'
@@ -137,6 +188,12 @@ class SensorReadiness:
         self.status_steady_ns = self.steady_time_ns()
         if status['state'] not in READY:
             self.failure = status['state']
+            if (self.allow_transient_history and status['state'] in ('LOCALIZATION_UNAVAILABLE','IMU_UNAVAILABLE')
+                    and self._paired_frame_fresh(now_ns)):
+                # Keep only the last complete frame until its ORIGINAL
+                # deadline. A missing alignment for a newer cloud is not an
+                # empty road and never renews source or receipt freshness.
+                self.failure=''
         else:
             key=(status['source_stamp_ns'],status['obstacle_digest'])
             self.ready_statuses[key]=status
@@ -144,7 +201,7 @@ class SensorReadiness:
                 del self.ready_statuses[next(iter(self.ready_statuses))]
             self._match()
         return ('SENSOR_RESTARTED' if restarted else
-                'SENSOR_FAULT_HISTORY' if recovered_fault else self.failure)
+                recovered_reason if recovered_fault else self.failure)
 
     def _match(self):
         status = self.status

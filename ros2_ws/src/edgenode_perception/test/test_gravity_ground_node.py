@@ -9,12 +9,12 @@ def test_missing_or_unpaired_imu_never_publishes_ready_empty(node):
     node.lidar_callback(cloud([[14.,0.,-.5]]*5))
     assert node.sensor_status.state=='WAITING_FOR_INPUT'
     assert node.test_publishers['/planning/obstacles'].publish.call_count==0
-    node.test_clock.time_ns+=60_000_000;node.process_pending_cloud()
+    node.test_clock.time_ns+=160_000_000;node.process_pending_cloud()
     assert node.sensor_status.state=='IMU_UNAVAILABLE'
     assert not output(node).poses
     # A fresh, timestamp-matched IMU/pose/cloud restores normal processing.
-    node.test_clock.time_ns=7_100_000_000
-    imu=Imu();imu.header.stamp=Time(seconds=7.1).to_msg();imu.orientation.w=1.
+    node.test_clock.time_ns=7_200_000_000
+    imu=Imu();imu.header.stamp=Time(seconds=7.2).to_msg();imu.orientation.w=1.
     node.imu_callback(imu)
     pose.header.stamp=imu.header.stamp;node.localization_callback(pose)
     msg=cloud([[14.,0.,-.5]]*5);msg.header.stamp=imu.header.stamp
@@ -53,6 +53,7 @@ def test_later_arriving_attitude_pairs_cloud_without_a_false_sensor_fault(node):
     assert node._pending_cloud is not None
     node.test_clock.time_ns+=20_000_000
     imu=Imu();imu.header.stamp.sec=7;imu.orientation.w=1.;node.imu_callback(imu)
+    node.process_pending_cloud()
     assert node._pending_cloud is None and node.sensor_status.state=='READY_OBSTACLES'
     assert node.sensor_status.fault_seq==0
     imu.header.stamp.sec=8;imu.orientation_covariance[0]=-1.

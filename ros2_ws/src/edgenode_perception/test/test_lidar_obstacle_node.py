@@ -59,7 +59,7 @@ def node(monkeypatch):
         publishers[topic] = pub
         return pub
 
-    def subscribe(self, message_type, topic, callback, qos):
+    def subscribe(self, message_type, topic, callback, qos,**kwargs):
         subscriptions.append((message_type, topic, callback, qos))
         return Mock()
 

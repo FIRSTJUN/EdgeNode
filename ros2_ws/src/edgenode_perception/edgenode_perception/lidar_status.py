@@ -33,6 +33,7 @@ class LidarStatus:
         self.frame_steady_ns = None
         self.fault_seq = 0
         self.last_fault = None
+        self.fault_history=[]
 
     def _clock(self, now_ns):
         if self.last_clock_ns is not None and now_ns < self.last_clock_ns:
@@ -88,6 +89,8 @@ class LidarStatus:
         elif state != 'WAITING_FOR_INPUT' and self.last_fault != (self.frame_seq, state):
             self.fault_seq += 1
             self.last_fault = (self.frame_seq, state)
+            self.fault_history.append(dict(seq=self.fault_seq,state=state,source_stamp_ns=self.source_stamp_ns))
+            self.fault_history=self.fault_history[-16:]
         self.status_seq += 1
         return dict(schema_version=1, clock='ros', session_id=self.session_id,
                     status_seq=self.status_seq, frame_seq=self.frame_seq,
@@ -95,4 +98,4 @@ class LidarStatus:
                     source_stamp_ns=self.source_stamp_ns,
                     frame_received_ns=self.receipt_ns if self.receipt_ns is not None else 0,
                     published_ns=now_ns, cluster_count=self.cluster_count,
-                    obstacle_digest=self.digest)
+                    obstacle_digest=self.digest,fault_history=list(self.fault_history))

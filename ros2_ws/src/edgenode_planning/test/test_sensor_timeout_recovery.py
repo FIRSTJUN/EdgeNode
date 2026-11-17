@@ -50,6 +50,11 @@ def test_brief_gap_freezes_entry_then_revalidates_but_real_faults_stay_latched(n
     points=node.test_obstacle(35.,39.)
     with patch('edgenode_planning.planning_node.time.perf_counter',return_value=0.):
         feed(node,clock,points=points);node.plan();node.plan()
+        # Entry geometry runs in the existing background process. Two timer
+        # calls alone do not guarantee that computation has completed.
+        assert node._entry_search._future is not None
+        node._entry_search._future.result(timeout=20.)
+        node.plan()
         assert node.avoidance_planner.state=='AVOID_ENTRY'
         selected=node.avoidance_planner.selected
         generated=node.avoidance_planner.generated_transition_count

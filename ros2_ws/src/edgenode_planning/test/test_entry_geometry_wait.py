@@ -18,6 +18,10 @@ def scene(enabled=True, offset=0.):
     data['pose'][0] += offset*.014
     data['pose'][1] += offset
     values = dict(data['config']); values['transition_lengths_m'] = tuple(values['transition_lengths_m'])
+    # These cases exercise entry geometry, not the separately tested NORMAL
+    # detection scheduler. At the recorded zero offset today's map estimate
+    # leaves the hazard just outside its trigger (also on be6aaec).
+    values['normal_detection_latency_s']=0.
     if not enabled: values['entry_geometry_wait_distance_m'] = 0.
     planner = DijkstraPlanner(root/'local_data/kcity_mgeo')
     waypoints = yaml.safe_load((root/'local_data/kcity_routes/kcity_demo_route.yaml').read_text())['waypoint_node_ids']

@@ -26,6 +26,23 @@ def diagnostic(result):
     return json_safe(values)
 
 
+def display_candidates(candidates,maximum=16):
+    """Bound ROS Point construction without changing any planning candidate."""
+    candidates=tuple(candidates)
+    if len(candidates)<=maximum:return candidates
+    safe=[c for c in candidates if not c.rejection]
+    groups={}
+    for c in candidates:
+        key=(c.side,c.rejection,c.transition_length_m)
+        groups.setdefault(key,c)
+    ordered=safe+list(groups.values());chosen=[];seen=set()
+    for candidate in ordered:
+        if id(candidate) in seen:continue
+        chosen.append(candidate);seen.add(id(candidate))
+        if len(chosen)>=maximum:break
+    return tuple(chosen)
+
+
 def candidate_markers(result, stamp, previous_ids=()):
     markers=[];active=set()
     def marker(index, kind):

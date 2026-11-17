@@ -8,12 +8,37 @@ import sqlite3
 from pathlib import Path
 
 from edgenode_planning.avoidance_geometry import obstacle_polygons, polygon_distance, swept_body
-from edgenode_planning.vehicle_geometry import sonata_geometry
+from edgenode_planning.vehicle_geometry import sonata_geometry,VerifiedVehicleGeometry
 from edgenode_planning.hdmap_boundaries import HDMapBoundaries
 from edgenode_planning.dijkstra_planner import DijkstraPlanner
 from edgenode_planning.lane_geometry import LaneNetwork
 from edgenode_planning.route_resume import mission_suffix
 import yaml
+
+
+def measured_body_for_audit(summary,convergence_deg):
+    """Simulator box dimensions are post-run evidence, never planner input."""
+    actor=summary.get('ego_before',{});box=actor.get('bounding_box');transform=actor.get('transform')
+    if not box or not transform:return None
+    yaw=math.radians(transform['rotation']['z']+convergence_deg)
+    dx=box['location']['x']-transform['location']['x'];dy=box['location']['y']-transform['location']['y']
+    center=math.cos(yaw)*dx+math.sin(yaw)*dy
+    lateral=-math.sin(yaw)*dx+math.cos(yaw)*dy
+    front=center+box['extent']['y'];rear=center-box['extent']['y'];base=sonata_geometry().wheelbase_m
+    if front<base or rear>=0:raise ValueError('Actor box/reference axes cannot be verified')
+    return VerifiedVehicleGeometry(width_m=2*box['extent']['x'],length_m=front-rear,
+        wheelbase_m=base,front_overhang_m=front-base,rear_overhang_m=-rear,
+        rear_axle_from_pose_forward_m=0.,rear_axle_from_pose_left_m=lateral,
+        pose_reference='Recorded MORAI Ego transform / EgoStatus position',
+        source='MORAI Actor box; independent audit only; extent.y longitudinal, extent.x lateral')
+
+
+def actor_box_polygon(box,convergence):
+    yaw=math.radians(box['rotation']['z']+convergence);c,s=math.cos(yaw),math.sin(yaw)
+    center=box['location'];extent=box['extent']
+    return [(center['x']+c*f-s*l,center['y']+s*f+c*l)
+        for f,l in ((-extent['y'],-extent['x']),(extent['y'],-extent['x']),
+                    (extent['y'],extent['x']),(-extent['y'],extent['x']))]
 
 
 def bag_rows(directory):
@@ -58,6 +83,51 @@ def bag_rows(directory):
     return rows
 
 
+def bag_integrity(directory,summary):
+    """Count every recorded safety/path message in the driven interval."""
+    from rclpy.serialization import deserialize_message
+    from rosidl_runtime_py.utilities import get_message
+    start=summary.get('drive_started_ros_ns')
+    if start is None:return dict(available=False,reason='drive source time absent')
+    samples=[json.loads(line) for line in (directory/'samples.jsonl').read_text().splitlines()]
+    end=start+int(samples[-1]['t']*1e9)
+    stop_ego=summary.get('before_restore',{}).get('values',{}).get('/ego_vehicle_status',{})
+    stop_end=max(end,stop_ego.get('source_stamp_ns',end))
+    topics=('/collision_data','/planning/local_path','/planning/avoidance_debug','/planning/target_speed')
+    collisions=collision_messages=path_messages=empty_episodes=holds=waits=stops=0
+    phase=None;previous_state=previous_reason=None;empty=False;zero=False;moving=False
+    last_path=None;max_gap=0.
+    for database in sorted((directory/'bag').glob('*.db3')):
+        with sqlite3.connect('file:'+str(database)+'?mode=ro',uri=True) as connection:
+            kinds={i:(name,get_message(kind)) for i,name,kind in connection.execute('select id,name,type from topics') if name in topics}
+            marks=','.join('?' for _ in kinds)
+            for tid,stamp,data in connection.execute(f'select topic_id,timestamp,data from messages where topic_id in ({marks}) and timestamp between ? and ? order by timestamp',(*kinds,start,stop_end)):
+                name,kind=kinds[tid]
+                if stamp>end and name!='/collision_data':continue
+                message=deserialize_message(data,kind)
+                if name=='/collision_data':
+                    collision_messages+=1;collisions+=bool(message.collision_object)
+                elif name=='/planning/avoidance_debug':
+                    debug=json.loads(message.data);state=debug.get('state');reason=debug.get('reason')
+                    holds+=state=='SENSOR_HOLD' and previous_state!='SENSOR_HOLD'
+                    waits+=reason=='WAIT_FRESH_VALIDATION' and previous_reason!='WAIT_FRESH_VALIDATION'
+                    previous_state,previous_reason=state,reason;phase=debug.get('stage')
+                elif name=='/planning/target_speed':
+                    if message.data>0:moving=True
+                    if phase in ('AVOID_ENTRY','AVOID_HOLD','RETURN'):
+                        current=message.data==0.;stops+=current and not zero;zero=current
+                elif name=='/planning/local_path' and moving:
+                    path_messages+=1;current=len(message.poses)<2
+                    empty_episodes+=current and not empty;empty=current
+                    if last_path is not None:max_gap=max(max_gap,(stamp-last_path)/1e9)
+                    last_path=stamp
+    return dict(available=True,window_start_ns=start,window_end_ns=end,collision_window_through_stop_ns=stop_end,
+        collision_messages=collision_messages,nonzero_collision_messages=collisions,
+        local_path_messages_after_motion_request=path_messages,empty_local_path_episodes=empty_episodes,
+        maximum_local_path_publication_gap_s=max_gap,sensor_hold_episodes=holds,
+        fresh_validation_wait_episodes=waits,zero_target_episodes_during_avoidance=stops)
+
+
 def audit(directory):
     summary=json.loads((directory/'summary.json').read_text())
     rows=[json.loads(line) for line in (directory/'samples.jsonl').read_text().splitlines()]
@@ -75,8 +145,13 @@ def audit(directory):
         network=LaneNetwork(routing,morai_unmarked_junction_experiment=debug.get(
             'entry_context',{}).get('morai_unmarked_junction_experiment',False))
         network.boundaries=boundaries
-        pair=network.pair(start,side,route['link_ids'])
-        if pair is not None:area=boundaries.road_corridor_for_pair(network,pair)
+        if (debug.get('selected_mode')=='road_offset' and
+                'MORAI_HDMap_SURFACES:' in debug.get('entry_context',{}).get('road_offset_evidence','')):
+            candidate=boundaries.road_surface_corridor(network)
+            if candidate.source in debug['entry_context']['road_offset_evidence']:area=candidate
+        else:
+            pair=network.pair(start,side,route['link_ids'])
+            if pair is not None:area=boundaries.road_corridor_for_pair(network,pair)
         break
     previous=None;timeline=[];last_phase=None;clearance=math.inf;contacts=[]
     collision_samples=unsafe_sensor_commands=0
@@ -84,7 +159,9 @@ def audit(directory):
     actor_box=summary.get('obstacle_state',{}).get('bounding_box')
     outside_area=[];area_checks=0
     previous_time=None;s4_seconds=stopped_target_seconds=s4_speed_integral=0.
-    processing=[]
+    processing=[];measured_body=None;measured_contacts=[];measured_outside=[];measured_gap=math.inf
+    additional_boxes=[entry['state']['bounding_box'] for entry in summary.get('additional_obstacles',[])]
+    additional_gap=math.inf
     for row in rows:
         values=row['values'];debug=values.get('/planning/avoidance_debug',{})
         sensor=values.get('/planning/s4_sensor_state',{})
@@ -118,7 +195,14 @@ def audit(directory):
         # filter transients. Apply the recorded map convergence, as production.
         if ego and '/localization/grid_convergence_deg' in values:
             pose=(ego['x'],ego['y'],math.radians(ego['heading_deg']+values['/localization/grid_convergence_deg']))
-            polygon=swept_body(body,previous or pose,pose);previous=pose
+            before=previous or pose
+            polygon=swept_body(body,before,pose);previous=pose
+            if measured_body is None:measured_body=measured_body_for_audit(summary,values['/localization/grid_convergence_deg'])
+            measured_polygon=swept_body(measured_body,before,pose) if measured_body is not None else None
+            if measured_polygon is not None:
+                for box in additional_boxes:
+                    additional_gap=min(additional_gap,polygon_distance(measured_polygon,
+                        actor_box_polygon(box,values['/localization/grid_convergence_deg'])))
             if actor_box is not None:
                 # Actor API is post-hoc ground truth only. MORAI's extent.y is
                 # longitudinal, extent.x lateral; headings are ENU, XY UTM.
@@ -128,14 +212,37 @@ def audit(directory):
                     for f,l in ((-extent['y'],-extent['x']),(extent['y'],-extent['x']),
                                 (extent['y'],extent['x']),(-extent['y'],extent['x']))]
                 actor_gap=min(actor_gap,polygon_distance(polygon,target))
+                if measured_polygon is not None:measured_gap=min(measured_gap,polygon_distance(measured_polygon,target))
             reason=boundaries.swept_reason(polygon)
             if reason:contacts.append(dict(t_s=row['t'],reason=reason,stage=stage))
+            if measured_polygon is not None:
+                actual_reason=boundaries.swept_reason(measured_polygon)
+                if actual_reason:measured_contacts.append(dict(t_s=row['t'],reason=actual_reason,stage=stage))
             if area is not None and stage in ('AVOID_ENTRY','AVOID_HOLD','RETURN'):
                 area_checks+=1
                 if not area.covers(polygon):outside_area.append(dict(t_s=row['t'],stage=stage))
+                if measured_polygon is not None and not area.covers(measured_polygon):
+                    measured_outside.append(dict(t_s=row['t'],stage=stage))
             solids=obstacle_polygons(row.get('solids',[]))
             if solids:clearance=min(clearance,*(polygon_distance(polygon,solid) for solid in solids))
+    stop_values=summary.get('before_restore',{}).get('values',{})
+    stopped_ego=stop_values.get('/ego_vehicle_status',{})
+    stop_convergence=stop_values.get('/localization/grid_convergence_deg')
+    if stopped_ego and stop_convergence is not None and previous is not None:
+        stop_pose=(stopped_ego['x'],stopped_ego['y'],math.radians(stopped_ego['heading_deg']+stop_convergence))
+        polygon=swept_body(body,previous,stop_pose)
+        measured_polygon=swept_body(measured_body,previous,stop_pose) if measured_body is not None else None
+        if measured_polygon is not None:
+            for box in additional_boxes:
+                additional_gap=min(additional_gap,polygon_distance(measured_polygon,actor_box_polygon(box,stop_convergence)))
+        if actor_box is not None:
+            actor_gap=min(actor_gap,polygon_distance(polygon,target))
+            if measured_polygon is not None:measured_gap=min(measured_gap,polygon_distance(measured_polygon,target))
+        if boundaries.swept_reason(polygon):contacts.append(dict(stage='STOPPING_AUDIT',reason=boundaries.swept_reason(polygon)))
+        if measured_polygon is not None and boundaries.swept_reason(measured_polygon):
+            measured_contacts.append(dict(stage='STOPPING_AUDIT',reason=boundaries.swept_reason(measured_polygon)))
     result=dict(success=bool(summary.get('success')),error=summary.get('error'),
+        all_recorded_message_integrity=bag_integrity(directory,summary),
         restored=summary.get('restored'),samples=len(rows),collision_samples=collision_samples,
         forbidden_boundary_contact_samples=len(contacts),contacts=contacts,
         road_area_checked_samples=area_checks,
@@ -146,6 +253,12 @@ def audit(directory):
         sensor_unready_positive_target_samples=unsafe_sensor_commands,
         minimum_observed_lidar_swept_gap_m=clearance if math.isfinite(clearance) else None,
         minimum_static_actor_box_swept_gap_m=actor_gap if math.isfinite(actor_gap) else None,
+        measured_ego_box_used=measured_body is not None,
+        minimum_measured_actor_box_swept_gap_m=measured_gap if math.isfinite(measured_gap) else None,
+        minimum_measured_all_static_actor_gap_m=min(measured_gap,additional_gap) if math.isfinite(measured_gap) else None,
+        measured_ego_box_boundary_contacts=len(measured_contacts) if measured_body is not None else None,
+        measured_ego_box_road_area_outside_samples=len(measured_outside) if area is not None and measured_body is not None else None,
+        measured_ego_box_contacts=measured_contacts,measured_ego_box_area_violations=measured_outside,
         maximum_control_error_m=summary.get('max_control_path_error_m',summary.get('max_path_error_m')),
         peak_speed_kmh=summary.get('peak_speed_kmh'),maximum_command_steer=max_steer,
         maximum_matched_source_age_s=max(freshness,default=None),

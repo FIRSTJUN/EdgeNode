@@ -136,7 +136,8 @@ class SpeedPlanner:
                  curvature_hysteresis=0.005, anticipatory=False,
                  braking_deceleration_mps2=2., reaction_time_s=.6,
                  max_lateral_acceleration_mps2=1.5,
-                 physical_lateral_acceleration_mps2=0.):
+                 physical_lateral_acceleration_mps2=0.,
+                 tracking_lateral_acceleration_mps2=0.):
         self.cruise_speed_kmh = cruise_speed_kmh
         # Accepted for old callers only; ordinary curves use the NORMAL target.
         self.curve_speed_kmh = curve_speed_kmh
@@ -152,6 +153,7 @@ class SpeedPlanner:
         self.reaction_time_s=reaction_time_s
         self.max_lateral_acceleration_mps2=max_lateral_acceleration_mps2
         self.physical_lateral_acceleration_mps2=physical_lateral_acceleration_mps2
+        self.tracking_lateral_acceleration_mps2=tracking_lateral_acceleration_mps2
 
     def plan(self, local_path_points, previous_speed_mode=None, measured_speed_kmh=0.,
              measured_curvature=0.):
@@ -174,7 +176,8 @@ class SpeedPlanner:
         parameters = (*speeds, self.preview_distance_m,
                       self.curve_curvature_threshold, self.sharp_curvature_threshold,
                       self.curvature_smoothing_window_m, self.curvature_persistence_m,
-                      self.curvature_hysteresis,self.physical_lateral_acceleration_mps2)
+                      self.curvature_hysteresis,self.physical_lateral_acceleration_mps2,
+                      self.tracking_lateral_acceleration_mps2)
         if not all(_finite_number(value) for value in parameters):
             return None
         if any(speed < 0 for speed in speeds) or self.preview_distance_m <= 0:
@@ -182,7 +185,8 @@ class SpeedPlanner:
         if not 0 <= self.curve_curvature_threshold < self.sharp_curvature_threshold:
             return None
         if (self.curvature_smoothing_window_m <= 0 or self.curvature_persistence_m <= 0
-                or self.curvature_hysteresis < 0 or self.physical_lateral_acceleration_mps2<0):
+                or self.curvature_hysteresis < 0 or self.physical_lateral_acceleration_mps2<0
+                or self.tracking_lateral_acceleration_mps2<0):
             return None
         if previous_speed_mode not in (None, 'NORMAL', 'SHARP_CURVE'):
             return None
@@ -286,15 +290,23 @@ class SpeedPlanner:
                 if physical>0 and self.sharp_curve_speed_kmh>0 else math.inf)
             physical_mask=_supported_mask(filtered,boundaries,physical_threshold,
                 self.curvature_persistence_m,evaluated_length)
+            tracking=self.tracking_lateral_acceleration_mps2
+            tracking_threshold=(tracking/(self.cruise_speed_kmh/3.6)**2
+                if tracking>0 and self.cruise_speed_kmh>0 else math.inf)
+            tracking_mask=_supported_mask(filtered,boundaries,tracking_threshold,
+                self.curvature_persistence_m,evaluated_length)
             speed = profile_speed = self.cruise_speed_kmh
             speed_mode = 'NORMAL'
             constraint_reason='NORMAL_TARGET'
             reaction_distance = measured_speed_kmh / 3.6 * self.reaction_time_s
             for i, is_sharp in enumerate(mask):
-                if not is_sharp and not physical_mask[i]:
+                if not is_sharp and not physical_mask[i] and not tracking_mask[i]:
                     continue
-                limit = self.sharp_curve_speed_kmh
-                reason='SHARP_CURVE'
+                limit = self.sharp_curve_speed_kmh if is_sharp or physical_mask[i] else self.cruise_speed_kmh
+                reason='SHARP_CURVE' if is_sharp else 'NORMAL_TARGET'
+                if tracking_mask[i]:
+                    tracking_limit=3.6*math.sqrt(tracking/filtered[i])
+                    if tracking_limit<limit:limit=tracking_limit;reason='TRACKING_CURVATURE'
                 if physical_mask[i]:
                     physical_limit=3.6*math.sqrt(physical/filtered[i])
                     if physical_limit<limit:
@@ -303,7 +315,7 @@ class SpeedPlanner:
                 allowed = 3.6 * math.sqrt((limit / 3.6) ** 2
                     + 2 * self.braking_deceleration_mps2 * distance)
                 if allowed < speed:
-                    speed, speed_mode = allowed, 'SHARP_CURVE'
+                    speed, speed_mode = allowed, 'SHARP_CURVE' if is_sharp or limit<=self.sharp_curve_speed_kmh else 'NORMAL'
                     profile_speed, constraint_distance = limit, boundaries[i]
                     constraint_reason=reason
             # Maintain the configured sharp target until actual steering unwinds.
@@ -316,6 +328,11 @@ class SpeedPlanner:
                 if limit<speed:
                     speed=profile_speed=limit;speed_mode='SHARP_CURVE';constraint_distance=0.
                     constraint_reason='LATERAL_FRICTION'
+            if tracking>0 and abs(measured_curvature)>tracking_threshold:
+                limit=3.6*math.sqrt(tracking/abs(measured_curvature))
+                if limit<speed:
+                    speed=profile_speed=limit;constraint_distance=0.;constraint_reason='TRACKING_CURVATURE'
+                    speed_mode='SHARP_CURVE' if limit<=self.sharp_curve_speed_kmh else 'NORMAL'
         result = {
             'target_speed_kmh': float(speed),
             'representative_curvature': representative,
@@ -328,7 +345,8 @@ class SpeedPlanner:
             'braking_constraint_distance_m': constraint_distance,
             'constraint_speed_kmh': float(profile_speed),
         }
-        if self.physical_lateral_acceleration_mps2>0:
+        if self.physical_lateral_acceleration_mps2>0 or self.tracking_lateral_acceleration_mps2>0:
             result.update(constraint_reason=constraint_reason,
-                physical_lateral_acceleration_mps2=self.physical_lateral_acceleration_mps2)
+                physical_lateral_acceleration_mps2=self.physical_lateral_acceleration_mps2,
+                tracking_lateral_acceleration_mps2=self.tracking_lateral_acceleration_mps2)
         return result

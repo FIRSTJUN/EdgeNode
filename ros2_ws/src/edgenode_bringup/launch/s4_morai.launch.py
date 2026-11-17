@@ -42,6 +42,7 @@ def launch_nodes(context):
             route.get('start_link_id') or LaunchConfiguration('route_start_link_id').perform(context)}
         if not mission['route_start_link_id']:raise ValueError('saved route origin is required')
     env={'OPENBLAS_NUM_THREADS':'1','OMP_NUM_THREADS':'1'}
+    lane_candidates=LaunchConfiguration('static_avoidance_method').perform(context)=='lane_candidates'
     return [
         Node(package='edgenode_localization',executable='localization_node',output='screen',
              parameters=[config('edgenode_localization','localization'),{
@@ -59,6 +60,8 @@ def launch_nodes(context):
                  'obstacle_height_filter_enabled':True,
                  'obstacle_max_z_m':value('lidar_obstacle_max_z_m',float),
                  'gravity_ground_compensation':True,
+                 'source_pair_wait_sec':value('lidar_source_pair_wait_sec',float),
+                 'source_pose_max_gap_sec':value('lidar_source_pose_max_gap_sec',float),
                  'time_aligned_obstacles':True}],additional_env=env),
         Node(package='edgenode_planning',executable='planning_node',output='screen',
              parameters=[config('edgenode_planning','planning'),geometry,mission,{
@@ -72,6 +75,12 @@ def launch_nodes(context):
                  'avoidance_deceleration_mps2':value('s4_deceleration_mps2',float),
                  'avoidance_memory_merge_extent_m':value('s4_memory_merge_extent_m',float),
                  'morai_unmarked_junction_experiment':value('morai_unmarked_junction_experiment',bool),
+                 'morai_surface_offset_experiment':value('morai_surface_offset_experiment',bool),
+                 'morai_transient_sensor_recovery':value('morai_transient_sensor_recovery',bool),
+                 'static_avoidance_method':LaunchConfiguration('static_avoidance_method'),
+                 'avoidance_continuous_lane_follow':True if lane_candidates else value('morai_continuous_avoidance',bool),
+                 'avoidance_integrated_strategy':True if lane_candidates else value('morai_integrated_lattice',bool),
+                 'avoidance_optimize_entry_onset':value('morai_natural_avoidance_onset',bool),
                  'avoidance_hold_duration_s':value('hold_duration_s',float),
                  'local_path_length_m':80.,'s4_control_horizon_m':s4_horizon,
                  'speed_preview_distance_m':80.,'speed_anticipatory_enabled':True,
@@ -81,6 +90,7 @@ def launch_nodes(context):
                  'curve_curvature_threshold':.02,
                  'sharp_curvature_threshold':value('normal_sharp_curvature_threshold',float),
                  'normal_physical_lateral_acceleration_mps2':value('normal_lateral_limit_mps2',float),
+                 'normal_tracking_lateral_acceleration_mps2':value('normal_tracking_lateral_limit_mps2',float),
                  'avoidance_normal_obstacle_confirmations':2,
                  'avoidance_normal_detection_latency_s':1.6,
                  'avoidance_entry_geometry_wait_distance_m':6.,
@@ -117,16 +127,24 @@ def generate_launch_description():
         ('s4_deceleration_mps2','2.0'),
         ('s4_memory_merge_extent_m','3.5'),
         ('morai_unmarked_junction_experiment','false'),
+        ('morai_continuous_avoidance','false'),
+        ('morai_integrated_lattice','false'),
+        ('morai_natural_avoidance_onset','false'),
+        ('static_avoidance_method','lattice'),
+        ('morai_surface_offset_experiment','false'),
+        ('morai_transient_sensor_recovery','false'),
         ('lookahead_max_m','12.0'),('lookahead_preview_time_sec','0.8'),
         ('normal_lookahead_min_m','4.0'),('lookahead_heading_budget_rad','1.6'),
         ('normal_lookahead_heading_budget_rad','0.25'),
         ('normal_prediction_time_sec','0.1'),('normal_max_front_steer_normalized','1.0'),
         ('normal_sharp_curvature_threshold','0.03'),('normal_lateral_limit_mps2','9.0'),
+        ('normal_tracking_lateral_limit_mps2','3.0'),
         ('lidar_roi_max_x','100.0'),
         ('lidar_clipped_footprints','true'),
         ('lidar_debug_clouds','true'),
         ('lidar_footprint_tile_m','3.0'),
         ('lidar_obstacle_max_z_m','0.3'),
+        ('lidar_source_pair_wait_sec','0.25'),('lidar_source_pose_max_gap_sec','0.25'),
         ('route_file','/workspace/local_data/kcity_routes/kcity_demo_route.yaml'),
         ('route_start_link_id','A219BS010380'),
     ]

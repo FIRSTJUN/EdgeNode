@@ -24,6 +24,67 @@ def send(guard, data, now=NOW):
     return guard.receive(json.dumps(data), now)
 
 
+def atomic(guard,data,points=(),now=NOW):
+    return guard.frame(json.dumps(dict(schema_version=1,frame_id='map',
+                                      status=data,points=points)),now)
+
+
+def test_atomic_frames_can_skip_samples_without_losing_pairing_or_fault_history():
+    guard=SensorReadiness()
+    assert not atomic(guard,payload())
+    data=payload(stamp=NOW+100_000_000,seq=9,frame=5,published=NOW+100_000_000)
+    assert not atomic(guard,data,now=NOW+100_000_000)
+    assert not guard.reason(NOW+100_000_000)
+    assert guard.matched[0]['frame_seq']==5
+    data=payload(stamp=NOW+200_000_000,seq=11,frame=7,published=NOW+200_000_000)
+    data['fault_seq']=1
+    assert atomic(guard,data,now=NOW+200_000_000)=='SENSOR_FAULT_HISTORY'
+
+
+def test_atomic_heartbeat_cannot_renew_observation_and_digest_mismatch_fails_closed():
+    guard=SensorReadiness()
+    assert not atomic(guard,payload())
+    later=NOW+610_000_000
+    atomic(guard,payload(seq=2,published=later),now=later)
+    assert guard.reason(later)=='OBSTACLE_FRAME_TIMEOUT'
+    guard=SensorReadiness();data=payload();data['obstacle_digest']='f'*64
+    assert atomic(guard,data)=='INVALID_SENSOR_FRAME'
+    assert guard.reason(NOW)=='INVALID_SENSOR_FRAME'
+
+
+def test_atomic_restart_invalidates_old_producer_and_pairs_new_enclosed_frame():
+    guard=SensorReadiness();atomic(guard,payload())
+    assert atomic(guard,payload(session='b'*32))=='SENSOR_RESTARTED'
+    assert not guard.reason(NOW) and guard.matched[0]['session_id']=='b'*32
+    assert atomic(guard,payload(seq=2))=='RETIRED_SENSOR_SESSION'
+
+
+def test_morai_alignment_gap_keeps_only_last_complete_frame_until_unchanged_deadline():
+    guard=SensorReadiness(allow_transient_history=True)
+    atomic(guard,payload())
+    later=NOW+100_000_000
+    data=payload(stamp=later,seq=2,frame=2,state='LOCALIZATION_UNAVAILABLE')
+    data['fault_seq']=1
+    assert not atomic(guard,data,now=later)
+    assert not guard.reason(later) and guard.matched[0]['source_stamp_ns']==NOW
+    later=NOW+610_000_000
+    data=payload(stamp=later,seq=3,frame=3,state='LOCALIZATION_UNAVAILABLE')
+    data['fault_seq']=2
+    assert atomic(guard,data,now=later)=='LOCALIZATION_UNAVAILABLE'
+    assert guard.reason(later)=='LOCALIZATION_UNAVAILABLE'
+
+
+@pytest.mark.parametrize('fault,expected',[('LOCALIZATION_UNAVAILABLE',''),('INVALID_INPUT','SENSOR_FAULT_HISTORY')])
+def test_morai_fault_ledger_distinguishes_skipped_alignment_gap_from_bad_content(fault,expected):
+    guard=SensorReadiness(allow_transient_history=True);atomic(guard,payload())
+    later=NOW+100_000_000;data=payload(stamp=later,seq=3,frame=3)
+    data.update(fault_seq=1,fault_history=[dict(seq=1,state=fault,source_stamp_ns=later)])
+    assert atomic(guard,data,now=later)==expected
+    guard=SensorReadiness(allow_transient_history=True);atomic(guard,payload())
+    data['fault_seq']=2  # Missing history is never permission to ignore a fault.
+    assert atomic(guard,data,now=later)=='SENSOR_FAULT_HISTORY'
+
+
 @pytest.mark.parametrize('status_first', [False, True])
 def test_pairing_works_in_either_dds_arrival_order(status_first):
     guard = SensorReadiness()

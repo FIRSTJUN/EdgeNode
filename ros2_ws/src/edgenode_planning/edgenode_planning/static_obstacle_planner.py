@@ -1,5 +1,6 @@
 """Measured-pose, multi-candidate static avoidance with hard safety gates."""
-from dataclasses import dataclass
+from dataclasses import dataclass,replace
+from copy import copy
 from collections import deque
 from collections import OrderedDict
 from bisect import bisect_right
@@ -11,14 +12,19 @@ from edgenode_control.pure_pursuit import PurePursuit
 from edgenode_control.steering_command import to_morai_front_steer, limit_steering_change
 
 from .avoidance_geometry import convex_covers, convex_hull, intersects, obstacle_polygons, polygon_distance, swept_body, inflate, polygon_bounds, bounds_distance
-from .lane_geometry import PolylineIndex, sample, cross, arc
+from .lane_geometry import PolylineIndex, sample, cross, arc,curvature_at
 from .lattice_path import (LatticeCandidate, CostWeights, center_suffix, control_local_path, curvatures,
                            fixed_path_suffix, heading_error, poses, reference_cost, transition)
 from .vehicle_geometry import sonata_geometry
+from .lane_continuation import continuation
+from .maneuver_selection import ManeuverSelection,Situation,Strategy
 
 
 @dataclass(frozen=True)
 class AvoidanceConfig:
+    continuous_lane_follow: bool = False
+    integrated_strategy: bool = False
+    optimize_entry_onset: bool = False
     transition_lengths_m: tuple = (12., 16., 20.)
     entry_start_offsets_m: tuple = (0., 2., 4.)
     transition_search_step_m: float = 2.
@@ -59,7 +65,9 @@ class AvoidanceConfig:
 
     def __post_init__(self):
         for name, value in self.__dict__.items():
-            if name in ('transition_lengths_m', 'entry_start_offsets_m'):
+            if name in ('continuous_lane_follow','integrated_strategy','optimize_entry_onset'):
+                if type(value) is not bool:raise ValueError('continuous lane follow must be boolean')
+            elif name in ('transition_lengths_m', 'entry_start_offsets_m'):
                 if (not value or any(isinstance(v,bool) or not math.isfinite(v) or
                         (v<=0 if name=='transition_lengths_m' else v<0) for v in value)):
                     raise ValueError('positive transition lengths required')
@@ -143,6 +151,11 @@ class StaticObstaclePlanner:
         self._fixed_sweep_cache=OrderedDict()
         self._detection_pairs={};self._entry_distance_basis={}
         self._distance_context={}
+        self._route_links=();self._route_occurrence=None;self._continuation=None
+        self._continuation_index=None;self.natural_rejoins=0
+        self._maneuver_selection=ManeuverSelection();self._strategy=Strategy.NORMAL
+        self._motion_authorized=True
+        self._entry_pending_path=();self._entry_replan_guide=()
 
     def invalidate_observation(self):
         self.confirmations=0
@@ -154,6 +167,11 @@ class StaticObstaclePlanner:
     def needs_validation_stop(self, reference, groups):
         """Cheap guard before potentially expensive candidate/revision checks."""
         if self.state=='BLOCKED':
+            return False
+        if self.config.continuous_lane_follow:
+            # MORAI continuity mode validates the current control window with
+            # fresh solids in plan(); a prospective revision alone does not
+            # revoke an already valid command before that check completes.
             return False
         detected=obstacle_polygons(groups)
         if self.state=='NORMAL':
@@ -211,7 +229,10 @@ class StaticObstaclePlanner:
             clearance_m=self._min_clearance,clearance_is_lower_bound=True,curvature_limit=self.config.curvature_limit,
             entry_commits=self.entry_commits,return_commits=self.return_commits,
             generated_transition_count=self.generated_transition_count,
-            candidate_lane_batches=self.candidate_lane_batches)
+            candidate_lane_batches=self.candidate_lane_batches,
+            natural_rejoins=self.natural_rejoins,
+            continuation_reason=self._continuation.reason if self._continuation else '',
+            selected_strategy=self._strategy.value if self.config.integrated_strategy else 'LEGACY')
 
     def _block(self, reason):
         if reason in ('BRAKING_DISTANCE','S4_OBSTACLE_STOPPING_DISTANCE'):
@@ -410,6 +431,12 @@ class StaticObstaclePlanner:
         velocity=max(speed,self.config.avoid_speed_kmh)/3.6
         lookahead=calculate_lookahead_distance(velocity*3.6,self.config.lookahead_min_m,
             self.config.lookahead_max_m,self.config.lookahead_preview_time_sec)
+        if self.config.continuous_lane_follow:
+            # The unchanged rollout advances one duration. Include its PP
+            # target, the full front body and tracking support. A second whole
+            # duration is unnecessary for this continuously revalidated window.
+            return (velocity*self.config.rollout_seconds+max(lookahead,
+                self.body.wheelbase_m+self.body.front_overhang_m)+2*self.config.tracking_limit_m)
         return 2*velocity*self.config.rollout_seconds+lookahead+2*self.config.tracking_limit_m
 
     def _rollout(self, points, pose, speed, actual_curvature, obstacles, duration_s=None):
@@ -536,10 +563,12 @@ class StaticObstaclePlanner:
         lookahead=calculate_lookahead_distance(cfg.avoid_speed_kmh,cfg.lookahead_min_m,
             cfg.lookahead_max_m,cfg.lookahead_preview_time_sec)
         preparation=lookahead+velocity*cfg.command_delay_s
+        search_advance=max(4.,velocity*2.) if cfg.continuous_lane_follow else 0.
         self._entry_distance_basis=dict(source='map_kinematic_estimate' if lengths else 'conservative_fallback',
             transition_m=length,preparation_m=preparation,pairs=details,
+            search_advance_m=search_advance,
             latency_s=cfg.normal_detection_latency_s,deceleration_mps2=cfg.deceleration_mps2)
-        return length+preparation
+        return length+preparation+search_advance
 
     def _road_offsets(self, road, reference, side):
         """Probe actual map-supported cross-section, never a guessed width.
@@ -562,11 +591,22 @@ class StaticObstaclePlanner:
         supported=[]
         def covered(offset):
             solid=self.body.polygon(point[0]+offset*normal[0],point[1]+offset*normal[1],yaw)
-            return road.covers(inflate(solid,margin))
+            if not road.covers(inflate(solid,margin)):return False
+            if self.config.continuous_lane_follow:
+                if any(polygon_distance(solid,o)<=self.config.obstacle_margin_m for o in self.remembered):return False
+                boundaries=getattr(self.network,'boundaries',None)
+                if boundaries is not None and boundaries.swept_reason(solid):return False
+            return True
         for low,high in intervals:
             low=max(.2,low+half);high-=half
+            if self.config.continuous_lane_follow:high=min(high,self.config.prediction_distance_m)
             if high<low:continue
-            divisions=max(1,math.ceil((high-low)/.2))
+            # A parked object can leave a narrow but fully margined interval.
+            # The former 20 cm probes skipped those intervals and selected a
+            # distant branch instead. Exact union predicates keep fine probes
+            # inexpensive; every kept candidate still has a whole-body proof.
+            step=.025 if self.config.continuous_lane_follow else .2
+            divisions=max(1,math.ceil((high-low)/step))
             previous=None
             for i in range(divisions+1):
                 offset=low+(high-low)*i/divisions
@@ -613,6 +653,29 @@ class StaticObstaclePlanner:
             reserved.append(convex_hull(list(solid)+[(x-tx*reserve,y-ty*reserve) for x,y in solid]))
         return tuple(reserved)
 
+    def _road_entry_offsets(self,pair,prepared_s,front):
+        """Prioritize onsets inside measured crossing space, before full PP.
+
+        This is an ordering probe only. Every accepted transition still gets
+        the full swept road, marking, obstacle and controller checks.
+        """
+        budget=max(0.,front-prepared_s-min(self._entry_lengths())-
+                   self.body.wheelbase_m-self.body.front_overhang_m-self.config.obstacle_margin_m)
+        values=sorted(set(self.config.entry_start_offsets_m)|
+                      {2.*i for i in range(math.floor(min(budget,40.)/2)+1)})
+        ranked=[]
+        for offset in values:
+            if offset>budget:continue
+            row=pair.at(prepared_s+offset)
+            if row is None:continue
+            source=sample(pair.original,prepared_s+offset)
+            target=sample(pair.adjacent,row['adjacent_s'])
+            yaw=math.atan2(source[1][1],source[1][0])
+            a=(*source[0][:2],yaw);b=(*target[0][:2],yaw)
+            reason=self._map_sweep_reason(a,b,self._body_geometry(a,b),getattr(self.network,'boundaries',None))
+            ranked.append((bool(reason),offset))
+        return tuple(value for _,value in sorted(ranked))
+
     def _generate_entry(self, pair, pose, speed, actual_curvature, front, body_cache=None):
         """Search both transition length and entry position, without refitting
         an approved maneuver. Every accepted entry is tracked to completion.
@@ -626,11 +689,18 @@ class StaticObstaclePlanner:
         reserve=self._rollout_distance(speed)
         candidates=[];projection_cache={}
         obstacles=self._entry_obstacles(pair)
+        if self.config.continuous_lane_follow and getattr(pair,'mode','lane')=='road_offset':
+            # A sparsely visible face grows as Ego approaches. Reserve the
+            # admitted tracking envelope and observation padding when choosing
+            # the offset; live validation retains the unchanged hard floors.
+            observation_reserve=2*self.config.tracking_limit_m+self.config.observation_padding_m
+            obstacles=tuple(inflate(o,observation_reserve) for o in obstacles)
         original_area=self._road_area
         original_reserve=self._planning_tracking_reserve
         self._road_area=getattr(pair,'road_area',None)
         self._planning_tracking_reserve=(self.config.tracking_limit_m
             if getattr(pair,'mode','lane')=='road_offset' else 0.)
+        deferred=self.config.continuous_lane_follow and self.config.optimize_entry_onset and not self._entry_replan_guide
         def generate(length, offset):
             entry=path=();end=prepared_s+offset+length;cost=math.inf;terms={};clearance=0.
             try:
@@ -640,7 +710,8 @@ class StaticObstaclePlanner:
                     # A small offset can fit entry yet collide during HOLD.
                     # Prove passage of the entire observed obstruction before
                     # committing to this non-centerline guide.
-                    tail_s=max(tail_s,rear+self.body.rear_overhang_m+self.config.return_margin_m+reserve)
+                    passage_support=(self.config.lookahead_min_m if self.config.continuous_lane_follow else reserve)
+                    tail_s=max(tail_s,rear+self.body.rear_overhang_m+self.config.return_margin_m+passage_support)
                 target=pair.at(end);tail=pair.at(min(supported,tail_s))
                 if target is None or tail is None or tail_s>supported:
                     raise ValueError('INSUFFICIENT_ENTRY_SUPPORT')
@@ -648,14 +719,18 @@ class StaticObstaclePlanner:
                 if offset:
                     start=sample(pair.original,prepared_s+offset)
                     if start is None:raise ValueError('ORIGINAL_LANE_RANGE')
-                    approach=transition(prepared[:2],prepared[2],actual_curvature,
-                        pair.original,prepared_s+offset,offset)
-                    initial=prefix+approach[1:]
+                    if deferred and math.dist(pose[:2],row[0][:2])<=self.config.tracking_limit_m/4:
+                        initial=center_suffix(pair.original,ego,prepared_s+offset)
+                    else:
+                        approach=transition(prepared[:2],prepared[2],actual_curvature,
+                            pair.original,prepared_s+offset,offset)
+                        initial=prefix+approach[1:]
                     from .lane_geometry import curvature_at
                     start_pose=(*start[0][:2],math.atan2(start[1][1],start[1][0]))
                     start_turn=curvature_at(pair.original,prepared_s+offset)
-                entry=initial+transition(start_pose[:2],start_pose[2],start_turn,
-                    pair.adjacent,target['adjacent_s'],length)[1:]
+                recovery=transition(start_pose[:2],start_pose[2],start_turn,
+                    pair.adjacent,target['adjacent_s'],length)
+                entry=initial+recovery[1:]
                 self.generated_transition_count+=1
                 path=entry+center_suffix(pair.adjacent,target['adjacent_s'],tail['adjacent_s'])[1:]
                 needed=end+self.body.wheelbase_m+self.body.front_overhang_m+\
@@ -666,7 +741,14 @@ class StaticObstaclePlanner:
                 reason=''
                 if self._entry_observation_m is not None and needed-ego>self._entry_observation_m:
                     reason='ENTRY_OBSERVATION_DISTANCE'
-                if not reason:reason=self._path_safety(path,obstacles,speed,body_cache=body_cache)
+                if not reason:
+                    # Reject an untrackable curve before its expensive map
+                    # sweeps. Accepted candidates still receive every sweep
+                    # and the full measured-state controller rollout below.
+                    reason=self._path_safety(path,(),speed,geometry_check=False,
+                        curvature_points=recovery if deferred and self._observation_curvature_limit is None else None)
+                if not reason:reason=self._path_safety(path,obstacles,speed,body_cache=body_cache,
+                    curvature_points=recovery if deferred and self._observation_curvature_limit is None else None)
                 if not reason:
                     duration=arc(entry)[-1]/(max(speed,self.config.avoid_speed_kmh)/3.6)+self.config.rollout_seconds
                     if getattr(pair,'mode','lane')=='road_offset':
@@ -674,16 +756,44 @@ class StaticObstaclePlanner:
                     reason=self._rollout(path,pose,speed,actual_curvature,obstacles,duration_s=duration)
                 if not reason and getattr(pair,'mode','lane')=='road_offset':
                     clearance=self._hazard_clearance(path)
-                cost,terms=reference_cost(path,pair.original,pair.adjacent,self.weights,
-                                          projection_cache=projection_cache)
+                if not reason or not self.config.continuous_lane_follow:
+                    cost,terms=reference_cost(path,pair.original,pair.adjacent,self.weights,
+                                              projection_cache=projection_cache)
             except (ValueError,TypeError,IndexError,OverflowError) as error:
                 reason=str(error)
             candidates.append(LatticeCandidate(pair.side,path or entry,end,math.nan,math.nan,
                 length,cost,terms,reason,path or entry,(),entry,
                 entry_start_offset_m=offset,mode=getattr(pair,'mode','lane'),obstacle_clearance_m=clearance))
         try:
-            for length in self.config.transition_lengths_m:generate(length,0.)
-            if not any(not c.rejection for c in candidates):
+            if deferred:
+                request=self._entry_onset_request(pair,pose,speed,actual_curvature,front)
+                for length in self._entry_lengths():
+                    if length+1e-9<request['minimum_transition_m']:continue
+                    offset=max(0.,front-self.body.wheelbase_m-self.body.front_overhang_m-
+                        self.config.obstacle_margin_m-request['reserve_m']-length-prepared_s)
+                    # PP begins responding before the geometric bend reaches
+                    # the rear axle. Test that measured controller lead as a
+                    # geometric onset compensation; every candidate still
+                    # needs full nominal-body and actual-PP clearance proofs.
+                    offset+=request['controller_lookahead_m']
+                    # A safe original-lane approach is part of the fixed path;
+                    # computation/commit happens now, not at the onset point.
+                    attempts=min(16,math.ceil(offset/self.config.transition_search_step_m)+1)
+                    for i in range(attempts):
+                        generate(length,max(0.,offset-i*self.config.transition_search_step_m))
+                        if not candidates[-1].rejection:break
+                    if any(not c.rejection for c in candidates):break
+            elif self.config.continuous_lane_follow and getattr(pair,'mode','lane')=='road_offset':
+                lengths=tuple(dict.fromkeys(self.config.transition_lengths_m+self._entry_lengths()))
+                for offset in self._road_entry_offsets(pair,prepared_s,front):
+                    for length in lengths:
+                        generate(length,offset)
+                        if not candidates[-1].rejection:break
+                    if any(not c.rejection for c in candidates):break
+            else:
+                for length in self.config.transition_lengths_m:generate(length,0.)
+            if (not any(not c.rejection for c in candidates) and
+                    not (self.config.continuous_lane_follow and getattr(pair,'mode','lane')=='road_offset')):
                 for offset in self.config.entry_start_offsets_m:
                     for length in self._entry_lengths():
                         if offset==0. and length in self.config.transition_lengths_m:continue
@@ -692,6 +802,31 @@ class StaticObstaclePlanner:
             self._road_area=original_area
             self._planning_tracking_reserve=original_reserve
         return candidates
+
+    def _entry_onset_request(self,pair,pose,speed,curvature,front):
+        """Physical maneuver length and a separate post-computation reserve."""
+        cfg=self.config;velocity=max(speed,cfg.avoid_speed_kmh)/3.6
+        station=pair.original_index.project(pose[:2])
+        rows=[pair.at(max(0.,min(pair.length,s))) for s in (station,(station+front)/2,front)]
+        separation=max(abs(row['separation']) for row in rows if row is not None)
+        start=max(station,front-max(cfg.transition_lengths_m))
+        native=max(abs(curvature),*(abs(curvature_at(pair.original,max(0.,min(pair.length,s))))
+                                   for s in (start,(start+front)/2,front)))
+        available=min(cfg.curvature_limit,cfg.max_lateral_acceleration_mps2/velocity**2)-native
+        rate=cfg.steering_slew_limit_radps or cfg.max_wheel_rate_radps
+        curvature_length=math.sqrt((10./math.sqrt(3.))*separation/available) if available>0 else math.inf
+        rate_length=(60.*cfg.wheelbase_m*separation*velocity/rate)**(1./3.) if rate>0 else math.inf
+        row=sample(pair.original,max(0.,min(pair.length,station)))
+        error=math.dist(pose[:2],row[0][:2])
+        reserve=(cfg.tracking_limit_m+error+cfg.observation_padding_m+
+                 velocity*(cfg.command_delay_s+1/cfg.control_rate_hz))
+        return dict(minimum_transition_m=max(curvature_length,rate_length),
+            separation_m=separation,curvature_length_m=curvature_length,
+            steering_rate_length_m=rate_length,native_curvature=native,
+            reserve_m=reserve,tracking_error_m=error,speed_kmh=speed,
+            command_delay_s=cfg.command_delay_s,planning_speed_kmh=velocity*3.6,
+            controller_lookahead_m=calculate_lookahead_distance(velocity*3.6,cfg.lookahead_min_m,
+                cfg.lookahead_max_m,cfg.lookahead_preview_time_sec))
 
     def _search_entry(self, reference, pose, speed_kmh, actual_curvature, current_link_id,
                       route_link_ids, route_link_index, distance, body_cache=None):
@@ -711,9 +846,7 @@ class StaticObstaclePlanner:
                     pair_available=pair is not None)
                 if pair is None:continue
                 setattr(self,side+'_lane',pair.adjacent)
-                front_s=min(pair.original_index.project(p) for o in self._hazards for p in o)
-                candidates=self._generate_entry(pair,pose,speed_kmh,actual_curvature,front_s,body_cache)
-                all_candidates.extend(candidates);pairs.append((pair,candidates))
+                pairs.append((pair,[]))
             except (ValueError,TypeError,IndexError,OverflowError) as error:
                 self._entry_context['sides'].setdefault(side,{})['error']=str(error)
                 if (str(error)=='ORIGINAL_LANE_RANGE' and pair is not None
@@ -732,6 +865,37 @@ class StaticObstaclePlanner:
                 except (ValueError,TypeError,IndexError,OverflowError):area=None
                 if area is not None:roads.append(area)
         self._entry_context['road_offset_evidence']=';'.join(r.source for r in roads) or 'UNAVAILABLE'
+        chosen=None
+        if self.config.integrated_strategy:
+            kind=self.network.links.get(current_link_id,{}).get('link_type')
+            chosen=self._maneuver_selection.select(Situation(
+                context=(current_link_id,tuple(route_link_ids)),static_path_blocked=True,
+                moving_conflict=getattr(self,'_moving_conflict',False),
+                lane_topology_clear=kind in ('6',6) and bool(pairs),road_area_verified=bool(roads),
+                replan_required=True))
+            self._strategy=chosen.strategy
+            self._entry_context.update(strategy=chosen.strategy.value,strategy_reason=chosen.reason,
+                strategy_generation=chosen.generation)
+            if chosen.strategy==Strategy.BLOCKED:return self._block(chosen.reason)
+            if chosen.strategy==Strategy.DYNAMIC_TRAFFIC:
+                return self._block('DYNAMIC_TRAJECTORY_SEARCH_NOT_READY')
+        if chosen is None or chosen.strategy==Strategy.LANE_STATIC:
+            for i,(pair,_) in enumerate(pairs):
+                try:
+                    front_s=min(pair.original_index.project(p) for o in self._hazards for p in o)
+                    candidates=self._generate_entry(pair,pose,speed_kmh,actual_curvature,front_s,body_cache)
+                except (ValueError,TypeError,IndexError,OverflowError) as error:
+                    self._entry_context['sides'][pair.side]['error']=str(error)
+                    candidates=[]
+                    if (str(error)=='ORIGINAL_LANE_RANGE' and
+                            -self.config.entry_geometry_wait_distance_m<=pair.original_index.project(pose[:2])<0.):
+                        candidates=[LatticeCandidate(pair.side,(),math.nan,math.nan,math.nan,
+                            0.,math.inf,{},'ENTRY_START_BEFORE_LANE')]
+                pairs[i]=(pair,candidates);all_candidates.extend(candidates)
+        if chosen is not None and chosen.strategy==Strategy.LANE_STATIC:roads=[]
+        if self.config.continuous_lane_follow and any(not c.rejection for _,cs in pairs for c in cs):
+            roads=[]
+            self._entry_context['road_offset_search_skipped']='VALID_NATIVE_LANE'
         for road in roads:
             for side in ('left','right'):
                 if side not in road.allowed_sides:continue
@@ -739,20 +903,62 @@ class StaticObstaclePlanner:
                 if not offsets:
                     all_candidates.append(LatticeCandidate(side,(),math.nan,math.nan,math.nan,
                         0.,math.inf,{},'ROAD_AREA_UNPROVEN',mode='road_offset',obstacle_clearance_m=0.))
-                explored={}
+                    continue
+                explored={};offset_rejections={};offset_collision_counts={};offset_map_counts={}
                 def evaluate_offset(offset):
+                    maximum=None
+                    if self.config.continuous_lane_follow:
+                        at=PolylineIndex(self.network.links[current_link_id]['points']).project(pose[:2])
+                        maximum=max(0.,at)+self.config.prediction_distance_m+2*max(self.config.transition_lengths_m)
                     pair=road.offset_pair(self.network,current_link_id,side,list(route_link_ids),
-                        offset,route_link_index)
+                        offset,route_link_index,maximum_station_m=maximum)
                     if pair is None:return
                     front_s=min(pair.original_index.project(p) for o in self._hazards for p in o)
                     cs=self._generate_entry(pair,pose,speed_kmh,actual_curvature,front_s,body_cache)
                     all_candidates.extend(cs);pairs.append((pair,cs))
                     explored[offset]=any(not c.rejection for c in cs)
-                for offset in offsets:evaluate_offset(offset)
+                    offset_rejections[offset]={c.rejection for c in cs}
+                    offset_collision_counts[offset]=sum(c.rejection in ('BODY_COLLISION','REFERENCE_CLEARANCE') for c in cs)
+                    offset_map_counts[offset]=sum(c.rejection=='ROAD_AREA_UNPROVEN' or
+                        c.rejection.startswith('LANE_BOUNDARY_COLLISION:') for c in cs)
+                if self.config.continuous_lane_follow:
+                    # Compare both directions; prefer the smallest proved
+                    # deviation so an offset does not drift into a distant fork.
+                    offsets=tuple(sorted(offsets))
+                refinement_budget=8;previous_offset=None
+                for offset in offsets:
+                    evaluate_offset(offset)
+                    if (self.config.continuous_lane_follow and previous_offset is not None and
+                            not explored.get(offset,False) and not explored.get(previous_offset,False) and
+                            offset_rejections.get(previous_offset,set())&{'BODY_COLLISION','REFERENCE_CLEARANCE'} and
+                            any(r=='ROAD_AREA_UNPROVEN' or r.startswith('LANE_BOUNDARY_COLLISION:')
+                                for r in offset_rejections.get(offset,set()))):
+                        # A narrow passing interval can lie between a collision
+                        # at the lower probe and a divider at the upper one.
+                        # Refine that bracket before jumping into a distant lane.
+                        low,high=previous_offset,offset
+                        while refinement_budget and high-low>.01:
+                            mid=(low+high)/2;refinement_budget-=1;evaluate_offset(mid)
+                            if explored.get(mid,False):break
+                            if offset_collision_counts.get(mid,0)>offset_map_counts.get(mid,0):low=mid
+                            else:high=mid
+                    if self.config.continuous_lane_follow and any(explored.values()):break
+                    previous_offset=offset
+                if self.config.continuous_lane_follow and any(explored.values()):
+                    high=min(value for value,valid in explored.items() if valid)
+                    lower=[value for value,valid in explored.items() if value<high and not valid]
+                    if lower:
+                        low=max(lower)
+                        for _ in range(4):
+                            if high-low<.01:break
+                            mid=(low+high)/2;evaluate_offset(mid)
+                            if explored.get(mid,False):high=mid
+                            else:low=mid
                 # Cross-section fit alone does not prove a curved transition.
                 # Refine the gap beyond the farthest WHOLE-trajectory success
                 # instead of losing up to one coarse step of usable road.
                 for _ in range(4):
+                    if self.config.continuous_lane_follow and any(explored.values()):break
                     safe_offsets=[value for value,valid in explored.items() if valid]
                     if not safe_offsets:break
                     low=max(safe_offsets)
@@ -763,6 +969,22 @@ class StaticObstaclePlanner:
                     evaluate_offset((low+high)/2)
         self.candidates=tuple(all_candidates)
         safe=[(c,p) for p,cs in pairs for c in cs if not c.rejection]
+        offset_return_proofs={}
+        if self.config.continuous_lane_follow:
+            feasible=[];rejected={}
+            for candidate,pair in safe:
+                if candidate.mode!='road_offset':
+                    feasible.append((candidate,pair));continue
+                proof=self._offset_return_proof(candidate,pair,speed_kmh)
+                if proof is not None:
+                    feasible.append((candidate,pair))
+                    offset_return_proofs[id(candidate)]=proof
+                else:rejected[id(candidate)]=replace(candidate,rejection='OFFSET_RETURN_UNPROVEN')
+            if rejected:
+                self.candidates=tuple(rejected.get(id(c),c) for c in self.candidates)
+                self._entry_context['offset_return_rejected']=len(rejected)
+                if not feasible:return self._block('OFFSET_RETURN_UNPROVEN')
+            safe=feasible
         if not safe:
             # A lane junction may have safe entry geometry a little ahead.
             # Never waive candidate rejection. The S4 target may be used
@@ -790,12 +1012,58 @@ class StaticObstaclePlanner:
         # an entry-only lane tail. Prefer its largest verified obstacle gap,
         # then use the existing path cost; every hard floor stays mandatory.
         offsets=[row for row in safe if row[0].mode=='road_offset']
-        self.selected,self.pair=(min(offsets,key=lambda row:(-row[0].obstacle_clearance_m,row[0].cost))
+        self.selected,self.pair=(min(offsets,key=lambda row:(row[0].cost,-row[0].obstacle_clearance_m))
+                                 if offsets and self.config.continuous_lane_follow else
+                                 min(offsets,key=lambda row:(-row[0].obstacle_clearance_m,row[0].cost))
                                  if offsets else min(safe,key=lambda row:row[0].cost))
         self._road_area=getattr(self.pair,'road_area',None)
+        if id(self.selected) in offset_return_proofs:
+            self._entry_context['offset_return_proof']=offset_return_proofs[id(self.selected)]
+        if self.config.continuous_lane_follow and self.config.optimize_entry_onset:
+            front=min(self.pair.original_index.project(p) for o in self._hazards for p in o)
+            timing=self._entry_onset_request(self.pair,pose,speed_kmh,actual_curvature,front)
+            prepared,_=self._preparation(pose,speed_kmh,actual_curvature,self.selected.entry_path[0][2])
+            onset=self.pair.original_index.project(prepared[:2])+self.selected.entry_start_offset_m
+            timing.update(onset_station_m=onset,
+                onset_obstacle_front_gap_m=front-onset-self.body.wheelbase_m-self.body.front_overhang_m,
+                transition_length_m=self.selected.transition_length_m,
+                approach_length_m=self.selected.entry_start_offset_m,
+                calculation_deferred=False)
+            self._entry_context['onset_plan']=timing
+        if chosen is not None:self._maneuver_selection.commit(chosen,id(self.selected.entry_path),path_valid=True)
         self._last_progress=None;self._original=self.pair.original
         self.state='AVOID_ENTRY';self.reason='';self.entry_commits+=1
         return self._result(self.selected.entry_path)
+
+    def _offset_return_proof(self,candidate,pair,speed):
+        """Do not commit an offset that traps Ego behind a later solid line.
+
+        This is a forecast from the observed static envelope, not permission
+        to execute a future return. The live return still rechecks all inputs.
+        Only anchors inside the already proved entry/hold guide are searched.
+        """
+        probe=copy(self);probe.pair=pair;probe.selected=candidate
+        probe._road_area=pair.road_area;probe._validated_paths={}
+        probe._obstacle_bounds=dict(self._obstacle_bounds)
+        probe._map_sweep_cache=type(self._map_sweep_cache)()
+        probe._fixed_sweep_cache=type(self._fixed_sweep_cache)()
+        last=pair.original_index.project(candidate.entry_path[-1])
+        rear=max(pair.original_index.project(p) for o in self._hazards for p in o)
+        start=max(candidate.entry_end_s,rear+self.body.rear_overhang_m+self.config.return_margin_m)
+        for advance in range(0,9,2):
+            station=start+advance
+            if station>last:break
+            row=pair.at(station)
+            if row is None:continue
+            target=sample(pair.adjacent,row['adjacent_s'])
+            pose=(*target[0][:2],math.atan2(target[1][1],target[1][0]))
+            if not probe._return_clearance_ready(pose):continue
+            from .lane_geometry import curvature_at
+            reason=probe._generate_return(pose,speed,curvature_at(pair.adjacent,row['adjacent_s']),{})
+            if not reason:
+                return dict(source='LIVE_LIDAR_AND_VERIFIED_MAP',station_m=station,
+                            transition_length_m=probe.selected.transition_length_m)
+        return None
 
     def _return_permission(self, start, end):
         if start<0 or end>self.pair.length:return 'RETURN_OUTSIDE_LANE_SUPPORT'
@@ -826,7 +1094,9 @@ class StaticObstaclePlanner:
         prepared,prefix=self._preparation(pose,speed,actual_curvature,row[0][2])
         start=index.project(prepared[:2]);reserve=self._rollout_distance(speed)
         candidates=[]
-        for length in self.config.transition_lengths_m:
+        lengths=(self._entry_lengths() if self.config.continuous_lane_follow and
+                 getattr(self.pair,'mode','lane')=='road_offset' else self.config.transition_lengths_m)
+        for length in lengths:
             path=curve=();end=start+length;terms={};cost=math.inf
             try:
                 target=sample(reference,end)
@@ -890,6 +1160,15 @@ class StaticObstaclePlanner:
         # Only map proofs are persistent. Check all current solids against the
         # remaining path every call, even when a new frame has equal vertices.
         future=fixed_path_suffix(path,station)
+        if self.config.continuous_lane_follow:
+            # Static geometry was proved when this fixed maneuver was adopted.
+            # Fresh solids affect the presently commanded/stopping window;
+            # a distant tail is not a reason to erase a valid local path.
+            stopping=(speed/3.6*self.config.reaction_time_s+
+                (speed/3.6)**2/(2*self.config.deceleration_mps2)+5.)
+            horizon=max(self._control_horizon_m,self._rollout_distance(speed)+1.,stopping)
+            end=min(arc(path)[-1],station+horizon)
+            if arc(future)[-1]>horizon:future=center_suffix(path,station,end)
         reference_experiment=(path is self._hold_path and getattr(
             self.network,'morai_unmarked_junction_experiment',False))
         reason=self._path_safety(future,self.remembered,speed,body_cache=body_cache,
@@ -899,19 +1178,26 @@ class StaticObstaclePlanner:
 
     def _hold(self, pose, speed, actual_curvature, body_cache):
         """Generate/extend only a measured MGeo adjacent-centerline suffix."""
-        station=self.pair.adjacent_index.project(pose[:2])
+        guide=self.pair.adjacent;index=self.pair.adjacent_index;lengths=self.pair.adjacent_arc
+        if self.config.continuous_lane_follow and getattr(self.pair,'mode','lane')=='lane':
+            if self._continuation is None:
+                self._continuation=continuation(self.network,self.pair,self._route_links,self._route_occurrence)
+                self._continuation_index=PolylineIndex(self._continuation.points)
+            guide=self._continuation.points;index=self._continuation_index;lengths=index.lengths
+        station=index.project(pose[:2])
         if not self._hold_path or arc(self._hold_path)[-1]-PolylineIndex(self._hold_path).project(pose[:2])<self._rollout_distance(speed)+1.:
-            end=min(self.pair.adjacent_arc[-1]-self.body.wheelbase_m-self.body.front_overhang_m-1.,
+            end=min(lengths[-1]-self.body.wheelbase_m-self.body.front_overhang_m-1.,
                     station+self.config.prediction_distance_m)
             if end<=station:return self._block('ADJACENT_LANE_END')
-            path=center_suffix(self.pair.adjacent,station,end)
+            path=center_suffix(guide,station,end)
             if self._road_area is not None:
                 reason=''
                 if not getattr(self.network,'morai_unmarked_junction_experiment',False):
                     end,reason=self._hold_kinematic_end(station,end,speed)
                 path=center_suffix(self.pair.adjacent,station,end) if end>station else ()
                 path,map_reason=self._map_supported_prefix(path)
-                minimum=max(self._control_horizon_m,self._rollout_distance(speed)+1.)
+                minimum=(self._rollout_distance(speed)+1. if self.config.continuous_lane_follow else
+                         max(self._control_horizon_m,self._rollout_distance(speed)+1.))
                 if not path or arc(path)[-1]<minimum:
                     return self._block(map_reason or reason or 'ROAD_AREA_UNPROVEN')
             self._hold_path=path
@@ -919,12 +1205,49 @@ class StaticObstaclePlanner:
         reason=self._validate_active(self._hold_path,pose,speed,actual_curvature,body_cache)
         return self._block(reason) if reason else self._result(self._hold_path)
 
+    def _offset_entry_replan(self,reason,reference,pose,speed,curvature,current,route,route_index,entry_search):
+        if (not self.config.continuous_lane_follow or self.selected.mode!='road_offset' or
+                entry_search is None or reason not in ('BODY_COLLISION','REFERENCE_CLEARANCE','ROAD_AREA_UNPROVEN') or
+                self._collision_context.get('phase')!='PATH_SWEEP'):
+            return None
+        failure=dict(self._collision_context);index=PolylineIndex(self.selected.entry_path)
+        station=index.project(pose[:2]);end=index.project(failure['first_pose'][:2])-.75
+        if end<=station:return None
+        safe=center_suffix(self.selected.entry_path,station,end)
+        if self._validate_active(safe,pose,speed,curvature,{}):
+            self._collision_context=failure;return None
+        self._entry_pending_path=safe
+        if not self._entry_replan_guide:self._entry_replan_guide=self.selected.entry_path
+        result=entry_search(self,reference,pose,speed,curvature,current,route,route_index,end-station,{})
+        self._entry_context['active_replan_reason']=reason
+        return result
+
     def _hold_kinematic_points(self, path, pose):
-        start=self.pair.adjacent_index.project(pose[:2])
-        end=self.pair.adjacent_index.project(path[-1])
-        first=max(0,bisect_right(self.pair.adjacent_arc,start)-2)
-        last=min(len(self.pair.adjacent),bisect_right(self.pair.adjacent_arc,end)+2)
-        return self.pair.adjacent[first:last]
+        index=self._continuation_index or self.pair.adjacent_index
+        points=index.points;lengths=index.lengths
+        start=index.project(pose[:2]);end=index.project(path[-1])
+        first=max(0,bisect_right(lengths,start)-2)
+        last=min(len(points),bisect_right(lengths,end)+2)
+        return points[first:last]
+
+    def _lane_obstacle_preview(self,pose,speed):
+        """Look beyond the control window before committing to a lane end.
+
+        This requests the existing background return search; it neither
+        discards a valid guide nor treats a distant object as a collision now.
+        """
+        index=self._continuation_index or self.pair.adjacent_index
+        at=max(0.,index.project(pose[:2]));end=min(index.lengths[-1],at+self.config.prediction_distance_m)
+        if end<=at:return None
+        ahead=center_suffix(index.points,at,end)
+        hazards=self._normal_hazards(ahead,self.remembered)
+        if not hazards:return None
+        front=min(index.project(p) for solid in hazards for p in solid)
+        gap=front-at-self.body.wheelbase_m-self.body.front_overhang_m-self.config.obstacle_margin_m
+        reserve=(max(speed,self.config.avoid_speed_kmh)/3.6*4.
+                 +max(self.config.transition_lengths_m)+self._rollout_distance(speed))
+        self._entry_context.update(lane_obstacle_gap_m=gap,lane_obstacle_replan_distance_m=reserve)
+        return gap if gap<=reserve else None
 
     def _hold_kinematic_end(self, start, end, speed):
         """Stop the guide before a future untrackable corner, never smooth it."""
@@ -972,9 +1295,17 @@ class StaticObstaclePlanner:
         self._surround_clearance=min((polygon_distance(body,o) for o in self.remembered),default=math.inf)
         rear=max(self.pair.original_index.project(p) for o in self._hazards for p in o)
         cleared=min(self.pair.original_index.project(p) for p in body)>rear+self.config.return_margin_m
+        if self.config.continuous_lane_follow and self.selected.mode=='road_offset':
+            # Offset return is a swept out-and-back curve, not a discrete lane
+            # switch. Spatial clearance may permit beginning that curve while
+            # still alongside the object; its complete sweep/rollout decides.
+            reserve=(self.config.obstacle_margin_m+self.config.tracking_limit_m+
+                     self.config.observation_padding_m)
+            return self._surround_clearance>=reserve
         return cleared and self._surround_clearance>=self.config.hold_clearance_m
 
     def _accept_motion_progress(self,progress):
+        if not self._motion_authorized:return ''
         if self._last_progress is not None and progress<self._last_progress-self.config.tracking_limit_m:
             self._failure_context=dict(previous_motion_progress_m=self._last_progress,
                 current_progress_m=progress,pose=self._last_pose)
@@ -1082,7 +1413,9 @@ class StaticObstaclePlanner:
              hazard_reference=None, entry_reserve_m=0., stopping_required_m=None,
              entry_observation_m=None, observation_curvature_limit=None,
              now_sec=None, global_reference=None, return_search=None,
-             route_link_index=None, observation_stamp_ns=None, entry_search=None):
+             route_link_index=None, observation_stamp_ns=None, entry_search=None,motion_authorized=True):
+        if type(motion_authorized) is not bool:return self._block('INVALID_MOTION_AUTHORIZATION')
+        self._motion_authorized=motion_authorized
         normal_reference=reference
         reference=hazard_reference if hazard_reference is not None else reference
         self._min_clearance=math.inf
@@ -1184,6 +1517,8 @@ class StaticObstaclePlanner:
                 if len(saved)<2 or any(len(p)!=3 or not all(math.isfinite(v) for v in p) for p in saved):
                     return self._block('SAVED_GLOBAL_PATH_UNAVAILABLE')
                 self._global_path=tuple(tuple(p) for p in saved)
+                self._route_links=tuple(route_link_ids);self._route_occurrence=route_link_index
+                self._continuation=self._continuation_index=None
                 self._entry_context=dict(current_link_id=current_link_id,
                     route_occurrences=list(route_link_ids).count(current_link_id),pose=tuple(pose))
                 self._detected_obstacles=tuple(dict(
@@ -1199,7 +1534,11 @@ class StaticObstaclePlanner:
                 self.state='DETECT';self.reason='OBSTACLE_DETECTED'
                 return self._detection_path(reference,pose)
             if speed_kmh>self.config.avoid_speed_kmh+.2:
-                self.reason='DECELERATING';return self._detection_path(reference,pose)
+                self.reason='DECELERATING'
+                if self.config.continuous_lane_follow and self.config.optimize_entry_onset and entry_search is not None:
+                    return entry_search(self,reference,pose,speed_kmh,actual_curvature,current_link_id,
+                        route_link_ids,route_link_index,distance,body_cache)
+                return self._detection_path(reference,pose)
             if self._entry_wait_path:
                 progress=PolylineIndex(self._global_path).project(pose[:2])
                 if progress < self._entry_wait_retry:
@@ -1217,13 +1556,30 @@ class StaticObstaclePlanner:
             if reason:return self._block(reason)
         if self.state=='AVOID_ENTRY':
             reason=self._validate_active(self.selected.entry_path,pose,speed_kmh,actual_curvature,body_cache)
-            if reason:return self._block(reason)
+            if reason:
+                result=self._offset_entry_replan(reason,reference,pose,speed_kmh,actual_curvature,
+                    current_link_id,route_link_ids,route_link_index,entry_search)
+                if result is not None:return result
+                return self._block(reason)
+            if (self.config.continuous_lane_follow and self.selected.mode=='road_offset' and
+                    return_search is not None and
+                    self.selected.entry_end_s-progress<=self.config.acquisition_end_region_m+max(self.config.lookahead_min_m,
+                        speed_kmh/3.6*(getattr(return_search,'elapsed_ms',0.)/1000.+self.config.command_delay_s)) and
+                    self._return_clearance_ready(pose)):
+                return_search.prefetch(self,pose,speed_kmh,actual_curvature)
             if self._acquired(pose,self.pair.adjacent,self.selected.entry_end_s,progress):
                 self.state='AVOID_HOLD';self.reason='HOLD_TIMER';self.confirmations=0
                 self._hold_started=now;self._hold_elapsed=0.
             return self._result(self.selected.entry_path)
 
         if self.state=='AVOID_HOLD':
+            if (self.config.continuous_lane_follow and self.selected.mode=='road_offset' and
+                    return_search is not None and self._return_clearance_ready(pose) and
+                    getattr(return_search,'_future',None) is not None and return_search._future.done()):
+                reason=return_search(self,pose,speed_kmh,actual_curvature,body_cache)
+                if not reason:
+                    self.state='RETURN';self.reason='OFFSET_RETURN_PREPARED';self.confirmations=0
+                    return self._result(self._return_path)
             result=self._hold(pose,speed_kmh,actual_curvature,body_cache)
             if result['blocked']:return result
             if speed_kmh>self.config.avoid_speed_kmh+.2:self._hold_started=now
@@ -1232,9 +1588,36 @@ class StaticObstaclePlanner:
             rear_cleared=min(self.pair.original_index.project(p) for p in self.body.polygon(*pose))>rear+self.config.return_margin_m
             self._surround_clearance=min((polygon_distance(self.body.polygon(*pose),o)
                                          for o in self.remembered),default=math.inf)
-            if self._hold_elapsed<self.config.hold_duration_s:self.reason='HOLD_TIMER'
-            elif not rear_cleared:self.reason='WAIT_OBSTACLE_PASS'
-            elif self._surround_clearance<self.config.hold_clearance_m:self.reason='WAIT_SURROUND_CLEARANCE'
+            if (self.config.continuous_lane_follow and
+                    self._lane_obstacle_preview(pose,speed_kmh) is not None):
+                self.state='RETURN';self.reason='NEW_LANE_OBSTACLE_RETURN_SEARCH';self.confirmations=0
+                return self._result(self._hold_path)
+            if self.config.continuous_lane_follow and self._continuation is not None:
+                follow=self._continuation;at=self._continuation_index.project(pose[:2])
+                if follow.merge_station_m is not None:
+                    if at>=follow.merge_station_m and self._acquired(pose,self._global_path,0.,progress):
+                        self.natural_rejoins+=1;self.state='NORMAL';self.reason='NATURAL_GLOBAL_PATH_REJOIN'
+                        self.remembered=();self.selected=None;self.pair=None;self.candidates=()
+                        self._hold_path=();self._return_path=();self._hazards=();self._road_area=None
+                        self._last_progress=None;self._validated_paths.clear()
+                        return self._result(normal_reference)
+                    self.reason='AVOID_LANE_CRUISE_NATURAL_JOIN_AHEAD'
+                    return self._result(self._hold_path)
+                remaining=self._continuation_index.lengths[-1]-at
+                preparation=self.config.lookahead_min_m+max(speed_kmh,self.config.avoid_speed_kmh)/3.6*4.
+                reserve=preparation+max(self.config.transition_lengths_m)+self._rollout_distance(speed_kmh)+10.
+                self._entry_context['lane_cruise_remaining_m']=remaining
+                self._entry_context['return_preview_required_m']=reserve
+                if remaining>reserve:
+                    self.reason='AVOID_LANE_CRUISE';return self._result(self._hold_path)
+            hold_required=0. if self.config.continuous_lane_follow else self.config.hold_duration_s
+            offset_return_ready=(self.config.continuous_lane_follow and self.selected.mode=='road_offset'
+                                 and self._return_clearance_ready(pose))
+            if self._hold_elapsed<hold_required:self.reason='HOLD_TIMER'
+            elif not rear_cleared and not offset_return_ready:
+                self.reason='WAIT_OBSTACLE_PASS'
+            elif self._surround_clearance<self.config.hold_clearance_m and not offset_return_ready:
+                self.reason='WAIT_SURROUND_CLEARANCE'
             else:
                 self.state='RETURN';self.reason='RETURN_READY';self.confirmations=0
             # Even when ready, no return geometry is generated by STEP 3.
@@ -1255,6 +1638,11 @@ class StaticObstaclePlanner:
                 reason=(self._generate_return(pose,speed_kmh,actual_curvature,body_cache)
                         if return_search is None else return_search(self,pose,speed_kmh,actual_curvature,body_cache))
                 if reason=='RETURN_SEARCH_PENDING':
+                    if self.config.continuous_lane_follow:
+                        failure=self._accept_motion_progress(progress)
+                        if failure:return self._block(failure)
+                        self.reason=reason
+                        return self._hold(pose,speed_kmh,actual_curvature,body_cache)
                     # Only STEP 4 may start this work. Remain stopped while the
                     # isolated search runs; no old HOLD path can authorize drive.
                     return dict(self._result(),state='VALIDATING',blocked=True,

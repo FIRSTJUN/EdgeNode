@@ -194,6 +194,9 @@ class PlanningNode(Node):
         self.declare_parameter('normal_physical_lateral_acceleration_mps2',0.,ParameterDescriptor(read_only=True))
         self.speed_planner.physical_lateral_acceleration_mps2=self.get_parameter(
             'normal_physical_lateral_acceleration_mps2').value
+        self.declare_parameter('normal_tracking_lateral_acceleration_mps2',0.,ParameterDescriptor(read_only=True))
+        self.speed_planner.tracking_lateral_acceleration_mps2=self.get_parameter(
+            'normal_tracking_lateral_acceleration_mps2').value
         self.normal_speed_debug_pub=self.create_publisher(String,'/planning/normal_speed_debug',10)
 
         self.declare_parameter('obstacle_topic', '/planning/obstacles')
@@ -207,6 +210,7 @@ class PlanningNode(Node):
                 ('s4_sensor_max_source_age_sec', .6),
                 ('s4_sensor_future_tolerance_sec', .05)):
             self.declare_parameter(name, value, ParameterDescriptor(read_only=True))
+        self.declare_parameter('morai_transient_sensor_recovery',False,ParameterDescriptor(read_only=True))
         self.sensor_guard = None
         self._sensor_pause=None
         self._sensor_pause_offset_ns=0
@@ -215,7 +219,8 @@ class PlanningNode(Node):
             self.sensor_guard = SensorReadiness(
                 self.get_parameter('s4_sensor_timeout_sec').value,
                 self.get_parameter('s4_sensor_max_source_age_sec').value,
-                self.get_parameter('s4_sensor_future_tolerance_sec').value)
+                self.get_parameter('s4_sensor_future_tolerance_sec').value,
+                allow_transient_history=self.get_parameter('morai_transient_sensor_recovery').value)
         defaults = AvoidanceConfig()
         for name, value in defaults.__dict__.items():
             self.declare_parameter('avoidance_'+name, list(value) if isinstance(value, tuple) else value,
@@ -229,7 +234,14 @@ class PlanningNode(Node):
         self.declare_parameter('avoidance_require_explicit_permission',
             self.get_parameter('s4_sensor_validation_enabled').value,ParameterDescriptor(read_only=True))
         self.declare_parameter('morai_unmarked_junction_experiment',False,ParameterDescriptor(read_only=True))
-        self.avoidance_planner = StaticObstaclePlanner(LaneNetwork(self.dijkstra_planner,
+        self.declare_parameter('static_avoidance_method','lattice',ParameterDescriptor(read_only=True))
+        method=self.get_parameter('static_avoidance_method').value
+        if method not in ('lattice','lane_candidates'):raise ValueError('unknown static_avoidance_method')
+        planner_type=StaticObstaclePlanner
+        if method=='lane_candidates':
+            from .lane_candidate_planner import LaneCandidatePlanner
+            planner_type=LaneCandidatePlanner
+        self.avoidance_planner = planner_type(LaneNetwork(self.dijkstra_planner,
             require_explicit_permission=self.get_parameter('avoidance_require_explicit_permission').value,
             morai_unmarked_junction_experiment=self.get_parameter('morai_unmarked_junction_experiment').value),
             config=AvoidanceConfig(**values),
@@ -240,6 +252,12 @@ class PlanningNode(Node):
         if boundary_dir:
             from .hdmap_boundaries import HDMapBoundaries
             self.avoidance_planner.network.boundaries = HDMapBoundaries(boundary_dir, mgeo_dir)
+        self.declare_parameter('morai_surface_offset_experiment',False,ParameterDescriptor(read_only=True))
+        if self.get_parameter('morai_surface_offset_experiment').value:
+            network=self.avoidance_planner.network
+            if not self.avoidance_planner.config.integrated_strategy or not boundary_dir:
+                raise ValueError('MORAI surface offsets require integrated selection and an original HD map')
+            network.road_corridor=network.boundaries.road_surface_corridor(network)
         self.distance_safety = None
         for name, value in DistancePolicy().__dict__.items():
             self.declare_parameter('s4_distance_' + name, value, ParameterDescriptor(read_only=True))
@@ -280,6 +298,14 @@ class PlanningNode(Node):
         self._candidate_marker_ids = set()
         self._candidate_cache=None
         self._diagnostic_path_cache={}
+        self.lane_candidates_pub=(self.create_publisher(String,'/planning/lane_candidates',1)
+                                  if method=='lane_candidates' else None)
+        self._lane_candidates_next_publish=0.
+        self._traffic_model=None;self._traffic_session=None
+        if self.avoidance_planner.config.integrated_strategy:
+            from .obstacle_tracking import ObstacleTracking
+            self._traffic_model=ObstacleTracking()
+            self.traffic_tracks_pub=self.create_publisher(String,'/planning/traffic_tracks',1)
         self.avoidance_state_pub = self.create_publisher(String, '/planning/avoidance_state', 10)
         self.avoidance_stage_pub = self.create_publisher(String, '/planning/avoidance_stage', 10)
         self.avoidance_debug_pub = self.create_publisher(String, '/planning/avoidance_debug', 10)
@@ -289,11 +315,19 @@ class PlanningNode(Node):
         self._avoidance_path_publishers = {name:self.create_publisher(Path, '/planning/'+name, 10)
             for name in ('original_lane_center','left_lane_center','right_lane_center',
                          'avoidance_selected_path','avoidance_return_path')}
-        self.obstacle_sub = self.create_subscription(PoseArray,
-            self.get_parameter('obstacle_topic').value, self.obstacle_callback, 5 if self.sensor_guard else 10)
+        atomic_frames=self.sensor_guard is not None and self.avoidance_planner.config.continuous_lane_follow
+        self.obstacle_sub = None if atomic_frames else self.create_subscription(PoseArray,
+            self.get_parameter('obstacle_topic').value, self.obstacle_callback,
+            10 if self.avoidance_planner.config.continuous_lane_follow else 5 if self.sensor_guard else 10)
         if self.sensor_guard is not None:
+            # These two streams identify the same frame by stamp and digest.
+            # KEEP_LAST(1) can discard opposite halves during a planning tick,
+            # leaving fresh inputs unmatched indefinitely. Callbacks only store
+            # frames; retain the short pairing window and keep age checks.
             self.sensor_status_sub = self.create_subscription(String,
-                self.get_parameter('s4_sensor_status_topic').value, self.sensor_status_callback, 5)
+                '/perception/lidar_frame' if atomic_frames else self.get_parameter('s4_sensor_status_topic').value,
+                self.sensor_frame_callback if atomic_frames else self.sensor_status_callback,
+                1 if atomic_frames else 5)
             self.s4_sensor_state_pub = self.create_publisher(String, '/planning/s4_sensor_state', 10)
             self.sensor_watchdog_timer = self.create_timer(.05, self.sensor_watchdog,
                 clock=Clock(clock_type=ClockType.STEADY_TIME))
@@ -412,7 +446,7 @@ class PlanningNode(Node):
             Odometry,
             self.get_parameter('localization_topic').value,
             self.localization_callback,
-            10,
+            1 if self.avoidance_planner.config.continuous_lane_follow else 10,
         )
         self.create_subscription(String,'/localization/reset_event',self.localization_reset_callback,
             QoSProfile(depth=10,durability=DurabilityPolicy.TRANSIENT_LOCAL))
@@ -433,6 +467,8 @@ class PlanningNode(Node):
         )
 
     def destroy_node(self):
+        close=getattr(self.avoidance_planner,'close',None)
+        if close is not None:close()
         self._entry_search.close()
         self._return_search.close()
         return super().destroy_node()
@@ -578,6 +614,47 @@ class PlanningNode(Node):
                 self.stop_for_sensor(reason)
             self.refresh_sensor(now)
 
+    def sensor_frame_callback(self,msg):
+        now=self.get_clock().now().nanoseconds
+        reason=self.sensor_guard.frame(msg.data,now)
+        if reason:self.stop_for_sensor(reason)
+        self.refresh_sensor(now)
+        if self._traffic_model is not None and not self.sensor_guard.reason(now):
+            from .obstacle_tracking import observations_from_frame
+            envelope=json.loads(msg.data);status=envelope['status']
+            if self._traffic_session!=status['session_id']:
+                self._traffic_model.reset();self._traffic_session=status['session_id']
+            source=status['source_stamp_ns']
+            if (status['state'].startswith('READY_') and
+                    (self._traffic_model.source_ns is None or source>self._traffic_model.source_ns)):
+                try:
+                    tracks=self._traffic_model.update(source,observations_from_frame(envelope))
+                    values=[dict(id=t.identifier,center_xy=t.state[:2].tolist(),
+                        velocity_xy_mps=t.state[2:].tolist(),speed_mps=t.speed_mps,
+                        velocity_sigma_mps=t.velocity_sigma,motion=t.motion,frames=t.frames,
+                        motion_velocity_xy_mps=t.motion_velocity.tolist(),motion_sigma_mps=t.motion_sigma if math.isfinite(t.motion_sigma) else None,
+                        age_s=(now-t.observed_ns)/1e9,observed_ns=t.observed_ns,
+                        heading_rad=math.atan2(t.state[3],t.state[2]) if t.speed_mps>.1 else None)
+                        for t in tracks]
+                    result=dict(source='LIDAR_COMPONENT_ASSOCIATION',source_stamp_ns=source,
+                                ready=True,tracks=values,driving_policy_enabled=False)
+                    result['kinematics']=dict(ready=False,reason='EGO_KINEMATICS_UNAVAILABLE',tracks=[])
+                    pose_stamp=getattr(self,'latest_pose_stamp_ns',None)
+                    if (self.latest_pose is not None and pose_stamp is not None and
+                            0<=now-pose_stamp<=600_000_000):
+                        from .dynamic_traffic import longitudinal_kinematics
+                        try:
+                            guide=control_local_path(self._route_result['points'],self.latest_pose,80.)
+                            result['kinematics']=longitudinal_kinematics(guide,self.latest_pose,
+                                self.latest_speed_kmh,tracks,now_ns=now,source_ns=source)
+                        except (ValueError,KeyError,TypeError):
+                            pass
+                except (ValueError,TypeError,KeyError):
+                    self._traffic_model.reset()
+                    result=dict(source='LIDAR_COMPONENT_ASSOCIATION',source_stamp_ns=source,
+                                ready=False,reason='COMPONENT_METADATA_UNAVAILABLE',tracks=[],driving_policy_enabled=False)
+                self.traffic_tracks_pub.publish(String(data=json.dumps(result,allow_nan=False)))
+
     def sensor_watchdog(self):
         self.refresh_sensor(self.get_clock().now().nanoseconds)
 
@@ -620,6 +697,11 @@ class PlanningNode(Node):
             recovery_frames=self._sensor_pause['confirmed'] if self._sensor_pause else 0,
             latched_reason=self.avoidance_planner.reason if self.avoidance_planner.state=='BLOCKED' else '',
             matched_source_age_sec=(now_ns-guard.matched[0]['source_stamp_ns'])/1e9 if guard.matched else None,
+            matched_receipt_age_sec=(now_ns-guard.matched[2])/1e9 if guard.matched else None,
+            matched_steady_age_sec=(time.monotonic_ns()-guard.matched[3])/1e9 if guard.matched else None,
+            matched_producer_age_sec=(now_ns-guard.matched[0]['frame_received_ns'])/1e9 if guard.matched else None,
+            latest_status_state=guard.status['state'] if guard.status else None,
+            status_callback_delay_sec=(now_ns-guard.status['published_ns'])/1e9 if guard.status else None,
             session_id=guard.session_id,
             source_stamp_ns=guard.matched[0]['source_stamp_ns'] if guard.matched else None,
             latest_status_stamp_ns=guard.status['source_stamp_ns'] if guard.status else None))))
@@ -670,11 +752,22 @@ class PlanningNode(Node):
         self.avoidance_stage_pub.publish(String(data=stage))
         debug=diagnostic(result);debug.setdefault('stage',stage)
         self.avoidance_debug_pub.publish(String(data=json.dumps(debug,allow_nan=False)))
+        view=getattr(self.avoidance_planner,'lane_candidates_view',None)
+        now=time.monotonic()
+        if (view is not None and self.lane_candidates_pub is not None and self.latest_pose is not None and
+                now>=self._lane_candidates_next_publish):
+            self.lane_candidates_pub.publish(String(data=json.dumps(view(self.latest_pose),allow_nan=False)))
+            self._lane_candidates_next_publish=now+.5
         key=id(result.get('candidates'))
         cache=getattr(self,'_candidate_cache',None)
         steady=time.monotonic()
         if cache is None or cache[0]!=key:
-            markers,self._candidate_marker_ids = candidate_markers(result,stamp,self._candidate_marker_ids)
+            visual_result=result
+            config=getattr(getattr(self,'avoidance_planner',None),'config',None)
+            if getattr(config,'continuous_lane_follow',False):
+                from .avoidance_visualization import display_candidates
+                visual_result=dict(result,candidates=display_candidates(result.get('candidates',())))
+            markers,self._candidate_marker_ids = candidate_markers(visual_result,stamp,self._candidate_marker_ids)
             self._candidate_cache=(key,markers,result.get('candidates'))
             self._candidate_bulk_at=steady
         else:
@@ -1060,6 +1153,9 @@ class PlanningNode(Node):
                                     route_link_index=link_index_at_progress(self._route_result,self.dijkstra_planner,
                                         current_link,self._progress_arc_m) if mission_start else None,
                                     observation_stamp_ns=getattr(self,'obstacle_stamp_ns',None),
+                                    motion_authorized=(not self.avoidance_planner.config.continuous_lane_follow or
+                                        enable_drive and self._validation_pending_stamp_ns is None and
+                                        not self._sensor_resume_validation and self._sensor_pause is None),
                                     control_horizon_m=control_horizon,now_sec=(now_ns-self._sensor_pause_offset_ns)/1e9,
                                     global_reference=self._route_result.get('points',active_local_points),
                                     return_search=self._return_search,entry_search=self._entry_search, **s4_kwargs)

@@ -110,6 +110,7 @@ class LidarCluster:
     oriented_corners_xy: tuple = ()
     min_footprint_extent_m: float = .05
     clipped_vertices_xy: tuple = ()
+    component_id: int = -1
 
     def footprint_xy(self):
         """Four corners and four edge midpoints of a containing XY box."""
@@ -238,7 +239,7 @@ def detect_clusters(points, config, *, diagnostics=None, cluster_points=None, fo
     order=np.argsort(labels,kind='stable')
     components=np.split(order,np.flatnonzero(np.diff(labels[order]))+1)
     clusters = []
-    for component in components:
+    for component_id,component in enumerate(components):
         if len(component) >= config.min_cluster_points:
             selected = xyz[component]
             if ground_tree is not None and _seeded_ground(selected,ground,ground_tree,config):
@@ -282,6 +283,7 @@ def detect_clusters(points, config, *, diagnostics=None, cluster_points=None, fo
                     oriented_corners_xy=corners,
                     min_footprint_extent_m=config.min_footprint_extent_m,
                     clipped_vertices_xy=clipped_bounds(patch[:,:2],corners,config.min_footprint_extent_m) if config.clipped_footprints else (),
+                    component_id=component_id,
                 ))
     return clusters
 
