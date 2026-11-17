@@ -228,8 +228,10 @@ class PlanningNode(Node):
             self.declare_parameter('avoidance_cost_'+name,value,ParameterDescriptor(read_only=True))
         self.declare_parameter('avoidance_require_explicit_permission',
             self.get_parameter('s4_sensor_validation_enabled').value,ParameterDescriptor(read_only=True))
+        self.declare_parameter('morai_unmarked_junction_experiment',False,ParameterDescriptor(read_only=True))
         self.avoidance_planner = StaticObstaclePlanner(LaneNetwork(self.dijkstra_planner,
-            require_explicit_permission=self.get_parameter('avoidance_require_explicit_permission').value),
+            require_explicit_permission=self.get_parameter('avoidance_require_explicit_permission').value,
+            morai_unmarked_junction_experiment=self.get_parameter('morai_unmarked_junction_experiment').value),
             config=AvoidanceConfig(**values),
             weights=CostWeights(**{name:self.get_parameter('avoidance_cost_'+name).value
                                    for name in weights.__dict__}))

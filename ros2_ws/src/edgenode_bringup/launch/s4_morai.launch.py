@@ -51,6 +51,9 @@ def launch_nodes(context):
              parameters=[config('edgenode_perception','lidar_obstacle'),{
                  'roi_min_x':-8.,'roi_max_x':value('lidar_roi_max_x',float),'roi_min_y':-40.,'roi_max_y':40.,
                  'oriented_footprints':True,'ground_plane_filter_enabled':True,
+                 'clipped_footprints':value('lidar_clipped_footprints',bool),
+                 'publish_debug_clouds':value('lidar_debug_clouds',bool),
+                 'footprint_tile_size_m':value('lidar_footprint_tile_m',float),
                  # Measured Ego returns end below sensor Z=0. A 0.3m
                  # roof margin excludes the signal housings seen at +0.5m.
                  'obstacle_height_filter_enabled':True,
@@ -64,6 +67,11 @@ def launch_nodes(context):
                  'sharp_curve_speed_kmh':value('sharp_curve_speed_kmh',float),
                  'drive_duration_sec':value('drive_duration_sec',float),
                  'avoidance_avoid_speed_kmh':value('avoid_speed_kmh',float),
+                 # Simulator-only measured-braking experiment. The production
+                 # AvoidanceConfig and NORMAL speed/steering profile stay intact.
+                 'avoidance_deceleration_mps2':value('s4_deceleration_mps2',float),
+                 'avoidance_memory_merge_extent_m':value('s4_memory_merge_extent_m',float),
+                 'morai_unmarked_junction_experiment':value('morai_unmarked_junction_experiment',bool),
                  'avoidance_hold_duration_s':value('hold_duration_s',float),
                  'local_path_length_m':80.,'s4_control_horizon_m':s4_horizon,
                  'speed_preview_distance_m':80.,'speed_anticipatory_enabled':True,
@@ -106,12 +114,18 @@ def generate_launch_description():
         ('sharp_curve_speed_kmh','30.0'),('avoidance_speed_kmh','10.0'),
         ('avoid_speed_kmh',LaunchConfiguration('avoidance_speed_kmh')),
         ('hold_duration_s','3.0'),('drive_duration_sec','3600.0'),
+        ('s4_deceleration_mps2','2.0'),
+        ('s4_memory_merge_extent_m','3.5'),
+        ('morai_unmarked_junction_experiment','false'),
         ('lookahead_max_m','12.0'),('lookahead_preview_time_sec','0.8'),
         ('normal_lookahead_min_m','4.0'),('lookahead_heading_budget_rad','1.6'),
         ('normal_lookahead_heading_budget_rad','0.25'),
         ('normal_prediction_time_sec','0.1'),('normal_max_front_steer_normalized','1.0'),
         ('normal_sharp_curvature_threshold','0.03'),('normal_lateral_limit_mps2','9.0'),
         ('lidar_roi_max_x','100.0'),
+        ('lidar_clipped_footprints','true'),
+        ('lidar_debug_clouds','true'),
+        ('lidar_footprint_tile_m','3.0'),
         ('lidar_obstacle_max_z_m','0.3'),
         ('route_file','/workspace/local_data/kcity_routes/kcity_demo_route.yaml'),
         ('route_start_link_id','A219BS010380'),

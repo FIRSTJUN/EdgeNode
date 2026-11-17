@@ -88,6 +88,8 @@ class MapMatcher:
         self.outgoing = {}
 
         for link in raw_links:
+            if link.get('lazy_init') is True or link.get('lane_ch_link_path'):
+                continue
             points = link.get('points', [])
             if len(points) < 2:
                 continue

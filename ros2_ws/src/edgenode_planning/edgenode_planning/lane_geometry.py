@@ -159,10 +159,13 @@ class LaneNetwork:
     Reciprocal neighbor relation, valid ordinary endpoints, same direction and
     connected successor pairs are required. Unknown geometry fails closed.
     """
-    def __init__(self, planner, *, require_explicit_permission=False):
+    def __init__(self, planner, *, require_explicit_permission=False, morai_unmarked_junction_experiment=False):
         if type(require_explicit_permission) is not bool:
             raise ValueError('explicit permission policy must be boolean')
         self.require_explicit_permission = require_explicit_permission
+        if type(morai_unmarked_junction_experiment) is not bool:
+            raise ValueError('MORAI junction experiment must be boolean')
+        self.morai_unmarked_junction_experiment=morai_unmarked_junction_experiment
         self.boundaries = None
         # Only an explicitly verified directed surface may authorize offsets.
         self.road_corridor = None
@@ -189,7 +192,13 @@ class LaneNetwork:
             return 'UNKNOWN_LANE_CHANGE_PERMISSION'
         if boundary is not None:
             reason = boundary.permission_reason(original_id, target_id)
-            if reason:
+            junction_experiment=(self.morai_unmarked_junction_experiment
+                and reason=='SHARED_BOUNDARY_UNAVAILABLE'
+                and all(link.get('link_type') in ('1',1) for link in (original,self.links[target_id])))
+            # Simulator-only evidence experiment for aligned, directed native
+            # junction links. Explicit denials and physical boundary sweeps
+            # remain authoritative. This does not certify road traffic legality.
+            if reason and not junction_experiment:
                 return reason
         elif value is not True and self.require_explicit_permission:
             return 'UNKNOWN_LANE_CHANGE_PERMISSION'
@@ -198,7 +207,7 @@ class LaneNetwork:
             # NGII 2019 table 24: only ordinary travel lanes are in this S4
             # verification profile. Intersection/bus/reversible/unknown types
             # need separate, direction/section-specific crossing evidence.
-            return 'UNVERIFIED_LANE_TYPE'
+            if not (boundary is not None and junction_experiment):return 'UNVERIFIED_LANE_TYPE'
         return ''
 
     def neighbor(self, original_id, side):

@@ -106,6 +106,16 @@ def test_lidar_subscription_matches_morai_best_effort_volatile_keep_last(node):
                for s in node.test_subscriptions)
 
 
+def test_xy_debug_cloud_uses_source_pose_mount_and_preserves_raw_input(node):
+    raw=np.array([[2.,1.,-.5],[float('nan'),0.,0.]])
+    before=raw.copy();publisher=Mock();stamp=Time(seconds=7).to_msg()
+    node.publish_xy_cloud(publisher,stamp,raw,(10.,20.,math.pi/2))
+    msg=publisher.publish.call_args.args[0]
+    assert msg.header.frame_id=='map' and msg.header.stamp==stamp
+    np.testing.assert_allclose(pointcloud_xyz(msg),[[9.,23.19,0.]],atol=1e-5)
+    np.testing.assert_array_equal(raw,before)
+
+
 def test_without_localization_publishes_empty_and_throttled_warning(node):
     node.lidar_callback(npc_cloud())
     assert_empty(node)

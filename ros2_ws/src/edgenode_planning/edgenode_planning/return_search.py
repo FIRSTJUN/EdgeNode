@@ -6,6 +6,8 @@ import os
 import math
 import time
 
+from .lattice_path import heading_error
+
 
 class ReturnSearch:
     def __init__(self, executor=None):
@@ -15,13 +17,14 @@ class ReturnSearch:
             max_workers=1, mp_context=get_context('spawn'))
         self._future = None
         self._context = None
+        self._pose = None
         self.elapsed_ms = 0.
         self.worker_pid = None
 
     def cancel(self):
         if self._future is not None:
             self._future.cancel()
-        self._future = self._context = None
+        self._future = self._context = self._pose = None
 
     def close(self):
         self.cancel()
@@ -50,15 +53,23 @@ class ReturnSearch:
             snapshot._map_sweep_cache = type(planner._map_sweep_cache)()
             snapshot._fixed_sweep_cache = type(planner._fixed_sweep_cache)()
             self._context = context
+            self._pose = tuple(pose)
             self._future = self._executor.submit(self._search, snapshot, pose, speed, curvature)
             return 'RETURN_SEARCH_PENDING'
         if not self._future.done():
             return 'RETURN_SEARCH_PENDING'
         future = self._future
-        self._future = self._context = None
+        search_pose = self._pose
+        self._future = self._context = self._pose = None
         reason, snapshot, generated, self.elapsed_ms, self.worker_pid = future.result()
         planner.candidates = snapshot.candidates
         planner.generated_transition_count += generated
+        # Localization can settle backward after measured Ego speed reaches
+        # zero. As for EntrySearch, discard an obsolete origin BEFORE adopting
+        # either its path or its failure. All latest-input validation remains.
+        if (math.dist(pose[:2],search_pose[:2])>planner.config.tracking_limit_m/2 or
+                abs(heading_error(pose[2],search_pose[2]))>planner.config.acquisition_heading_rad/2):
+            return 'RETURN_SEARCH_PENDING'
         if not reason:
             planner.selected = snapshot.selected
             planner._return_path = snapshot._return_path

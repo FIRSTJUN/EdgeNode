@@ -3,7 +3,7 @@
 Run from the sourced Dev Container with the existing stack. No nodes or Docker
 containers are launched. Only the temporary actor is removed after the trial.
 """
-import argparse,hashlib,json,math,signal,sys,time
+import argparse,hashlib,json,math,signal,sys,time,subprocess,os
 from pathlib import Path
 sys.path[:0]=['/workspace/tools','/tmp','/tmp/edgenode_morai_grpc']
 from edgenode_morai_grpc_client import call
@@ -22,8 +22,13 @@ from edgenode_planning.route_resume import mission_suffix
 import yaml
 from pyproj import Proj,Transformer
 from edgenode_localization.map_heading import grid_convergence
-p=argparse.ArgumentParser();p.add_argument('--link',required=True);p.add_argument('--start',type=float,required=True);p.add_argument('--obstacle',type=float,required=True);p.add_argument('--obstacle-yaw-deg',type=float,default=0.);p.add_argument('--output',type=Path,required=True);a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--link',required=True);p.add_argument('--start',type=float,required=True);p.add_argument('--obstacle',type=float,required=True);p.add_argument('--obstacle-yaw-deg',type=float,default=0.);p.add_argument('--output',type=Path,required=True)
+p.add_argument('--approach-speed-kmh',type=float,default=10.)
+p.add_argument('--seconds',type=float,default=100.)
+p.add_argument('--record-bag',action='store_true')
+a=p.parse_args()
 if not all(math.isfinite(v) for v in (a.start,a.obstacle,a.obstacle_yaw_deg)):p.error('finite station and yaw required')
+if not all(math.isfinite(v) and v>0 for v in (a.approach_speed_kmh,a.seconds)):p.error('positive finite speed and duration required')
 a.output.mkdir(exist_ok=False)
 class Recorder(Monitor):
  def __init__(self):
@@ -55,11 +60,34 @@ class Recorder(Monitor):
  def record(self,start):return dict(t=time.monotonic()-start,solids=self.solids,**self.snapshot())
 def interrupted(*args):raise KeyboardInterrupt()
 for sig in (signal.SIGINT,signal.SIGTERM):signal.signal(sig,interrupted)
-rclpy.init(signal_handler_options=SignalHandlerOptions.NO);n=Recorder();summary={};rows=[];path_fingerprints={};new_actor=None;ego=None;original=None;mission=None
+rclpy.init(signal_handler_options=SignalHandlerOptions.NO);n=Recorder();summary={};rows=[];path_fingerprints={};new_actor=None;ego=None;original=None;mission=None;bag=None;bag_log=None
 saved=Path('/workspace/local_data/kcity_routes/kcity_demo_route.yaml');saved_hash=hashlib.sha256(saved.read_bytes()).hexdigest()
 try:
  n.wait(n.fresh);assert n.stop() and n.count_publishers('/ctrl_cmd')==1
  original=n.parameters();names=['route_node_ids','route_start_link_id'];mission=dict(zip(names,map(parameter_value_to_python,n.call(n.getter,GetParameters.Request(names=names)).values)))
+ summary['trial_spec']=dict(link=a.link,start_m=a.start,obstacle_m=a.obstacle,
+  obstacle_yaw_deg=a.obstacle_yaw_deg,approach_speed_kmh=a.approach_speed_kmh,seconds=a.seconds)
+ names=['clipped_footprints','footprint_tile_size_m','publish_debug_clouds','time_aligned_obstacles','roi_max_x','ground_z_threshold']
+ summary['perception_parameters']=dict(zip(names,map(parameter_value_to_python,n.call(
+  n.create_client(GetParameters,'/lidar_obstacle_node/get_parameters'),GetParameters.Request(names=names)).values)))
+ names=['avoidance_deceleration_mps2','avoidance_memory_merge_extent_m','avoidance_avoid_speed_kmh','s4_control_horizon_m','morai_unmarked_junction_experiment']
+ summary['s4_parameters']=dict(zip(names,map(parameter_value_to_python,n.call(n.getter,GetParameters.Request(names=names)).values)))
+ summary['code_sha']=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+ summary['working_diff_sha256']=hashlib.sha256(subprocess.check_output(['git','diff'])).hexdigest()
+ if a.record_bag:
+  topics=['/ego_vehicle_status','/ctrl_cmd','/localization/odometry','/control/path_error',
+   '/control/lookahead_distance','/collision_data','/lidar/points','/Imu','/gps',
+   '/perception/lidar_obstacle_count','/perception/lidar_obstacle_centers',
+   '/perception/lidar_diagnostics','/perception/lidar_status','/planning/obstacles',
+   '/perception/lidar_points_map_xy','/perception/lidar_cluster_points_map_xy',
+   '/planning/current_link','/planning/map_match_status','/planning/target_speed',
+   '/planning/global_path','/planning/local_path','/planning/avoidance_debug',
+   '/planning/s4_sensor_state','/planning/s4_distance_state','/planning/fsm_state',
+   '/planning/drive_status','/planning/speed_mode','/localization/grid_convergence_deg']
+  bag_log=(a.output/'rosbag-console.log').open('w')
+  bag=subprocess.Popen(['ros2','bag','record','-o',str(a.output/'bag'),*topics],stdout=bag_log,stderr=subprocess.STDOUT,start_new_session=True)
+  n.spin(2.)
+  if bag.poll() is not None:raise RuntimeError('rosbag recorder failed to start')
  summary['original_parameters']=original;summary['original_mission']=mission
  inventory=call('actor.Actor','GetAllActorsState',dict(vehicle=True,pedestrian=True,obstacle=True));summary['actors_before']=inventory
  ego=call('actor.Actor','GetActorState',dict(id={'value':'Ego'},object_type='OBJECT_TYPE_VEHICLE'))
@@ -90,7 +118,7 @@ try:
  n.wait(lambda:n.fresh() and n.stopped() and n.values.get('/planning/current_link')==a.link and 'pose' in n.values and math.dist(n.values['pose'][:2],xyz[:2])<.4,15.)
  n.reset()
  full=yaml.safe_load(saved.read_text());route=mission_suffix(planner,full.get('start_link_id') or 'A219BS010380',full['waypoint_node_ids'],a.link)
- n.set_parameters_remote(dict(route_start_link_id=a.link,route_node_ids=route['remaining_waypoints'],cruise_speed_kmh=10.,sharp_curve_speed_kmh=10.,drive_duration_sec=130.,enable_drive=False))
+ n.set_parameters_remote(dict(route_start_link_id=a.link,route_node_ids=route['remaining_waypoints'],cruise_speed_kmh=a.approach_speed_kmh,sharp_curve_speed_kmh=min(30.,a.approach_speed_kmh),drive_duration_sec=a.seconds+30.,enable_drive=False))
  n.spin(.8);n.reset()
  n.wait(lambda:n.fresh() and n.values.get('/planning/map_match_status')=='MATCHED' and n.values.get('/planning/local_path',{}).get('points',0)>2 and n.values.get('/planning/s4_sensor_state',{}).get('ready') and not n.values['/planning/s4_sensor_state'].get('latched_reason'),30.)
  assert n.count_publishers('/ctrl_cmd')==1 and n.values['/collision_data']==0 and n.stopped()
@@ -99,9 +127,10 @@ try:
  (a.output/'preflight.json').write_text(json.dumps(summary,indent=2))
  (a.output/'global-path.json').write_text(json.dumps(n.paths['global_path']))
  (a.output/'initial-lidar.json').write_text(json.dumps(n.solids))
- started=time.monotonic();phases=[];path_fingerprints={};seen_return=False;sensor_wait_started=None;n.set_parameters_remote({'enable_drive':True})
- while time.monotonic()-started<100.:
+ started=time.monotonic();phases=[];path_fingerprints={};seen_return=False;sensor_wait_started=None;normal_since=None;n.set_parameters_remote({'enable_drive':True})
+ while time.monotonic()-started<a.seconds:
   n.spin(.05);row=n.record(started);rows.append(row);v=n.values;debug=v.get('/planning/avoidance_debug',{});stage=debug.get('stage');state=debug.get('state')
+  if bag is not None and bag.poll() is not None:raise RuntimeError('rosbag recorder exited during trial')
   with (a.output/'samples.jsonl').open('a') as stream:stream.write(json.dumps(row)+'\n')
   if not phases or phases[-1]!=stage:phases.append(stage)
   for key,points in n.paths.items():
@@ -123,8 +152,12 @@ try:
   if debug.get('boundary_check_mode')=='avoidance' and debug.get('boundary_contact_reason'):
    raise RuntimeError('measured boundary contact: '+debug['boundary_contact_reason'])
   if stage=='RETURN':seen_return=True
-  if seen_return and stage=='NORMAL' and debug.get('return_commits',0)>0:
-   summary['success']=True;break
+  resumed=(seen_return and stage=='NORMAL' and debug.get('return_commits',0)>0
+   and v.get('/planning/fsm_state')=='NORMAL_DRIVE' and v.get('/planning/target_speed',0.)>0.
+   and v.get('/ego_vehicle_status',{}).get('speed_kmh',0.)>1. and sensor.get('ready'))
+  normal_since=(normal_since or time.monotonic()) if resumed else None
+  if normal_since is not None and time.monotonic()-normal_since>=1.:
+   summary['normal_resumed_s']=time.monotonic()-normal_since;summary['success']=True;break
  else:raise RuntimeError('avoid/return timeout')
  summary['phases']=phases;summary['candidate_and_selected_paths']=path_fingerprints
 except BaseException as error:
@@ -139,7 +172,9 @@ finally:
   summary['phases']=[v for i,v in enumerate([r['values'].get('/planning/avoidance_debug',{}).get('stage') for r in rows]) if i==0 or v!=rows[i-1]['values'].get('/planning/avoidance_debug',{}).get('stage')]
  try:
   if not summary.get('stop_confirmed'):raise RuntimeError('restoration requires confirmed stationary Ego')
-  if new_actor is not None:summary['destroy_trial_actor']=call('actor.Actor','DestroyActor',new_actor)
+  if new_actor is not None:
+   summary['obstacle_state_after']=call('actor.Actor','GetActorState',new_actor)
+   summary['destroy_trial_actor']=call('actor.Actor','DestroyActor',new_actor)
   if ego is not None:
    desired=ego['transform'];target=json.loads(json.dumps(desired))
    origin=json.load(open('/workspace/local_data/kcity_mgeo/global_info.json'))['local_origin_in_global']
@@ -173,6 +208,15 @@ finally:
   summary['restored']=summary['restored'] and summary['final_stop_confirmed'] and all(v['position_xy_m']<.05 and v['yaw_deg']<.02 for v in errors.values())
  except Exception as error:summary['restore_error']=str(error)
  summary['saved_route_unchanged']=saved_hash==hashlib.sha256(saved.read_bytes()).hexdigest()
+ if bag is not None:
+  if bag.poll() is None:
+   os.killpg(bag.pid,signal.SIGINT)
+   try:bag.wait(timeout=15.)
+   except subprocess.TimeoutExpired:
+    bag.terminate();bag.wait(timeout=5.)
+  summary['rosbag_exit_code']=bag.returncode
+  summary['rosbag_metadata_present']=(a.output/'bag'/'metadata.yaml').exists()
+ if bag_log is not None:bag_log.close()
  (a.output/'summary.json').write_text(json.dumps(summary,indent=2));(a.output/'samples.jsonl').write_text(''.join(json.dumps(row)+'\n' for row in rows))
  print(json.dumps({k:v for k,v in summary.items() if k not in ('actors_before','actors_after','preflight','candidate_and_selected_paths','before_restore','final','ego_before','obstacle_state')}),flush=True)
  n.destroy_node();rclpy.shutdown()

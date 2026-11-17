@@ -5,6 +5,8 @@ import math
 
 import numpy as np
 from scipy.spatial import cKDTree
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
 
 
 @dataclass(frozen=True)
@@ -19,6 +21,8 @@ class LidarObstacleConfig:
     obstacle_height_filter_enabled: bool = False
     obstacle_max_z_m: float = 1.0
     oriented_footprints: bool = False
+    clipped_footprints: bool = False
+    footprint_tile_size_m: float = 0.
     ground_plane_filter_enabled: bool = False
     ground_plane_neighbor_m: float = 1.5
     ground_plane_max_slope: float = .15
@@ -37,7 +41,7 @@ class LidarObstacleConfig:
     def __post_init__(self):
         for field in fields(self):
             value = getattr(self, field.name)
-            if field.name in ('oriented_footprints','ground_plane_filter_enabled','obstacle_height_filter_enabled'):
+            if field.name in ('oriented_footprints','clipped_footprints','ground_plane_filter_enabled','obstacle_height_filter_enabled'):
                 if type(value) is not bool:raise ValueError(field.name+' must be boolean')
             elif field.name in ('min_cluster_points','ground_plane_min_seed_points'):
                 if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -52,6 +56,7 @@ class LidarObstacleConfig:
         if self.cluster_distance_m <= 0.0:
             raise ValueError('cluster_distance_m must be positive')
         if self.min_footprint_extent_m<=0:raise ValueError('positive footprint extent required')
+        if self.footprint_tile_size_m<0:raise ValueError('nonnegative footprint tile size required')
         if self.near_origin_radius_m < 0.0 or self.self_mask_half_width_y < 0.0:
             raise ValueError('near-origin radius and self-mask half width must be nonnegative')
         if min(self.ground_plane_neighbor_m,self.ground_plane_max_slope,self.ground_plane_tolerance_m)<=0:
@@ -104,9 +109,12 @@ class LidarCluster:
     point_count: int
     oriented_corners_xy: tuple = ()
     min_footprint_extent_m: float = .05
+    clipped_vertices_xy: tuple = ()
 
     def footprint_xy(self):
         """Four corners and four edge midpoints of a containing XY box."""
+        if self.clipped_vertices_xy:
+            return self.clipped_vertices_xy
         if self.oriented_corners_xy:
             corners=self.oriented_corners_xy
             return tuple(p for a,b in zip(corners,corners[1:]+corners[:1])
@@ -160,6 +168,35 @@ def oriented_bounds(xy,min_extent_m=.05):
     return tuple(tuple(float(v) for v in row) for row in corners)
 
 
+def clipped_bounds(xy,corners,min_extent_m=.05):
+    """Containing octagon: clip only unobserved rectangle corners.
+
+    The four additional support planes are computed from ALL observed points,
+    without outlier rejection, guessed object heading or smaller margins.
+    Each cuts at most one box corner; the existing eight-point wire format
+    therefore represents the whole polygon exactly. Thin objects retain a
+    support-plane padding. Inserting edge midpoints preserves the solid.
+    """
+    xy=np.asarray(xy,dtype=float)
+    polygon=[np.asarray(p,dtype=float) for p in corners]
+    axis=polygon[1]-polygon[0];axis/=np.linalg.norm(axis)
+    normal=np.array((-axis[1],axis[0]))
+    for a,b in ((1,1),(1,-1),(-1,1),(-1,-1)):
+        direction=a*axis+b*normal
+        limit=float(np.max(xy@direction))+min_extent_m+1e-9
+        output=[]
+        for p,q in zip(polygon,polygon[1:]+polygon[:1]):
+            u=float(p@direction-limit);v=float(q@direction-limit)
+            if u<=0:output.append(p)
+            if (u<0<v) or (v<0<u):output.append(p+u/(u-v)*(q-p))
+        polygon=output
+    while len(polygon)<8:
+        i=max(range(len(polygon)),key=lambda k:np.linalg.norm(polygon[k]-polygon[(k+1)%len(polygon)]))
+        polygon.insert(i+1,(polygon[i]+polygon[(i+1)%len(polygon)])/2)
+    if len(polygon)!=8:raise ValueError('clipped footprint exceeded eight support vertices')
+    return tuple(tuple(float(v) for v in p) for p in polygon)
+
+
 def _seeded_ground(selected,ground,tree,config):
     """Reject only a plane continuous with nearby, already excluded ground.
 
@@ -178,7 +215,7 @@ def _seeded_ground(selected,ground,tree,config):
     return bool(np.max(np.abs(combined[:,2]-design@coefficient))<=config.ground_plane_tolerance_m)
 
 
-def detect_clusters(points, config, *, diagnostics=None):
+def detect_clusters(points, config, *, diagnostics=None, cluster_points=None, footprint_tile_pose=None):
     """Return bounds and centroids of complete 3D radius-connected components."""
     ground_tree=None;ground=np.empty((0,3));rejected=0
     if config.ground_plane_filter_enabled:
@@ -191,36 +228,61 @@ def detect_clusters(points, config, *, diagnostics=None):
     if len(xyz) < config.min_cluster_points:
         return []
     tree = cKDTree(xyz)
-    visited = np.zeros(len(xyz), dtype=bool)
+    # The same undirected radius graph as the former per-point Python BFS.
+    # Close vehicle faces contain hundreds of thousands of neighbor pairs;
+    # compiled graph traversal avoids starving live sensor callbacks there.
+    pairs=tree.query_pairs(config.cluster_distance_m,output_type='ndarray')
+    graph=coo_matrix((np.ones(len(pairs),dtype=np.uint8),(pairs[:,0],pairs[:,1])),
+                     shape=(len(xyz),len(xyz))).tocsr()
+    count,labels=connected_components(graph,directed=False)
+    order=np.argsort(labels,kind='stable')
+    components=np.split(order,np.flatnonzero(np.diff(labels[order]))+1)
     clusters = []
-    for seed in range(len(xyz)):
-        if visited[seed]:
-            continue
-        visited[seed] = True
-        pending = [seed]
-        component = []
-        while pending:
-            index = pending.pop()
-            component.append(index)
-            neighbours = tree.query_ball_point(xyz[index], config.cluster_distance_m)
-            for neighbour in neighbours:
-                if not visited[neighbour]:
-                    visited[neighbour] = True
-                    pending.append(neighbour)
+    for component in components:
         if len(component) >= config.min_cluster_points:
             selected = xyz[component]
             if ground_tree is not None and _seeded_ground(selected,ground,ground_tree,config):
                 rejected+=1
                 if diagnostics is not None:diagnostics['ground_clusters_rejected']=rejected
                 continue
-            clusters.append(LidarCluster(
-                center_xyz=tuple(np.mean(selected, axis=0)),
-                min_xy=tuple(np.min(selected[:, :2], axis=0)),
-                max_xy=tuple(np.max(selected[:, :2], axis=0)),
-                point_count=len(component),
-                oriented_corners_xy=oriented_bounds(selected[:,:2],config.min_footprint_extent_m) if config.oriented_footprints else (),
-                min_footprint_extent_m=config.min_footprint_extent_m,
-            ))
+            patches=[selected]
+            if config.footprint_tile_size_m:
+                xy=selected[:,:2]
+                if footprint_tile_pose is not None:
+                    x,y,yaw=footprint_tile_pose;c,s=math.cos(yaw),math.sin(yaw)
+                    vx=xy[:,0]+config.lidar_offset_x_m;vy=xy[:,1]+config.lidar_offset_y_m
+                    xy=np.c_[x+c*vx-s*vy,y+s*vx+c*vy]
+                keys=np.floor(xy/config.footprint_tile_size_m).astype(np.int64)
+                _,labels=np.unique(keys,axis=0,return_inverse=True)
+                order=np.argsort(labels,kind='stable')
+                patches=[selected[index] for index in np.split(order,np.flatnonzero(np.diff(labels[order]))+1)]
+            # Confirmation/noise filtering belongs to the entire connected
+            # component. Never drop a thin or sparse patch after subdivision.
+            for patch in patches:
+                oriented=config.oriented_footprints or config.clipped_footprints
+                corners=oriented_bounds(patch[:,:2],config.min_footprint_extent_m) if oriented and not config.footprint_tile_size_m else ()
+                if config.footprint_tile_size_m and oriented:
+                    # Align the containing box with its fixed world tile.
+                    # A minimum-area sensor box can otherwise protrude into
+                    # the next tile and change association as Ego rotates.
+                    angle=-footprint_tile_pose[2] if footprint_tile_pose is not None else 0.
+                    c,s=math.cos(angle),math.sin(angle);axes=np.array(((c,-s),(s,c)))
+                    center=patch[:,:2].mean(axis=0);local=(patch[:,:2]-center)@axes
+                    low=local.min(axis=0);high=local.max(axis=0)
+                    pad=np.maximum(0.,(config.min_footprint_extent_m-(high-low))/2)+1e-9
+                    low-=pad;high+=pad
+                    corners=tuple(map(tuple,np.array(((low[0],low[1]),(high[0],low[1]),
+                        (high[0],high[1]),(low[0],high[1])))@axes.T+center))
+                if cluster_points is not None:cluster_points.append(patch)
+                clusters.append(LidarCluster(
+                    center_xyz=tuple(np.mean(patch, axis=0)),
+                    min_xy=tuple(np.min(patch[:, :2], axis=0)),
+                    max_xy=tuple(np.max(patch[:, :2], axis=0)),
+                    point_count=len(patch),
+                    oriented_corners_xy=corners,
+                    min_footprint_extent_m=config.min_footprint_extent_m,
+                    clipped_vertices_xy=clipped_bounds(patch[:,:2],corners,config.min_footprint_extent_m) if config.clipped_footprints else (),
+                ))
     return clusters
 
 

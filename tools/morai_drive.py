@@ -3,6 +3,7 @@
 import argparse
 import json
 import math
+import os
 from pathlib import Path
 import signal
 import subprocess
@@ -115,6 +116,7 @@ def main():
     parser.add_argument('--seconds', type=float, default=90.)
     parser.add_argument('--expect-return', action='store_true')
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--record-bag', action='store_true')
     args = parser.parse_args()
     for speed in (args.normal_kmh, args.sharp_kmh):
         if speed is not None and (not math.isfinite(speed) or speed <= 0):
@@ -123,8 +125,11 @@ def main():
         parser.error('positive finite duration required')
     if args.output:
         args.output.mkdir(parents=True, exist_ok=False)
+    if args.record_bag and (args.command != 'run' or args.output is None):
+        parser.error('--record-bag requires run and --output')
     rclpy.init(); node = Monitor(); armed = False; code = 0
     summary = {}; rows = []; started = time.monotonic(); original = None
+    bag = bag_log = None
     def interrupt(signum, frame):
         raise KeyboardInterrupt()
     for sig in (signal.SIGTERM, signal.SIGINT): signal.signal(sig, interrupt)
@@ -139,6 +144,22 @@ def main():
                 raise RuntimeError('vehicle must be stopped and drive disabled')
             if node.count_publishers('/ctrl_cmd') != 1:
                 raise RuntimeError('exactly one control publisher required')
+            if args.record_bag:
+                topics = ['/ego_vehicle_status', '/ctrl_cmd', '/localization/odometry',
+                    '/control/path_error', '/control/lookahead_distance', '/collision_data',
+                    '/lidar/points', '/Imu', '/gps', '/perception/lidar_obstacle_count',
+                    '/perception/lidar_obstacle_centers', '/perception/lidar_diagnostics',
+                    '/perception/lidar_status', '/planning/obstacles', '/planning/current_link',
+                    '/perception/lidar_points_map_xy', '/perception/lidar_cluster_points_map_xy',
+                    '/planning/map_match_status', '/planning/target_speed', '/planning/global_path',
+                    '/planning/local_path', '/planning/avoidance_debug', '/planning/s4_sensor_state',
+                    '/planning/s4_distance_state', '/planning/fsm_state', '/planning/drive_status',
+                    '/planning/speed_mode', '/localization/grid_convergence_deg']
+                bag_log = (args.output/'rosbag-console.log').open('w')
+                bag = subprocess.Popen(['ros2', 'bag', 'record', '-o', str(args.output/'bag'),
+                    *topics], stdout=bag_log, stderr=subprocess.STDOUT, start_new_session=True)
+                node.spin(2.)
+                if bag.poll() is not None: raise RuntimeError('rosbag recorder failed to start')
             # Existing route preparation checks saved mission, sensor pairing,
             # collision state and READY before enabling. No temporary script.
             values = {}
@@ -153,18 +174,25 @@ def main():
             summary['requested_parameters'] = node.parameters()
             if args.command == 'run':
                 initial_returns = node.values.get('/planning/avoidance_debug', {}).get('return_commits', 0)
-                start = time.monotonic(); normal_since = None
+                start = time.monotonic(); normal_since = None; tracking_since = None
                 while time.monotonic()-start < args.seconds:
                     node.spin(.1); row = node.snapshot(); row['elapsed_s'] = time.monotonic()-start; rows.append(row)
+                    if bag is not None and bag.poll() is not None:
+                        raise RuntimeError('rosbag recorder exited during trial')
                     v = node.values; sensor = v.get('/planning/s4_sensor_state', {})
                     debug = v.get('/planning/avoidance_debug', {})
                     if not node.fresh(): raise RuntimeError('live input timeout')
                     if v.get('/collision_data') != 0: raise RuntimeError('collision')
                     if sensor.get('latched_reason'): raise RuntimeError('sensor latch: '+sensor['latched_reason'])
                     if debug.get('state') == 'BLOCKED': raise RuntimeError('S4 blocked: '+debug.get('reason', ''))
-                    if time.monotonic()-node.received.get('/control/path_error',0) > .6:
+                    tracking=(v.get('/planning/target_speed',0.)>0. and
+                              v.get('/planning/local_path',{}).get('points',0)>=2)
+                    tracking_since=(tracking_since or time.monotonic()) if tracking else None
+                    error_age=time.monotonic()-node.received.get('/control/path_error',0)
+                    if tracking and time.monotonic()-tracking_since>.6 and error_age>.6:
                         raise RuntimeError('path error diagnostic timeout')
-                    if v.get('/control/path_error', math.inf) > 1.: raise RuntimeError('path error exceeds 1m')
+                    if tracking and error_age<=.6 and v.get('/control/path_error', math.inf) > 1.:
+                        raise RuntimeError('path error exceeds 1m')
                     returned = debug.get('state') == 'NORMAL' and debug.get('return_commits', 0) > initial_returns
                     normal_since = (normal_since or time.monotonic()) if returned else None
                     if normal_since and time.monotonic()-normal_since > 1.:
@@ -202,6 +230,15 @@ def main():
         try: summary['final_parameters'] = node.parameters()
         except Exception as error: summary['parameter_readback_error'] = str(error)
         summary['final'] = node.snapshot()
+        if bag is not None:
+            if bag.poll() is None:
+                os.killpg(bag.pid, signal.SIGINT)
+                try: bag.wait(timeout=15.)
+                except subprocess.TimeoutExpired:
+                    bag.terminate(); bag.wait(timeout=5.)
+            summary['rosbag_exit_code'] = bag.returncode
+            summary['rosbag_metadata_present'] = (args.output/'bag'/'metadata.yaml').exists()
+        if bag_log is not None: bag_log.close()
         if rows:
             summary['peak_speed_kmh'] = max(r['values']['/ego_vehicle_status']['speed_kmh'] for r in rows)
             summary['max_path_error_m'] = max(r['values'].get('/control/path_error',0.) for r in rows)

@@ -43,6 +43,29 @@ def test_no_obstacle_preserves_normal_path_identity():
     assert result['points'] is reference and result['state']=='NORMAL' and not result['active']
 
 
+@pytest.mark.parametrize('deceleration,state',[(2.,'BLOCKED'),(4.,'DETECT')])
+def test_measured_morai_braking_experiment_retains_distance_gate_and_records_evidence(deceleration,state):
+    p,point,obstacle=setup()
+    p.config=replace(p.config,deceleration_mps2=deceleration,avoid_speed_kmh=10.)
+    reference=[point(i*.5,0.) for i in range(181)]
+    result=p.plan(reference,[obstacle(58.,62.)],(0.,0.,0.),speed_kmh=60.)
+    assert result['state']==state
+    context=result['distance_context']
+    assert context['speed_kmh']==60. and context['deceleration_mps2']==deceleration
+    assert context['available_distance_m']==pytest.approx(58.-3.79-.25-p.config.observation_padding_m)
+    assert context['required_stopping_m']==pytest.approx(5.+(60./3.6)**2/(2*deceleration))
+    assert result['generated_transition_count']==0 and context['candidate_search_deferred']
+    if state=='BLOCKED':
+        assert result['reason']=='BRAKING_DISTANCE'
+        assert result['failure_context']==context and context['hazard_polygons']
+    else:
+        # A simulator experiment changes the measured deceleration assumption,
+        # never the test for a genuinely insufficient stopping distance.
+        p.reset()
+        result=p.plan(reference,[obstacle(20.,24.)],(0.,0.,0.),speed_kmh=60.)
+        assert result['reason']=='BRAKING_DISTANCE' and not result['points']
+
+
 @pytest.mark.parametrize('side,offset',[('left',3.5),('right',-3.5)])
 def test_one_stage_per_call_no_return_until_timed_safe_hold(side,offset):
     p,point,obstacle=setup(side)

@@ -26,6 +26,8 @@ lidar_obstacle_node:
     # 1m above it retains a conservative body-height margin while excluding gantries.
     obstacle_max_z_m: 1.0
     oriented_footprints: false
+    clipped_footprints: false
+    footprint_tile_size_m: 0.0
     ground_plane_filter_enabled: false
     ground_plane_neighbor_m: 1.5
     ground_plane_max_slope: 0.15

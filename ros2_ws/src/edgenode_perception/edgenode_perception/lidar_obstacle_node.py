@@ -1,6 +1,7 @@
 """Publish local MORAI LiDAR footprints through the existing world obstacle interface."""
 
 from dataclasses import fields
+from array import array
 from collections import deque
 import json
 import math
@@ -79,6 +80,7 @@ class LidarObstacleNode(Node):
             ('sensor_status_period_sec', .1),
             ('gravity_ground_compensation',False),
             ('time_aligned_obstacles',False),
+            ('publish_debug_clouds',False),
         ):
             self.declare_parameter(name, default, descriptor)
         self.localization_timeout_sec = self.get_parameter('localization_timeout_sec').value
@@ -89,6 +91,10 @@ class LidarObstacleNode(Node):
         self.latest_pose = None
         self._gravity_ground=self.get_parameter('gravity_ground_compensation').value
         self._time_aligned=self.get_parameter('time_aligned_obstacles').value
+        self._debug_clouds=self.get_parameter('publish_debug_clouds').value
+        if self._debug_clouds:
+            self.points_map_pub=self.create_publisher(PointCloud2,'/perception/lidar_points_map_xy',1)
+            self.cluster_points_pub=self.create_publisher(PointCloud2,'/perception/lidar_cluster_points_map_xy',1)
         self._poses=PoseHistory()
         self._attitudes=deque(maxlen=200)
         self._pending_cloud=None
@@ -239,7 +245,14 @@ class LidarObstacleNode(Node):
                     self.publish_sensor_status();return
                 xyz=gravity_ground_heights(xyz,attitude[1],attitude[2])
             cluster_stats={}
-            clusters = detect_clusters(xyz, self.config,diagnostics=cluster_stats)
+            cluster_points=[] if getattr(self,'_debug_clouds',False) else None
+            if self.config.footprint_tile_size_m:
+                clusters=detect_clusters(xyz,self.config,diagnostics=cluster_stats,
+                    cluster_points=cluster_points,footprint_tile_pose=frame_pose)
+            elif cluster_points is None:
+                clusters = detect_clusters(xyz, self.config,diagnostics=cluster_stats)
+            else:
+                clusters = detect_clusters(xyz,self.config,diagnostics=cluster_stats,cluster_points=cluster_points)
         except Exception as error:
             self.get_logger().warning(
                 f'Invalid LiDAR cloud; publishing empty map obstacles: {error}',
@@ -249,12 +262,22 @@ class LidarObstacleNode(Node):
             self.publish_sensor_status()
             return
         obstacles = self.publish_obstacles(msg.header.stamp, clusters,frame_pose)
+        if getattr(self,'_debug_clouds',False):
+            self.publish_xy_cloud(self.points_map_pub,msg.header.stamp,xyz,frame_pose)
+            self.publish_xy_cloud(self.cluster_points_pub,msg.header.stamp,
+                np.concatenate(cluster_points) if cluster_points else np.empty((0,3)),frame_pose)
         finite=xyz[np.isfinite(xyz).all(axis=1)]
         self.diagnostics_pub.publish(String(data=json.dumps(dict(
             source_stamp_ns=stamp_ns,raw_point_count=len(xyz),cluster_count=len(clusters),
             max_return_distance_m=float(np.max(np.linalg.norm(finite[:,:2],axis=1))) if len(finite) else 0.,
             max_cluster_distance_m=max((math.hypot(*c.center_xyz[:2]) for c in clusters),default=0.),
             roi_max_x_m=self.config.roi_max_x,
+            payload_frame='sensor_local',source_frame_id=msg.header.frame_id,
+            world_pose_xy_yaw=frame_pose,
+            lidar_offset_xy_m=(self.config.lidar_offset_x_m,self.config.lidar_offset_y_m),
+            footprint_mode='clipped_octagon' if self.config.clipped_footprints else 'rectangle',
+            clusters=[dict(center_sensor_xyz=c.center_xyz,point_count=c.point_count,
+                footprint_sensor_xy=c.footprint_xy()) for c in clusters],
             ground_filter=cluster_stats,
             imu_pair_delta_ms=abs(attitude[0]-stamp_ns)/1e6 if attitude is not None else None,
             world_pose_stamp_ns=stamp_ns if alignment is not None else self.pose_source_stamp_ns,
@@ -265,6 +288,24 @@ class LidarObstacleNode(Node):
             [(p.position.x, p.position.y) for p in obstacles.poses]),
             self.get_clock().now().nanoseconds)
         self.publish_sensor_status()
+
+    def publish_xy_cloud(self,publisher,stamp,xyz,pose):
+        """Observation-time XY diagnostic projection; not a 3-D map cloud.
+
+        Original /lidar/points is preserved. Z=0 makes the planar projection
+        explicit rather than pretending its misleading /map header is valid.
+        """
+        xyz=np.asarray(xyz);xyz=xyz[np.isfinite(xyz).all(axis=1)]
+        points=np.zeros((len(xyz),3),dtype='<f4')
+        c,s=math.cos(pose[2]),math.sin(pose[2])
+        x=xyz[:,0]+self.config.lidar_offset_x_m;y=xyz[:,1]+self.config.lidar_offset_y_m
+        points[:,0]=pose[0]+c*x-s*y;points[:,1]=pose[1]+s*x+c*y
+        msg=PointCloud2();msg.header.stamp=stamp;msg.header.frame_id='map'
+        msg.height=1;msg.width=len(points);msg.is_bigendian=False;msg.is_dense=True
+        msg.fields=[PointField(name=name,offset=4*i,datatype=PointField.FLOAT32,count=1)
+                    for i,name in enumerate(('x','y','z'))]
+        msg.point_step=12;msg.row_step=12*len(points);msg.data=array('B',points.tobytes())
+        publisher.publish(msg)
 
     def publish_sensor_status(self):
         now_ns = self.get_clock().now().nanoseconds
