@@ -67,6 +67,8 @@ class LidarObstacleNode(Node):
         self.config = LidarObstacleConfig(**{
             field.name: self.get_parameter(field.name).value for field in fields(defaults)
         })
+        from .provenance import implementation_sha256
+        self._implementation_sha256=implementation_sha256()
         for name, default in (
             ('lidar_topic', '/lidar/points'),
             ('localization_topic', '/localization/odometry'),
@@ -312,7 +314,10 @@ class LidarObstacleNode(Node):
             payload_frame='sensor_local',source_frame_id=msg.header.frame_id,
             world_pose_xy_yaw=frame_pose,
             lidar_offset_xy_m=(self.config.lidar_offset_x_m,self.config.lidar_offset_y_m),
-            footprint_mode='clipped_octagon' if self.config.clipped_footprints else 'rectangle',
+            footprint_mode=('clipped_minimum_area_tiled' if self.config.tiled_minimum_area_bounds else
+                'clipped_octagon' if self.config.clipped_footprints else 'rectangle'),
+            implementation_sha256=self._implementation_sha256,
+            native_geometry=self.config.native_geometry,
             clusters=[dict(center_sensor_xyz=c.center_xyz,point_count=c.point_count,
                 footprint_sensor_xy=c.footprint_xy()) for c in clusters],
             ground_filter=cluster_stats,

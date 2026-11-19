@@ -7,6 +7,8 @@
   <license>MIT</license>
 
   <buildtool_depend>ament_python</buildtool_depend>
+  <build_depend>python3-dev</build_depend>
+  <build_depend>g++</build_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>rcl_interfaces</exec_depend>
   <exec_depend>nav_msgs</exec_depend>

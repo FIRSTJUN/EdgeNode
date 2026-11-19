@@ -9,11 +9,24 @@ from dataclasses import replace
 
 from .lattice_path import heading_error
 from .lane_geometry import PolylineIndex,sample,curvature_at,arc
-from .lattice_path import center_suffix
+from .lattice_path import center_suffix,transition
+from .search_budget import SearchBudgetExceeded
+
+
+def matched_approach_prefix(guide,pose,curvature,station,advance):
+    """Fixed C2 bridge from the measured pose to the future search origin.
+
+    A clipped native polyline can end on a microscopic partial edge, whose
+    tangent disagrees with the worker's preparation. Match position, tangent
+    and turn instead; every ordinary curvature/body/PP gate still applies.
+    """
+    return transition(pose[:2],pose[2],curvature,guide,station+advance,advance)
 
 
 class EntrySearch:
-    def __init__(self, executor=None):
+    def __init__(self, executor=None, *, budget_s=0.):
+        if not math.isfinite(budget_s) or budget_s<0:raise ValueError('invalid search budget')
+        self.budget_s=budget_s
         self._executor=executor if executor is not None else ProcessPoolExecutor(
             max_workers=1,mp_context=get_context('spawn'))
         self._warmup=self._executor.submit(os.getpid) if executor is None else None
@@ -22,13 +35,22 @@ class EntrySearch:
         self._prefix=()
         self._pending_prefix=()
         self._anchor={}
+        self._episode_context=None
+        self._episode_started=None
+        self._future_has_approach=False
 
-    def cancel(self):
+    @property
+    def active(self):
+        return self._future is not None
+
+    def cancel(self,*,reset_episode=True):
         if self._future is not None:self._future.cancel()
         self._future=self._context=self._pose=None
         self._prefix=()
         self._pending_prefix=()
         self._anchor={}
+        self._future_has_approach=False
+        if reset_episode:self._episode_context=self._episode_started=None
 
     def close(self):
         self.cancel();self._executor.shutdown(wait=False,cancel_futures=True)
@@ -36,14 +58,40 @@ class EntrySearch:
     @staticmethod
     def _search(snapshot, arguments):
         started=time.perf_counter();generated=snapshot.generated_transition_count
-        result=snapshot._search_entry(*arguments)
+        capture=os.environ.get('EDGENODE_ENTRY_SNAPSHOT_DIR');capture_prefix=None
+        if capture:
+            import json,pickle
+            from pathlib import Path
+            capture_prefix=Path(capture)/('entry-'+str(os.getpid())+'-'+str(time.monotonic_ns()))
+            capture_prefix.with_suffix('.input.pickle').write_bytes(pickle.dumps((snapshot,arguments)))
+            capture_prefix.with_suffix('.metadata.json').write_text(json.dumps(getattr(snapshot,'_entry_capture',{})))
+        budget=getattr(snapshot,'_worker_search_budget_sec',0.)
+        snapshot._search_deadline_sec=started+budget if budget else None
+        try:
+            result=snapshot._search_entry(*arguments)
+        except SearchBudgetExceeded:
+            snapshot._entry_context['search_budget']=dict(limit_s=budget,
+                classification='COMPUTATION_LIMIT_NOT_PHYSICAL_IMPOSSIBILITY')
+            result=snapshot._block('ENTRY_SEARCH_BUDGET_EXHAUSTED')
+        finally:
+            snapshot._search_deadline_sec=None
+            if capture_prefix is not None:
+                capture_prefix.with_suffix('.result.pickle').write_bytes(pickle.dumps(snapshot))
         return result,snapshot,snapshot.generated_transition_count-generated,(time.perf_counter()-started)*1000.
 
     def __call__(self, planner, reference, pose, speed, curvature, current, route, route_index, distance, body_cache):
         context=(id(planner),id(planner._global_path),planner.config,tuple(route))
-        context+=(id(planner._entry_replan_guide),)
+        context+=(id(planner._entry_replan_guide),tuple(getattr(planner,'_route_waypoints',())))
         if not planner.config.continuous_lane_follow:context+=(current,route_index)
-        if context!=self._context:self.cancel()
+        if context!=self._context:self.cancel(reset_episode=False)
+        if context!=self._episode_context:
+            self._episode_context=context;self._episode_started=None
+        if self.budget_s and self._episode_started is not None and time.monotonic()-self._episode_started>=self.budget_s:
+            planner._entry_context['search_budget']=dict(limit_s=self.budget_s,
+                classification='COMPUTATION_LIMIT_NOT_PHYSICAL_IMPOSSIBILITY',
+                scope='TOTAL_ENTRY_EPISODE_INCLUDING_REJECTED_ATTEMPTS')
+            self.cancel(reset_episode=False)
+            return planner._block('ENTRY_SEARCH_BUDGET_EXHAUSTED')
         def pending():
             if planner.config.continuous_lane_follow:
                 if planner._entry_pending_path:
@@ -118,7 +166,25 @@ class EntrySearch:
                 if target is None:return pending()
                 point,tangent=target;search_pose=(*point[:2],math.atan2(tangent[1],tangent[0]))
                 search_curvature=curvature_at(guide,station+advance)
-                if advance>1e-6:prefix=center_suffix(guide,station,station+advance)
+                if (getattr(planner,'complete_offset_search',False) and
+                        not planner.config.optimize_entry_onset and not planner._entry_replan_guide and
+                        abs(heading_error(pose[2],search_pose[2]))>planner.config.acquisition_heading_rad/2):
+                    # Stay on the existing validated guide while finishing
+                    # its bend, using the same half acquisition reserve as
+                    # adoption, rather than proving thousands of lateral
+                    # entries from an already turning actuator state. Waiting
+                    # consumes the same bounded entry episode as computation.
+                    if self._episode_started is None:self._episode_started=time.monotonic()
+                    planner._entry_context['entry_alignment']=dict(
+                        heading_error_rad=abs(heading_error(pose[2],search_pose[2])),
+                        limit_rad=planner.config.acquisition_heading_rad/2,
+                        action='FOLLOW_VALIDATED_ORIGINAL_GUIDE_BEFORE_SEARCH')
+                    result=pending();planner.reason='ENTRY_ALIGNMENT_PENDING'
+                    result['reason']=planner.reason
+                    return result
+                if advance>1e-6:
+                    prefix=matched_approach_prefix(guide,pose,curvature,station,advance)
+                    self._anchor['prefix_kind']='QUINTIC_POSE_TANGENT_CURVATURE_MATCH'
                 else:search_pose=pose;search_curvature=curvature
                 if planner.config.optimize_entry_onset and not planner._entry_replan_guide:
                     entry_distance=planner._detection_entry_distance(pose,current,route,route_index)
@@ -136,20 +202,38 @@ class EntrySearch:
                     if global_station<=cumulative:
                         search_current=key;search_index=i;break
             snapshot=copy(planner);snapshot._obstacle_bounds=dict(planner._obstacle_bounds)
+            if self._episode_started is None:self._episode_started=time.monotonic()
+            snapshot._worker_search_budget_sec=(max(1e-9,self.budget_s-(time.monotonic()-self._episode_started))
+                if self.budget_s else 0.)
             snapshot._entry_context=dict(planner._entry_context)
             snapshot._validated_paths={}
             snapshot._map_sweep_cache=type(planner._map_sweep_cache)()
             snapshot._fixed_sweep_cache=type(planner._fixed_sweep_cache)()
+            self._future_has_approach=bool(prefix and getattr(planner,'complete_offset_search',False))
+            if self._future_has_approach:
+                # Predict the whole path from the measured state, reserving
+                # an original-lane approach while computation runs. Starting
+                # the PP proof at a guessed future pose misses controller lead
+                # from the approach into the lateral bend.
+                snapshot._entry_onset_floor_xy=search_pose[:2]
+                search_pose=pose;search_curvature=curvature
+                search_current=current;search_index=route_index
+                self._anchor['path_origin_kind']='MEASURED_POSE_WITH_RESERVED_APPROACH'
             search_speed=min(speed,planner.config.avoid_speed_kmh) if planner.config.optimize_entry_onset else speed
             arguments=(planner._global_path if prefix else reference,search_pose,search_speed,search_curvature,
-                       search_current,route,search_index,distance-(advance if prefix else 0.),{})
+                       search_current,route,search_index,distance-(advance if prefix and not self._future_has_approach else 0.),{})
             self._context=context;self._pose=search_pose;self._prefix=prefix
+            if os.environ.get('EDGENODE_ENTRY_SNAPSHOT_DIR'):
+                snapshot._entry_capture=dict(submitted_ns=time.monotonic_ns(),pose=pose,
+                    curvature=curvature,speed_kmh=speed,prefix=prefix,current_link=current,
+                    path_has_approach=self._future_has_approach)
             self._future=self._executor.submit(self._search,snapshot,arguments)
             return pending()
         if not self._future.done():return pending()
         if planner.config.optimize_entry_onset and speed>planner.config.avoid_speed_kmh+.2:
             return pending()  # Compute during braking; never execute a lateral maneuver at that speed.
-        future=self._future;search_pose=self._pose;prefix=self._prefix
+        future=self._future;search_pose=self._pose
+        prefix=() if self._future_has_approach else self._prefix
         anchor=self._anchor
         self._future=self._context=self._pose=None
         self._prefix=()
@@ -167,8 +251,11 @@ class EntrySearch:
         if anchor:planner._entry_context['entry_search_anchor']=anchor
         if result['blocked']:
             if planner.config.continuous_lane_follow:
-                if result['reason']=='OFFSET_RETURN_UNPROVEN':
+                if result['reason'] in ('OFFSET_RETURN_UNPROVEN','ENTRY_SEARCH_BUDGET_EXHAUSTED'):
                     return planner._block(result['reason'])
+                if planner._entry_context.get('road_origin_pruning') and all(
+                        c.rejection=='ROAD_START_BODY_UNPROVEN' for c in planner.candidates):
+                    return planner._block('ROAD_MAP_CONTAINMENT_UNPROVEN')
                 planner._entry_context['last_search_rejection']=result['reason']
                 return pending()
             return planner._block(result['reason'])
@@ -186,8 +273,7 @@ class EntrySearch:
             # The original-lane bridge is part of the maneuver, including any
             # portion beyond the live control window. Never attach a bridge
             # through an obstacle to a safe trajectory that starts beyond it.
-            reason=(planner._path_safety(prefix,planner.remembered,speed,
-                native_reference=getattr(planner.network,'morai_unmarked_junction_experiment',False))
+            reason=(planner._path_safety(prefix,planner.remembered,speed)
                 if len(prefix)>=3 else '')
             if not reason:reason=planner._validate_active(planner.selected.entry_path,pose,speed,curvature,{})
             if reason:

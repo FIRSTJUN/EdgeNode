@@ -21,7 +21,7 @@ from std_msgs.msg import Float32, String
 
 
 class Monitor(Node):
-    def __init__(self):
+    def __init__(self, *, reliable_supervision=False):
         super().__init__('morai_drive_operator')
         self.values, self.received = {}, {}
         for topic, kind in [('/ego_vehicle_status', EgoVehicleStatus), ('/ctrl_cmd', CtrlCmd),
@@ -31,7 +31,13 @@ class Monitor(Node):
                 ('/planning/speed_mode', String), ('/planning/avoidance_debug', String),
                 ('/planning/s4_sensor_state', String), ('/planning/map_match_status', String),
                 ('/planning/local_path', NavPath)]:
-            self.create_subscription(kind, topic, lambda m, t=topic: self.receive(t, m), qos_profile_sensor_data)
+            qos=qos_profile_sensor_data
+            if reliable_supervision:
+                from rclpy.qos import QoSProfile,ReliabilityPolicy
+                publishers=self.get_publishers_info_by_topic(topic)
+                reliable=publishers and all(p.qos_profile.reliability==ReliabilityPolicy.RELIABLE for p in publishers)
+                qos=QoSProfile(depth=1,reliability=ReliabilityPolicy.RELIABLE if reliable else ReliabilityPolicy.BEST_EFFORT)
+            self.create_subscription(kind, topic, lambda m, t=topic: self.receive(t, m), qos)
         self.setter = self.create_client(SetParametersAtomically, '/planning_node/set_parameters_atomically')
         self.getter = self.create_client(GetParameters, '/planning_node/get_parameters')
 

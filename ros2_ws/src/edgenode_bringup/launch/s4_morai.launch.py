@@ -32,6 +32,9 @@ def launch_nodes(context):
     # support. Extend output and validation together; no safety gate changes.
     s4_horizon=max(20.,5.*math.ceil((4.*avoid_speed+lookahead+.6+2.)/5.))
     route_file=LaunchConfiguration('route_file').perform(context)
+    planning_profile=LaunchConfiguration('planning_profile_file').perform(context)
+    if planning_profile and not os.path.isfile(planning_profile):
+        raise ValueError('planning_profile_file must be an existing preserved ROS parameter YAML')
     mission={}
     if route_file:
         with open(route_file,encoding='utf-8') as stream:route=yaml.safe_load(stream)
@@ -53,6 +56,8 @@ def launch_nodes(context):
                  'roi_min_x':-8.,'roi_max_x':value('lidar_roi_max_x',float),'roi_min_y':-40.,'roi_max_y':40.,
                  'oriented_footprints':True,'ground_plane_filter_enabled':True,
                  'clipped_footprints':value('lidar_clipped_footprints',bool),
+                 'tiled_minimum_area_bounds':value('lidar_tiled_minimum_area_bounds',bool),
+                 'native_geometry':value('lidar_native_geometry',bool),
                  'publish_debug_clouds':value('lidar_debug_clouds',bool),
                  'footprint_tile_size_m':value('lidar_footprint_tile_m',float),
                  # Measured Ego returns end below sensor Z=0. A 0.3m
@@ -77,6 +82,16 @@ def launch_nodes(context):
                  'morai_unmarked_junction_experiment':value('morai_unmarked_junction_experiment',bool),
                  'morai_surface_offset_experiment':value('morai_surface_offset_experiment',bool),
                  'morai_transient_sensor_recovery':value('morai_transient_sensor_recovery',bool),
+                 's4_atomic_sensor_frames':value('s4_atomic_sensor_frames',bool),
+                 'goal_approach_enabled':value('goal_approach_enabled',bool),
+                 'vehicle_geometry_profile':LaunchConfiguration('vehicle_geometry_profile'),
+                 'normal_merge_correction_enabled':value('normal_merge_correction_enabled',bool),
+                 'normal_surveyed_center_correction_enabled':value('normal_surveyed_center_correction_enabled',bool),
+                 'normal_occlusion_speed_enabled':value('normal_occlusion_speed_enabled',bool),
+                 'surveyed_road_file':LaunchConfiguration('surveyed_road_file'),
+                 'surveyed_road_sha256':LaunchConfiguration('surveyed_road_sha256'),
+                 'avoidance_search_budget_sec':value('avoidance_search_budget_sec',float),
+                 'avoidance_normal_prediction_margin_m':value('normal_prediction_margin_m',float),
                  'static_avoidance_method':LaunchConfiguration('static_avoidance_method'),
                  'avoidance_continuous_lane_follow':True if lane_candidates else value('morai_continuous_avoidance',bool),
                  'avoidance_integrated_strategy':True if lane_candidates else value('morai_integrated_lattice',bool),
@@ -104,7 +119,8 @@ def launch_nodes(context):
                  's4_distance_validation_enabled':False,
                  # Keep directed topology and explicit denials; add original HD-map boundaries.
                  'avoidance_require_explicit_permission':False,
-                 'avoidance_boundary_dir':'/workspace/local_data/kcity_hdmap'}],additional_env=env),
+                 'avoidance_boundary_dir':'/workspace/local_data/kcity_hdmap'}]+
+                 ([planning_profile] if planning_profile else []),additional_env=env),
         Node(package='edgenode_control',executable='control_node',output='screen',parameters=[control,{
             'steering_slew_limit_radps':.6,'lookahead_max_m':value('lookahead_max_m',float),
             'normal_lookahead_min_m':value('normal_lookahead_min_m',float),
@@ -120,6 +136,7 @@ def launch_nodes(context):
 def generate_launch_description():
     arguments=[
         ('enable_drive','false'),('speed_kmh','60.0'),
+        ('planning_profile_file',''),
         ('cruise_speed_kmh',LaunchConfiguration('speed_kmh')),
         ('sharp_curve_speed_kmh','30.0'),('avoidance_speed_kmh','10.0'),
         ('avoid_speed_kmh',LaunchConfiguration('avoidance_speed_kmh')),
@@ -133,6 +150,15 @@ def generate_launch_description():
         ('static_avoidance_method','lattice'),
         ('morai_surface_offset_experiment','false'),
         ('morai_transient_sensor_recovery','false'),
+        ('s4_atomic_sensor_frames','true'),
+        ('goal_approach_enabled','true'),
+        ('vehicle_geometry_profile','sonata_nominal'),
+        ('normal_merge_correction_enabled','false'),
+        ('normal_surveyed_center_correction_enabled','false'),
+        ('normal_occlusion_speed_enabled','false'),
+        ('surveyed_road_file',''),('surveyed_road_sha256',''),
+        ('avoidance_search_budget_sec','6.0'),
+        ('normal_prediction_margin_m','0.0'),
         ('lookahead_max_m','12.0'),('lookahead_preview_time_sec','0.8'),
         ('normal_lookahead_min_m','4.0'),('lookahead_heading_budget_rad','1.6'),
         ('normal_lookahead_heading_budget_rad','0.25'),
@@ -141,6 +167,8 @@ def generate_launch_description():
         ('normal_tracking_lateral_limit_mps2','3.0'),
         ('lidar_roi_max_x','100.0'),
         ('lidar_clipped_footprints','true'),
+        ('lidar_tiled_minimum_area_bounds','false'),
+        ('lidar_native_geometry','false'),
         ('lidar_debug_clouds','true'),
         ('lidar_footprint_tile_m','3.0'),
         ('lidar_obstacle_max_z_m','0.3'),

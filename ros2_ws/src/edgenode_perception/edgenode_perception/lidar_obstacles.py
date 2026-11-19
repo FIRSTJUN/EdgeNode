@@ -7,6 +7,10 @@ import numpy as np
 from scipy.spatial import cKDTree
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
+try:
+    from . import _geometry_native
+except ImportError:
+    _geometry_native=None
 
 
 @dataclass(frozen=True)
@@ -22,6 +26,8 @@ class LidarObstacleConfig:
     obstacle_max_z_m: float = 1.0
     oriented_footprints: bool = False
     clipped_footprints: bool = False
+    tiled_minimum_area_bounds: bool = False
+    native_geometry: bool = False
     footprint_tile_size_m: float = 0.
     ground_plane_filter_enabled: bool = False
     ground_plane_neighbor_m: float = 1.5
@@ -41,7 +47,7 @@ class LidarObstacleConfig:
     def __post_init__(self):
         for field in fields(self):
             value = getattr(self, field.name)
-            if field.name in ('oriented_footprints','clipped_footprints','ground_plane_filter_enabled','obstacle_height_filter_enabled'):
+            if field.name in ('oriented_footprints','clipped_footprints','tiled_minimum_area_bounds','native_geometry','ground_plane_filter_enabled','obstacle_height_filter_enabled'):
                 if type(value) is not bool:raise ValueError(field.name+' must be boolean')
             elif field.name in ('min_cluster_points','ground_plane_min_seed_points'):
                 if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -130,7 +136,7 @@ class LidarCluster:
                 (x1, y1), (xm, y1), (x0, y1), (x0, ym))
 
 
-def oriented_bounds(xy,min_extent_m=.05):
+def oriented_bounds(xy,min_extent_m=.05,*,native_geometry=False):
     """Minimum-area containing rectangle over observed hull edge directions.
 
     PCA rotates with the density of visible front/side returns and can invent
@@ -142,7 +148,7 @@ def oriented_bounds(xy,min_extent_m=.05):
     if xy.ndim!=2 or xy.shape[1]!=2 or not len(xy) or not np.isfinite(xy).all():
         raise ValueError('finite observed XY points required')
     center=xy.mean(axis=0);relative=xy-center
-    unique=sorted(set(map(tuple,relative)))
+    unique=sorted(set(map(tuple,relative))) if not native_geometry else None
     def half(points):
         result=[]
         for p in points:
@@ -152,7 +158,10 @@ def oriented_bounds(xy,min_extent_m=.05):
                 result.pop()
             result.append(p)
         return result
-    hull=np.array(half(unique)[:-1]+half(list(reversed(unique)))[:-1]) if len(unique)>1 else np.array(unique)
+    if native_geometry:
+        if _geometry_native is None:raise RuntimeError('native geometry extension is not built')
+        hull=np.array(_geometry_native.convex_hull(np.ascontiguousarray(relative,dtype=np.float64)))
+    else:hull=np.array(half(unique)[:-1]+half(list(reversed(unique)))[:-1]) if len(unique)>1 else np.array(unique)
     edges=np.roll(hull,-1,axis=0)-hull
     angles=np.unique(np.mod(np.arctan2(edges[:,1],edges[:,0]),math.pi/2))
     best=None
@@ -205,7 +214,14 @@ def _seeded_ground(selected,ground,tree,config):
     seeds. Every seed and cluster point must fit; missing/ambiguous evidence
     retains the obstacle. No elevated-plane-only ground inference is allowed.
     """
-    near=sorted({i for row in tree.query_ball_point(selected[:,:2],config.ground_plane_neighbor_m) for i in row})
+    # Union of ground-neighbour lists equals the ground points whose nearest
+    # selected return is within the same radius. Query each ground seed once;
+    # dense road returns no longer allocate millions of duplicate neighbours.
+    # Query without an upper bound so the original inclusive radius stays
+    # inclusive, including points exactly on its boundary.
+    distances=cKDTree(selected[:,:2]).query(ground[:,:2],k=1,
+        distance_upper_bound=np.nextafter(config.ground_plane_neighbor_m,math.inf))[0]
+    near=np.flatnonzero(distances<=config.ground_plane_neighbor_m)
     if len(near)<config.ground_plane_min_seed_points:return False
     seeds=ground[near];combined=np.concatenate((selected,seeds))
     weights=np.r_[np.full(len(selected),1/math.sqrt(len(selected))),
@@ -233,9 +249,13 @@ def detect_clusters(points, config, *, diagnostics=None, cluster_points=None, fo
     # Close vehicle faces contain hundreds of thousands of neighbor pairs;
     # compiled graph traversal avoids starving live sensor callbacks there.
     pairs=tree.query_pairs(config.cluster_distance_m,output_type='ndarray')
-    graph=coo_matrix((np.ones(len(pairs),dtype=np.uint8),(pairs[:,0],pairs[:,1])),
-                     shape=(len(xyz),len(xyz))).tocsr()
-    count,labels=connected_components(graph,directed=False)
+    if config.native_geometry:
+        if _geometry_native is None:raise RuntimeError('native geometry extension is not built')
+        labels=np.asarray(_geometry_native.component_labels(len(xyz),np.ascontiguousarray(pairs,dtype=np.int64)))
+    else:
+        graph=coo_matrix((np.ones(len(pairs),dtype=np.uint8),(pairs[:,0],pairs[:,1])),
+                         shape=(len(xyz),len(xyz))).tocsr()
+        count,labels=connected_components(graph,directed=False)
     order=np.argsort(labels,kind='stable')
     components=np.split(order,np.flatnonzero(np.diff(labels[order]))+1)
     clusters = []
@@ -253,7 +273,14 @@ def detect_clusters(points, config, *, diagnostics=None, cluster_points=None, fo
                     x,y,yaw=footprint_tile_pose;c,s=math.cos(yaw),math.sin(yaw)
                     vx=xy[:,0]+config.lidar_offset_x_m;vy=xy[:,1]+config.lidar_offset_y_m
                     xy=np.c_[x+c*vx-s*vy,y+s*vx+c*vy]
-                keys=np.floor(xy/config.footprint_tile_size_m).astype(np.int64)
+                scaled=xy/config.footprint_tile_size_m
+                if config.tiled_minimum_area_bounds:
+                    # Canonical ownership for floating-point roundoff exactly
+                    # on a tile edge. This changes only the grouping key;
+                    # the measured coordinates and all returns stay verbatim.
+                    nearest=np.rint(scaled)
+                    scaled=np.where(np.abs(scaled-nearest)<=1e-10,nearest,scaled)
+                keys=np.floor(scaled).astype(np.int64)
                 _,labels=np.unique(keys,axis=0,return_inverse=True)
                 order=np.argsort(labels,kind='stable')
                 patches=[selected[index] for index in np.split(order,np.flatnonzero(np.diff(labels[order]))+1)]
@@ -261,8 +288,20 @@ def detect_clusters(points, config, *, diagnostics=None, cluster_points=None, fo
             # component. Never drop a thin or sparse patch after subdivision.
             for patch in patches:
                 oriented=config.oriented_footprints or config.clipped_footprints
-                corners=oriented_bounds(patch[:,:2],config.min_footprint_extent_m) if oriented and not config.footprint_tile_size_m else ()
-                if config.footprint_tile_size_m and oriented:
+                fit_sensor=oriented and (not config.footprint_tile_size_m or
+                    (config.tiled_minimum_area_bounds and footprint_tile_pose is None))
+                corners=oriented_bounds(patch[:,:2],config.min_footprint_extent_m,native_geometry=config.native_geometry) if fit_sensor else ()
+                if oriented and config.tiled_minimum_area_bounds and footprint_tile_pose is not None:
+                    # Solve ties and the nonzero floor for a single return in
+                    # fixed map axes, so changing sensor yaw cannot rotate a
+                    # one-point tile's containing square into the lane.
+                    x,y,yaw=footprint_tile_pose;c,s=math.cos(yaw),math.sin(yaw)
+                    vx=patch[:,0]+config.lidar_offset_x_m;vy=patch[:,1]+config.lidar_offset_y_m
+                    world=np.c_[x+c*vx-s*vy,y+s*vx+c*vy]
+                    box=oriented_bounds(world,config.min_footprint_extent_m,native_geometry=config.native_geometry)
+                    corners=tuple((c*(wx-x)+s*(wy-y)-config.lidar_offset_x_m,
+                                   -s*(wx-x)+c*(wy-y)-config.lidar_offset_y_m) for wx,wy in box)
+                if config.footprint_tile_size_m and oriented and not config.tiled_minimum_area_bounds:
                     # Align the containing box with its fixed world tile.
                     # A minimum-area sensor box can otherwise protrude into
                     # the next tile and change association as Ego rotates.

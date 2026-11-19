@@ -43,6 +43,17 @@ def test_no_obstacle_preserves_normal_path_identity():
     assert result['points'] is reference and result['state']=='NORMAL' and not result['active']
 
 
+def test_normal_prediction_reserves_tracking_before_measured_clearance_is_lost():
+    p,point,obstacle=setup()
+    reference=[point(i*.5,0.) for i in range(161)]
+    # Its near side is 0.28 m from the nominal 0.93 m half-width: clear for
+    # ideal following, unsafe after a permitted 0.10 m tracking deviation.
+    solid=obstacle(front=35.,rear=39.,low=1.21,high=1.5)
+    assert not p._normal_hazards(reference,[solid])
+    assert p._normal_hazards(reference,[solid],prediction_margin_m=.30)==(solid,)
+    assert p._obstacle_safety((0.,0.,0.),(0.,0.,0.),[solid])==''
+
+
 @pytest.mark.parametrize('deceleration,state',[(2.,'BLOCKED'),(4.,'DETECT')])
 def test_measured_morai_braking_experiment_retains_distance_gate_and_records_evidence(deceleration,state):
     p,point,obstacle=setup()

@@ -13,6 +13,7 @@ lidar_obstacle_node:
     sensor_future_tolerance_sec: 0.05
     sensor_status_period_sec: 0.1
     gravity_ground_compensation: false
+    native_geometry: false
 
     # Initial MORAI Sonata baseline, not final S4 tuning.
     # XYZ is sensor-local even though the incoming frame_id is /map.
@@ -27,6 +28,7 @@ lidar_obstacle_node:
     obstacle_max_z_m: 1.0
     oriented_footprints: false
     clipped_footprints: false
+    tiled_minimum_area_bounds: false
     footprint_tile_size_m: 0.0
     ground_plane_filter_enabled: false
     ground_plane_neighbor_m: 1.5

@@ -44,6 +44,7 @@ from .s4_distance_safety import DistancePolicy, DistanceSafety, load_evidence
 from .lane_geometry import arc
 from .route_resume import mission_suffix, link_index_at_progress
 from .morai_speed_safety import required_deceleration_distance
+from .goal_approach import GoalApproach
 
 
 # Only freshness/initial-pair gaps may suspend a maneuver temporarily. Invalid
@@ -175,6 +176,16 @@ class PlanningNode(Node):
         )
         self.dijkstra_planner = DijkstraPlanner(mgeo_dir=mgeo_dir)
         self.local_path_planner = LocalPathPlanner()
+        self.declare_parameter('goal_approach_enabled',False,ParameterDescriptor(read_only=True))
+        self.declare_parameter('goal_deceleration_mps2',1.5,ParameterDescriptor(read_only=True))
+        self._goal_approach = (GoalApproach(self.get_parameter('goal_deceleration_mps2').value)
+            if self.get_parameter('goal_approach_enabled').value else None)
+        self._goal_state = {}
+        self.goal_state_pub = self.create_publisher(String,'/planning/goal_state',10)
+        self.declare_parameter('normal_occlusion_speed_enabled',False,ParameterDescriptor(read_only=True))
+        self.declare_parameter('normal_occlusion_sensor_forward_m',1.19,ParameterDescriptor(read_only=True))
+        self._normal_occlusion_enabled=self.get_parameter('normal_occlusion_speed_enabled').value
+        self._normal_occlusion_state={}
         self.speed_planner = SpeedPlanner(
             cruise_speed_kmh=self.get_parameter('cruise_speed_kmh').value,
             sharp_curve_speed_kmh=self.get_parameter('sharp_curve_speed_kmh').value,
@@ -211,6 +222,7 @@ class PlanningNode(Node):
                 ('s4_sensor_future_tolerance_sec', .05)):
             self.declare_parameter(name, value, ParameterDescriptor(read_only=True))
         self.declare_parameter('morai_transient_sensor_recovery',False,ParameterDescriptor(read_only=True))
+        self.declare_parameter('s4_atomic_sensor_frames',False,ParameterDescriptor(read_only=True))
         self.sensor_guard = None
         self._sensor_pause=None
         self._sensor_pause_offset_ns=0
@@ -247,17 +259,50 @@ class PlanningNode(Node):
             config=AvoidanceConfig(**values),
             weights=CostWeights(**{name:self.get_parameter('avoidance_cost_'+name).value
                                    for name in weights.__dict__}))
+        self.declare_parameter('vehicle_geometry_profile','sonata_nominal',ParameterDescriptor(read_only=True))
+        geometry_profile = self.get_parameter('vehicle_geometry_profile').value
+        if geometry_profile == 'morai_sonata_collision_envelope':
+            from .vehicle_geometry import morai_sonata_collision_envelope
+            self.avoidance_planner.body = morai_sonata_collision_envelope()
+        elif geometry_profile != 'sonata_nominal':
+            raise ValueError('unknown verified vehicle geometry profile')
         self.declare_parameter('avoidance_boundary_dir', '', ParameterDescriptor(read_only=True))
         boundary_dir = self.get_parameter('avoidance_boundary_dir').value
         if boundary_dir:
             from .hdmap_boundaries import HDMapBoundaries
             self.avoidance_planner.network.boundaries = HDMapBoundaries(boundary_dir, mgeo_dir)
+        self.declare_parameter('normal_merge_correction_enabled',False,ParameterDescriptor(read_only=True))
+        self._normal_merge_correction=self.get_parameter('normal_merge_correction_enabled').value
+        self.declare_parameter('normal_surveyed_center_correction_enabled',False,ParameterDescriptor(read_only=True))
+        self._normal_surveyed_center=self.get_parameter('normal_surveyed_center_correction_enabled').value
+        if self._normal_surveyed_center and not self._normal_merge_correction:
+            raise ValueError('surveyed normal centering requires the verified route correction pipeline')
+        if self._normal_merge_correction and not boundary_dir:
+            raise ValueError('normal merge correction requires original surveyed boundaries')
         self.declare_parameter('morai_surface_offset_experiment',False,ParameterDescriptor(read_only=True))
         if self.get_parameter('morai_surface_offset_experiment').value:
             network=self.avoidance_planner.network
             if not self.avoidance_planner.config.integrated_strategy or not boundary_dir:
                 raise ValueError('MORAI surface offsets require integrated selection and an original HD map')
             network.road_corridor=network.boundaries.road_surface_corridor(network)
+        self.declare_parameter('surveyed_road_file','',ParameterDescriptor(read_only=True))
+        self.declare_parameter('surveyed_road_sha256','',ParameterDescriptor(read_only=True))
+        surveyed_file=self.get_parameter('surveyed_road_file').value
+        if surveyed_file:
+            from .surveyed_road_artifact import load_artifact
+            self.avoidance_planner.network.road_corridor=load_artifact(surveyed_file,
+                self.get_parameter('surveyed_road_sha256').value,self.avoidance_planner.network)
+        if self._normal_surveyed_center:
+            # Map-only geometry is immutable for the mission. Prepare before
+            # subscriptions/timers run, while Control keeps the disarmed stop.
+            # A suffix/relocation then reuses the per-link proof, rather than
+            # blocking fresh sensor callbacks and parameter services for seconds.
+            from .route_clearance import correct_route
+            start=self.get_parameter('route_start_link_id').value
+            waypoints=self.get_parameter('route_node_ids').value
+            warm=self.dijkstra_planner.plan_route(start,waypoints) if start and waypoints else None
+            if warm is None:raise ValueError('surveyed centering requires a valid fixed saved mission')
+            correct_route(warm,self.avoidance_planner.network,self.avoidance_planner.body,surveyed_centering=True)
         self.distance_safety = None
         for name, value in DistancePolicy().__dict__.items():
             self.declare_parameter('s4_distance_' + name, value, ParameterDescriptor(read_only=True))
@@ -293,8 +338,10 @@ class PlanningNode(Node):
         self.latest_pose_received_ns = None
         self._validation_pending_stamp_ns = None
         self._validation_fresh_stamps = set()
-        self._return_search = ReturnSearch()
-        self._entry_search = EntrySearch()
+        self.declare_parameter('avoidance_search_budget_sec',6.,ParameterDescriptor(read_only=True))
+        search_budget=self.get_parameter('avoidance_search_budget_sec').value
+        self._return_search = ReturnSearch(budget_s=search_budget)
+        self._entry_search = EntrySearch(budget_s=search_budget)
         self._candidate_marker_ids = set()
         self._candidate_cache=None
         self._diagnostic_path_cache={}
@@ -302,7 +349,9 @@ class PlanningNode(Node):
                                   if method=='lane_candidates' else None)
         self._lane_candidates_next_publish=0.
         self._traffic_model=None;self._traffic_session=None
-        if self.avoidance_planner.config.integrated_strategy:
+        self.declare_parameter('traffic_tracking_diagnostics_enabled',True,ParameterDescriptor(read_only=True))
+        if (self.avoidance_planner.config.integrated_strategy and
+                self.get_parameter('traffic_tracking_diagnostics_enabled').value):
             from .obstacle_tracking import ObstacleTracking
             self._traffic_model=ObstacleTracking()
             self.traffic_tracks_pub=self.create_publisher(String,'/planning/traffic_tracks',1)
@@ -315,7 +364,11 @@ class PlanningNode(Node):
         self._avoidance_path_publishers = {name:self.create_publisher(Path, '/planning/'+name, 10)
             for name in ('original_lane_center','left_lane_center','right_lane_center',
                          'avoidance_selected_path','avoidance_return_path')}
-        atomic_frames=self.sensor_guard is not None and self.avoidance_planner.config.continuous_lane_follow
+        atomic_frames=self.sensor_guard is not None and (
+            self.avoidance_planner.config.continuous_lane_follow or
+            self.get_parameter('s4_atomic_sensor_frames').value)
+        self._atomic_sensor_frames=atomic_frames
+        self._sensor_inbox_frames=0
         self.obstacle_sub = None if atomic_frames else self.create_subscription(PoseArray,
             self.get_parameter('obstacle_topic').value, self.obstacle_callback,
             10 if self.avoidance_planner.config.continuous_lane_follow else 5 if self.sensor_guard else 10)
@@ -446,7 +499,7 @@ class PlanningNode(Node):
             Odometry,
             self.get_parameter('localization_topic').value,
             self.localization_callback,
-            1 if self.avoidance_planner.config.continuous_lane_follow else 10,
+            1 if self._atomic_sensor_frames or self.avoidance_planner.config.continuous_lane_follow else 10,
         )
         self.create_subscription(String,'/localization/reset_event',self.localization_reset_callback,
             QoSProfile(depth=10,durability=DurabilityPolicy.TRANSIENT_LOCAL))
@@ -542,6 +595,15 @@ class PlanningNode(Node):
         if self._sensor_pause is None:
             guard=self.sensor_guard
             frame=(guard.session_id,guard.matched[0]['frame_seq']) if guard.matched else None
+            # Capture the gate's actual failure instant. The next callback can
+            # already be fresh while the FSM still correctly reports HOLD.
+            matched=guard.matched
+            self._last_sensor_hold=dict(reason=reason,ros_ns=now,
+                source_stamp_ns=matched[0]['source_stamp_ns'] if matched else None,
+                source_age_sec=(now-matched[0]['source_stamp_ns'])/1e9 if matched else None,
+                receipt_age_sec=(now-matched[2])/1e9 if matched else None,
+                producer_age_sec=(now-matched[0]['frame_received_ns'])/1e9 if matched else None,
+                status_callback_delay_sec=(now-guard.status['published_ns'])/1e9 if guard.status else None)
             self._sensor_pause=dict(reason=reason,ros_started_ns=now,steady_started_ns=steady,
                                     frame=frame,confirmed=0,good_since_ns=None)
             self._validation_pending_stamp_ns=None;self._validation_fresh_stamps.clear()
@@ -615,6 +677,7 @@ class PlanningNode(Node):
             self.refresh_sensor(now)
 
     def sensor_frame_callback(self,msg):
+        PlanningNode.drain_atomic_vehicle_state(self)
         now=self.get_clock().now().nanoseconds
         reason=self.sensor_guard.frame(msg.data,now)
         if reason:self.stop_for_sensor(reason)
@@ -655,8 +718,61 @@ class PlanningNode(Node):
                                 ready=False,reason='COMPONENT_METADATA_UNAVAILABLE',tracks=[],driving_policy_enabled=False)
                 self.traffic_tracks_pub.publish(String(data=json.dumps(result,allow_nan=False)))
 
+    def drain_atomic_sensor(self):
+        """Admit a queued complete frame before timer admission, not after it.
+
+        Humble's executor uses this same nonblocking take operation. Planning,
+        watchdog and subscription share the default mutually exclusive group.
+        Never take at the END of a plan: its geometry must be checked against
+        the admitted frame, not merely given a newer freshness timestamp.
+        """
+        if not getattr(self,'_atomic_sensor_frames',False):return
+        sub=self.sensor_status_sub
+        try:
+            with sub.handle:
+                taken=sub.handle.take_message(sub.msg_type,sub.raw)
+        except Exception as error:
+            self.get_logger().error(f'Atomic sensor inbox failed: {error}')
+            self.stop_for_sensor('SENSOR_TRANSPORT_ERROR');return
+        if taken is not None:
+            self._sensor_inbox_frames+=1
+            self.sensor_frame_callback(taken[0])
+
     def sensor_watchdog(self):
+        self.drain_atomic_vehicle_state()
+        self.drain_atomic_sensor()
         self.refresh_sensor(self.get_clock().now().nanoseconds)
+
+    def drain_atomic_vehicle_state(self):
+        PlanningNode.drain_atomic_pose(self)
+        if not getattr(self,'_atomic_sensor_frames',False) or not getattr(self,'_use_ego_status',False):return
+        sub=self.ego_status_sub
+        try:
+            with sub.handle:taken=sub.handle.take_message(sub.msg_type,sub.raw)
+        except Exception as error:
+            self.get_logger().error(f'Ego status inbox failed: {error}')
+            self.stop_for_sensor('EGO_STATUS_TRANSPORT_ERROR');return
+        if taken is not None:
+            self._ego_inbox_frames=getattr(self,'_ego_inbox_frames',0)+1
+            self.ego_status_callback(taken[0])
+
+    def drain_atomic_pose(self):
+        """Admit the queued source-stamped pose before timer safety checks.
+
+        This shares the existing mutually exclusive executor and validates the
+        original frame, sequence and timestamp through localization_callback.
+        A missing message never refreshes the pose clock.
+        """
+        if not getattr(self,'_atomic_sensor_frames',False):return
+        sub=self.localization_sub
+        try:
+            with sub.handle:taken=sub.handle.take_message(sub.msg_type,sub.raw)
+        except Exception as error:
+            self.get_logger().error(f'Localization inbox failed: {error}')
+            self.stop_for_sensor('PLANNING_LOCALIZATION_TRANSPORT_ERROR');return
+        if taken is not None:
+            self._pose_inbox_frames=getattr(self,'_pose_inbox_frames',0)+1
+            self.localization_callback(taken[0])
 
     def sensor_reason(self, now_ns):
         guard = getattr(self, 'sensor_guard', None)
@@ -695,6 +811,11 @@ class PlanningNode(Node):
             enabled=True, ready=not reason, reason=reason,
             recovery_pending=self._sensor_pause is not None,
             recovery_frames=self._sensor_pause['confirmed'] if self._sensor_pause else 0,
+            last_hold_event=getattr(self,'_last_sensor_hold',None),
+            atomic_inbox_frames=getattr(self,'_sensor_inbox_frames',0),
+            localization_inbox_frames=getattr(self,'_pose_inbox_frames',0),
+            ego_status_inbox_frames=getattr(self,'_ego_inbox_frames',0),
+            localization_source_age_sec=(now_ns-self.latest_pose_stamp_ns)/1e9 if self.latest_pose_stamp_ns else None,
             latched_reason=self.avoidance_planner.reason if self.avoidance_planner.state=='BLOCKED' else '',
             matched_source_age_sec=(now_ns-guard.matched[0]['source_stamp_ns'])/1e9 if guard.matched else None,
             matched_receipt_age_sec=(now_ns-guard.matched[2])/1e9 if guard.matched else None,
@@ -910,6 +1031,10 @@ class PlanningNode(Node):
         An active route configuration change invalidates both immediately.
         """
         plan_started=time.monotonic()
+        speed_elapsed=occlusion_elapsed=0.
+        self._normal_occlusion_state={}
+        PlanningNode.drain_atomic_vehicle_state(self)
+        PlanningNode.drain_atomic_sensor(self)
         if getattr(self,'_relocation',None) is not None:
             if not self._relocation_ready():
                 self._publish_relocalization_stop();return
@@ -1018,9 +1143,22 @@ class PlanningNode(Node):
                         self._route_result = self.dijkstra_planner.plan(
                             current_link, goal_node_id,
                         )
+                    if self._route_result is not None and getattr(self,'_normal_merge_correction',False):
+                        from .route_clearance import correct_route
+                        try:
+                            self._route_result=correct_route(self._route_result,
+                                self.avoidance_planner.network,self.avoidance_planner.body,
+                                surveyed_centering=getattr(self,'_normal_surveyed_center',False))
+                        except ValueError as error:
+                            self._route_error=str(error)
+                            self._route_result=None
+                            self.get_logger().error('Normal merge correction rejected: '+str(error))
                     self._route_key = route_key
                     self._progress_index = None
                     self._progress_arc_m = None
+                    if getattr(self,'_goal_approach',None) is not None:
+                        self._goal_approach.reset()
+                        self._goal_state = {}
 
                 if self._route_result is None:
                     state_value = 'GLOBAL_PATH_NOT_FOUND'
@@ -1079,6 +1217,16 @@ class PlanningNode(Node):
                     if local_result is not None:
                         self._progress_index = local_result['nearest_index']
                         self._progress_arc_m = local_result['progress_arc_m']
+                        if getattr(self,'_goal_approach',None) is not None:
+                            try:
+                                self._goal_state = self._goal_approach.update(
+                                    self._route_result['points'],
+                                    max(0.,self._prepared_route[1].cumulative[-1]-self._progress_arc_m),
+                                    (x,y,yaw),self.latest_speed_kmh,now_ns/1e9,armed=enable_drive)
+                            except (ValueError,TypeError,OverflowError) as error:
+                                self.stop_for_safety('INVALID_GOAL_APPROACH_INPUT')
+                                self._goal_state=dict(phase='INVALID_INPUT',reached=False,
+                                    speed_cap_kmh=0.,reason=str(error))
                         active_local_points = local_result['points']
                         hazard_points = active_local_points
                         s4_kwargs = {}
@@ -1114,6 +1262,10 @@ class PlanningNode(Node):
                                 observation_curvature_limit=self.distance_safety.evidence.max_curvature
                                     if self.distance_safety.evidence else 0.)
 
+                        if getattr(self.avoidance_planner,'complete_offset_search',False):
+                            s4_kwargs['route_waypoints']=tuple((identifier,tuple(
+                                self.dijkstra_planner.nodes_by_id[identifier]['point']))
+                                for identifier in (route_node_ids or ()))
                         receipt = self.obstacle_received_ns
                         observation_valid = self.latest_obstacle_valid and (receipt is None or
                             0 <= (now_ns-receipt)/1e9 <= self.get_parameter('avoidance_observation_timeout_sec').value)
@@ -1233,7 +1385,9 @@ class PlanningNode(Node):
                         if getattr(self.speed_planner,'anticipatory',False):
                             speed_kwargs['measured_speed_kmh']=self.latest_speed_kmh
                             speed_kwargs['measured_curvature']=self.latest_turn_curvature
+                        speed_started=time.monotonic()
                         speed_result = self.speed_planner.plan(active_local_points,**speed_kwargs)
+                        speed_elapsed=(time.monotonic()-speed_started)*1000.
                         if (speed_result is not None
                                 and _finite_number(speed_result['target_speed_kmh'])
                                 and speed_result['target_speed_kmh'] >= 0):
@@ -1242,6 +1396,32 @@ class PlanningNode(Node):
                             speed_mode = speed_result['speed_mode']
                             speed_curvature = speed_result['representative_curvature']
                             speed_max_curvature = speed_result['max_curvature']
+                            if (getattr(self,'_normal_occlusion_enabled',False) and
+                                    avoidance_result.get('state')=='NORMAL'):
+                                from .normal_occlusion import occlusion_limit
+                                guard=getattr(self,'sensor_guard',None)
+                                matched=guard.matched if guard is not None else None
+                                age=max(0.,(now_ns-matched[0]['source_stamp_ns'])/1e9) if matched else .6
+                                try:
+                                    occlusion_started=time.monotonic()
+                                    self._normal_occlusion_state=occlusion_limit(active_local_points,
+                                        self.latest_obstacle_groups,(x,y,yaw),self.avoidance_planner.body,
+                                        deceleration_mps2=self.avoidance_planner.config.deceleration_mps2,
+                                        source_age_s=age,
+                                        tracking_margin_m=(self.avoidance_planner.config.tracking_limit_m+
+                                            self.avoidance_planner.config.obstacle_margin_m),
+                                        native_geometry=self.avoidance_planner.config.native_obstacle_geometry,
+                                        sensor_forward_m=self.get_parameter('normal_occlusion_sensor_forward_m').value)
+                                    occlusion_elapsed=(time.monotonic()-occlusion_started)*1000.
+                                    visibility_cap=self._normal_occlusion_state['speed_cap_kmh']
+                                    if visibility_cap is not None:recommended_speed=min(recommended_speed,visibility_cap)
+                                except (ValueError,TypeError,OverflowError) as error:
+                                    avoidance_result=self.stop_for_safety('INVALID_NORMAL_OCCLUSION_INPUT')
+                                    self._normal_occlusion_state=dict(reason=str(error),speed_cap_kmh=0.)
+                                    recommended_speed=0.
+                            goal_cap = getattr(self,'_goal_state',{}).get('speed_cap_kmh')
+                            if goal_cap is not None:
+                                recommended_speed = min(recommended_speed,goal_cap)
 
         if local_result is None:
             self.avoidance_planner.invalidate_observation()
@@ -1305,7 +1485,7 @@ class PlanningNode(Node):
             obstacle_avoid_requested=avoidance_result.get('active',False),
             traffic_stop_requested=False,
             emergency_stop_requested=avoidance_result['blocked'] and local_result is not None,
-            goal_reached=False,
+            goal_reached=getattr(self,'_goal_state',{}).get('reached',False),
         )
 
         if fsm_state_value != previous_fsm_state:
@@ -1325,10 +1505,15 @@ class PlanningNode(Node):
         if hasattr(self,'diagnostics_pub'):
             self.diagnostics_pub.publish(String(data=json.dumps(dict(
                 planning_elapsed_ms=(time.monotonic()-plan_started)*1000.,
+                normal_speed_elapsed_ms=speed_elapsed,normal_occlusion_elapsed_ms=occlusion_elapsed,
                 local_path_length_m=local_result['path_length_m'] if local_result else 0.,
                 nearest_path_distance_m=local_result['nearest_distance_m'] if local_result else None,
                 s4_control_horizon_m=getattr(self,'_s4_control_horizon',None),
                 route_error=getattr(self,'_route_error',''),
+                normal_merge_corrections=self._route_result.get('normal_merge_corrections',[]) if self._route_result else [],
+                normal_center_corrections=self._route_result.get('normal_center_corrections',[]) if self._route_result else [],
+                normal_center_rejections=self._route_result.get('normal_center_rejections',[]) if self._route_result else [],
+                normal_occlusion=getattr(self,'_normal_occlusion_state',{}),
                 remaining_waypoints=self._route_result.get('remaining_waypoints') if self._route_result else None,
                 configured_cruise_kmh=self.get_parameter('cruise_speed_kmh').value,
                 recommended_speed_kmh=recommended_speed,reset_history=getattr(self,'_reset_history',[]),
@@ -1363,6 +1548,8 @@ class PlanningNode(Node):
         self.speed_curvature_pub.publish(Float32(data=speed_curvature))
         self.speed_max_curvature_pub.publish(Float32(data=speed_max_curvature))
         self.drive_status_pub.publish(String(data=drive_status))
+        if hasattr(self,'goal_state_pub'):
+            self.goal_state_pub.publish(String(data=json.dumps(getattr(self,'_goal_state',{}),allow_nan=False)))
         for topic,parameter in (('runtime_cruise_speed','cruise_speed_kmh'),
                 ('runtime_sharp_curve_speed','sharp_curve_speed_kmh')):
             value=self.get_parameter(parameter).value

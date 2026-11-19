@@ -1,4 +1,4 @@
-from setuptools import find_packages, setup
+from setuptools import Extension,find_packages, setup
 from glob import glob
 import os
 
@@ -8,6 +8,9 @@ setup(
     name=package_name,
     version='0.1.0',
     packages=find_packages(exclude=['test']),
+    package_data={package_name:['*.cpp']},
+    ext_modules=[Extension(package_name+'._geometry_native',[package_name+'/_geometry_native.cpp'],
+        language='c++',extra_compile_args=['-std=c++17','-O3','-ffp-contract=off'])],
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
@@ -18,7 +21,7 @@ setup(
     ],
     install_requires=['setuptools'],
     tests_require=['pytest'],
-    zip_safe=True,
+    zip_safe=False,
     maintainer='EdgeNode Team',
     maintainer_email='poj285895@gmail.com',
     description='Static obstacle lattice planner and guarded path following.',

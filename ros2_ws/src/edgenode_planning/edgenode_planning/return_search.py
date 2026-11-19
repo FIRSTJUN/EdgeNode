@@ -10,10 +10,13 @@ from dataclasses import replace
 from .lattice_path import heading_error
 from .lane_geometry import sample,curvature_at
 from .lattice_path import center_suffix
+from .search_budget import SearchBudgetExceeded
 
 
 class ReturnSearch:
-    def __init__(self, executor=None):
+    def __init__(self, executor=None, *, budget_s=0.):
+        if not math.isfinite(budget_s) or budget_s<0:raise ValueError('invalid search budget')
+        self.budget_s=budget_s
         # A CPU-bound Python geometry thread contends with ROS callbacks for
         # the GIL. Spawn a worker without inheriting the live DDS threads.
         self._executor = executor if executor is not None else ProcessPoolExecutor(
@@ -54,7 +57,14 @@ class ReturnSearch:
     def _search(snapshot, pose, speed, curvature):
         started = time.perf_counter()
         generated = snapshot.generated_transition_count
-        reason = snapshot._generate_return(pose, speed, curvature, {})
+        budget=getattr(snapshot,'_worker_search_budget_sec',0.)
+        snapshot._search_deadline_sec=started+budget if budget else None
+        try:
+            reason = snapshot._generate_return(pose, speed, curvature, {})
+        except SearchBudgetExceeded:
+            reason='RETURN_SEARCH_BUDGET_EXHAUSTED'
+        finally:
+            snapshot._search_deadline_sec=None
         return reason, snapshot, snapshot.generated_transition_count-generated, (time.perf_counter()-started)*1000., os.getpid()
 
     def __call__(self, planner, pose, speed, curvature, body_cache):
@@ -82,6 +92,7 @@ class ReturnSearch:
                 search_curvature=curvature_at(guide,anchor)
                 prefix=center_suffix(guide,station,anchor)
             snapshot = copy(planner)
+            snapshot._worker_search_budget_sec=self.budget_s
             snapshot._obstacle_bounds = dict(planner._obstacle_bounds)
             snapshot._validated_paths = {}
             snapshot._map_sweep_cache = type(planner._map_sweep_cache)()

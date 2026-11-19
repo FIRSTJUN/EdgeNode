@@ -60,7 +60,45 @@ class HDMapBoundaries:
             return 'LANE_BOUNDARY_FORBIDDEN'
         return ''
 
+    def install_physical_segments(self, sources):
+        """Keep physical C3 separate from unioned road-surface permission.
+
+        Two proved surfaces can meet on opposite sides of the same curb.
+        Their union must never remove the curb's whole-body collision gate.
+        The v2 pinned survey loader supplies unchanged physical source lines.
+        """
+        from shapely.geometry import LineString
+        from shapely.ops import unary_union
+        self._physical_lines=tuple((key,LineString([p[:2] for p in part]))
+            for key,parts in sources.items() for part in parts if len(part)>1)
+        self._physical_geometry=unary_union([line for key,line in self._physical_lines])
+        for name in ('_physical_prepared','_physical_tree','_physical_by_geometry'):
+            self.__dict__.pop(name,None)
+
+    def __getstate__(self):
+        state=dict(self.__dict__)
+        for name in ('_physical_prepared','_physical_tree','_physical_by_geometry'):state.pop(name,None)
+        return state
+
     def swept_reason(self, polygon):
+        if hasattr(self,'_physical_geometry'):
+            from shapely.geometry import Polygon
+            from shapely.prepared import prep
+            shape=Polygon(polygon)
+            if not shape.is_valid:return 'INVALID_PHYSICAL_BOUNDARY_SWEEP'
+            if not hasattr(self,'_physical_prepared'):self._physical_prepared=prep(self._physical_geometry)
+            if self._physical_prepared.intersects(shape):
+                # Common clear sweeps finish in one exact native query. Only
+                # a real contact needs the source identifier lookup.
+                if not hasattr(self,'_physical_tree'):
+                    from shapely.strtree import STRtree
+                    self._physical_tree=STRtree([g for key,g in self._physical_lines])
+                    self._physical_by_geometry={id(g):key for key,g in self._physical_lines}
+                for candidate in self._physical_tree.query(shape):
+                    if hasattr(candidate,'geom_type'):edge=candidate;identifier=self._physical_by_geometry[id(edge)]
+                    else:identifier,edge=self._physical_lines[int(candidate)]
+                    if shape.intersects(edge):return 'PHYSICAL_BOUNDARY_COLLISION:'+identifier
+                return 'PHYSICAL_BOUNDARY_COLLISION:SOURCE_LOOKUP_UNAVAILABLE'
         lo_x, hi_x, lo_y, hi_y = polygon_bounds(polygon)
         nearby = set()
         for x in range(int(lo_x // 10), int(hi_x // 10) + 1):

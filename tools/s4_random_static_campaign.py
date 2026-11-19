@@ -56,7 +56,7 @@ def generate(seed,count):
 def run(manifest,output):
     root=Path(__file__).resolve().parents[1];output.mkdir(exist_ok=False)
     (output/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
-    outcomes=[]
+    outcomes=[];audit_resources=None
     for scene in manifest['scenarios']:
         destination=output/scene['name']
         argv=[sys.executable,'-u',str(root/'tools/s4_morai_generalized_trial.py'),
@@ -83,6 +83,19 @@ def run(manifest,output):
         outcome=dict(name=scene['name'],exit_code=code,success=bool(summary.get('success')),
             error=summary.get('error'),restored=summary.get('restored'),
             peak_speed_kmh=summary.get('peak_speed_kmh'),phases=summary.get('phases'))
+        if summary.get('drive_started_ros_ns') and (destination/'bag/metadata.yaml').exists():
+            from s4_final_mission_audit import audit
+            if audit_resources is None:
+                from edgenode_planning.hdmap_boundaries import HDMapBoundaries
+                from s4_road_coverage_report import measured_road_mask
+                audit_resources=(HDMapBoundaries(root/'local_data/kcity_hdmap',root/'local_data/kcity_mgeo'),measured_road_mask()[0])
+            audited=audit(destination,audit_resources,audit_tag='campaign')
+            fields=('collision_messages','armed_sensor_hold_events','unexpected_empty_path_messages',
+                    'forbidden_boundary_contact_samples','physical_c3_contact_samples','road_containment_unproven_frames')
+            outcome['independent_audit']={k:audited[k] for k in fields}
+            outcome['harness_success']=outcome['success']
+            outcome['success']=outcome['success'] and not any(audited[k] for k in fields)
+            if not outcome['success'] and not outcome['error']:outcome['error']='independent all-Ego-frame qualification failed'
         outcomes.append(outcome)
         (output/'outcomes.json').write_text(json.dumps(outcomes,indent=2)+'\n')
         print(json.dumps(outcome),flush=True)
@@ -91,6 +104,9 @@ def run(manifest,output):
         if not summary.get('restored') or not summary.get('final_stop_confirmed'):
             raise RuntimeError('campaign stopped: scene or stationary Ego restoration unconfirmed')
         if interrupted:return 130
+        if not outcome['success']:
+            print('Campaign stopped at the preserved failed placement; repair and reproduce it before continuing.',flush=True)
+            return 1
     return 0 if all(x['success'] for x in outcomes) else 1
 
 

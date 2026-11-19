@@ -23,3 +23,14 @@ def test_verified_body_polygon_respects_reference_and_rotation():
                                   {'pose_reference':''},{'source':''},{'wheelbase_m':False}])
 def test_missing_or_unverified_geometry_cannot_create_a_body(changes):
     with pytest.raises(ValueError):geometry(**changes)
+
+
+def test_fixed_morai_envelope_contains_archived_collider_including_lateral_offset():
+    from edgenode_planning.vehicle_geometry import morai_sonata_collision_envelope,sonata_geometry
+    from shapely.geometry import Polygon
+    calibrated=morai_sonata_collision_envelope()
+    actual=VerifiedVehicleGeometry(2.1034488678,4.9145298004,2.84,
+        3.80055-2.84,4.9145298004-3.80055,0.,-.0066,'recorded rear axle','archived MORAI bbox')
+    for yaw in (0.,.7,math.pi):
+        assert Polygon(calibrated.polygon(10.,20.,yaw)).covers(Polygon(actual.polygon(10.,20.,yaw)))
+    assert sonata_geometry().width_m==1.86

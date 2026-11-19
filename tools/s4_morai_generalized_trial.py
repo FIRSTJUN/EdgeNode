@@ -23,8 +23,12 @@ from edgenode_planning.planning_provenance import implementation_sha256
 import yaml
 from pyproj import Proj,Transformer
 from edgenode_localization.map_heading import grid_convergence
+from s4_async_jsonl import JsonlWriter
 p=argparse.ArgumentParser();p.add_argument('--link',required=True);p.add_argument('--start',type=float,required=True);p.add_argument('--obstacle',type=float);p.add_argument('--obstacle-yaw-deg',type=float,default=0.);p.add_argument('--output',type=Path,required=True)
 p.add_argument('--follow-distance-m',type=float,help='Follow this saved-route distance without spawning an obstacle')
+p.add_argument('--autonomous-goal',action='store_true',help='Require production GOAL_REACHED and five seconds of measured stop; supervisor never commands approach deceleration')
+p.add_argument('--expect-safe-stop',action='store_true',help='Observe an armed autonomous safety stop and two seconds of physical stop before supervisor cleanup')
+p.add_argument('--interrupt-perception',action='store_true',help='With expected safe stop, reversibly pause the sole LiDAR producer after three seconds; always resume during cleanup')
 p.add_argument('--obstacle-link',help='Place the primary obstacle on this link instead of the start link')
 p.add_argument('--obstacle-lateral-m',type=float,default=0.,help='Signed map-tangent lateral displacement, left positive')
 p.add_argument('--obstacle-scale',type=float,default=1.,help='Independent XY Actor scale; uniform unless height is overridden; never supplied to Planning')
@@ -41,7 +45,10 @@ p.add_argument('--record-bag',action='store_true')
 p.add_argument('--prepare-before-spawn',action='store_true',
  help='Record the ready native candidate bank at the start pose before placing the obstacle')
 a=p.parse_args()
-if a.follow_distance_m is None and a.obstacle is None:p.error('--obstacle or --follow-distance-m required')
+if a.follow_distance_m is None and a.obstacle is None and not a.autonomous_goal:p.error('--obstacle, --follow-distance-m or --autonomous-goal required')
+if a.autonomous_goal and a.follow_distance_m is not None:p.error('autonomous goal cannot use supervisor distance completion')
+if a.expect_safe_stop and a.autonomous_goal:p.error('safe stop and goal arrival are distinct trials')
+if a.interrupt_perception and (not a.expect_safe_stop or a.obstacle is not None or a.approach_speed_kmh>10.):p.error('sensor interruption requires an expected stop without actors and speed at most 10 km/h')
 if a.follow_distance_m is not None and (a.obstacle is not None or not math.isfinite(a.follow_distance_m) or a.follow_distance_m<=0):p.error('positive follow distance without obstacle required')
 if not all(math.isfinite(v) for v in (a.start,a.obstacle_yaw_deg,a.obstacle_lateral_m) if v is not None):p.error('finite station, offset and yaw required')
 if a.obstacle is not None and not math.isfinite(a.obstacle):p.error('finite obstacle station required')
@@ -52,6 +59,7 @@ if a.tracking_only_seconds is not None and (a.obstacle is None or not math.isfin
 if a.actor_motion_kmh and a.tracking_only_seconds is None:p.error('moving NPC currently requires --tracking-only-seconds')
 if not all(math.isfinite(v) and v>0 for v in (a.approach_speed_kmh,a.seconds)):p.error('positive finite speed and duration required')
 a.output.mkdir(exist_ok=False)
+writer=JsonlWriter(a.output)
 def trial_route(planner,saved):
  if a.alternate_goal_node:
   route=planner.plan_route(a.link,[a.alternate_goal_node])
@@ -61,11 +69,11 @@ def trial_route(planner,saved):
  return mission_suffix(planner,full.get('start_link_id') or 'A219BS010380',full['waypoint_node_ids'],a.link)
 class Recorder(Monitor):
  def __init__(self):
-  super().__init__();self.paths={};self.solids=[]
+  super().__init__(reliable_supervision=True);self.paths={};self.solids=[]
   self._candidate_key=None;self._candidate_ref=None;self._candidate_serial=0;self._candidate_counts={}
   self.create_subscription(Float32,'/localization/grid_convergence_deg',lambda m:self.receive('/localization/grid_convergence_deg',m),qos_profile_sensor_data)
   self.create_subscription(String,'/perception/lidar_diagnostics',lambda m:self.receive('/perception/lidar_diagnostics',m),qos_profile_sensor_data)
-  for topic,kind in [('/planning/normal_speed_debug',String),('/planning/diagnostics',String),
+  for topic,kind in [('/planning/goal_state',String),('/planning/normal_speed_debug',String),('/planning/diagnostics',String),
                      ('/planning/lane_candidates',String),
                      ('/planning/traffic_tracks',String),
                      ('/control/lookahead_distance',Float32),('/control/pure_pursuit_steering',Float32)]:
@@ -95,6 +103,50 @@ class Recorder(Monitor):
   self.wait(lambda:self.values.get('/planning/s4_sensor_state',{}).get('ready'))
   r=self.call(self.create_client(Trigger,'/planning/reset_avoidance'),Trigger.Request())
   if not r.success:raise RuntimeError(r.message)
+ def admit_latest_supervision(self):
+  essential={'/ego_vehicle_status','/ctrl_cmd','/collision_data','/planning/target_speed',
+      '/planning/s4_sensor_state','/planning/fsm_state','/planning/goal_state','/planning/avoidance_debug'}
+  for sub in self.subscriptions:
+   if sub.topic_name not in essential:continue
+   latest=None
+   for _ in range(8):
+    with sub.handle:taken=sub.handle.take_message(sub.msg_type,sub.raw)
+    if taken is None:break
+    if sub.topic_name=='/collision_data' and taken[0].collision_object:self._collision_seen=True
+    latest=taken
+   if latest is not None:
+    msg,info=latest;self.receive(sub.topic_name,msg)
+    stamp=info.get('source_timestamp',0) if isinstance(info,dict) else getattr(info,'source_timestamp',0)
+    if stamp:
+     delivery=max(0.,(self.get_clock().now().nanoseconds-stamp)/1e9)
+     self.received[sub.topic_name]=time.monotonic()-delivery
+ def finish_follow_segment(self,trial_started,rows):
+  # A successful distance trial ends inside an otherwise continuing route.
+  # Disarming at speed straightens the wheels in the existing Control STOP
+  # policy. Retain ordinary path following while requesting a crawl target,
+  # then use the unchanged immediate stop once kinetic travel is negligible.
+  # Faults/failed trials never use this orderly completion procedure.
+  if self.count_publishers('/ctrl_cmd')!=1:raise RuntimeError('planned stop requires one controller')
+  self.set_parameters_remote(dict(cruise_speed_kmh=1.,sharp_curve_speed_kmh=1.))
+  started=time.monotonic();trace=[]
+  self.planned_follow_stop=dict(crawl_target_kmh=1.,trace=trace)
+  while time.monotonic()-started<15.:
+   self.spin(.05);v=self.values;debug=v.get('/planning/avoidance_debug',{})
+   row=self.record(trial_started);row['supervision_phase']='PLANNED_DECELERATION';rows.append(row)
+   writer.emit('samples',row)
+   if (not self.fresh() or v.get('/collision_data') or
+       not v.get('/planning/s4_sensor_state',{}).get('ready') or
+       v.get('/planning/fsm_state')!='NORMAL_DRIVE' or debug.get('blocked')):
+    self.planned_follow_stop['interrupted_state']=self.snapshot()
+    raise RuntimeError('planned stop interrupted by safety gate')
+   ego=v['/ego_vehicle_status']
+   trace.append(dict(t_s=time.monotonic()-started,ego=dict(ego),
+       target_kmh=v.get('/planning/target_speed'),command=dict(v.get('/ctrl_cmd',{})),
+       control_error_m=v.get('/control/path_error')))
+   if ego['speed_kmh']<=1.5:
+    self.planned_follow_stop['duration_s']=time.monotonic()-started
+    return self.planned_follow_stop
+  raise RuntimeError('planned stop crawl threshold not reached')
  def record(self,start):
   snapshot=self.snapshot();values=snapshot['values'];debug=dict(values.get('/planning/avoidance_debug',{}))
   candidates=debug.pop('candidates',[])
@@ -107,8 +159,7 @@ class Recorder(Monitor):
    from collections import Counter
    self._candidate_key=key;self._candidate_ref='c'+str(self._candidate_serial);self._candidate_serial+=1
    self._candidate_counts=dict(Counter(c.get('rejection','') for c in candidates))
-   with (a.output/'candidate_sets.jsonl').open('a') as stream:
-    stream.write(json.dumps(dict(id=self._candidate_ref,t=time.monotonic()-start,candidates=candidates))+'\n')
+   writer.emit('candidate_sets',dict(id=self._candidate_ref,t=time.monotonic()-start,candidates=candidates))
   debug.update(candidate_set_id=self._candidate_ref,candidate_count=len(candidates),
                candidate_rejection_counts=self._candidate_counts)
   values['/planning/avoidance_debug']=debug
@@ -134,7 +185,7 @@ def resize_trial_actor(monitor,actor,footprint_scale,height_scale):
   scale_axes='MORAI model X width, Y height, Z length; measured box X width, Y length, Z height')
 def interrupted(*args):raise KeyboardInterrupt()
 for sig in (signal.SIGINT,signal.SIGTERM):signal.signal(sig,interrupted)
-rclpy.init(signal_handler_options=SignalHandlerOptions.NO);n=Recorder();summary={};rows=[];path_fingerprints={};new_actor=None;spawned_actors=[];ego=None;original=None;mission=None;bag=None;bag_log=None
+rclpy.init(signal_handler_options=SignalHandlerOptions.NO);n=Recorder();summary={};rows=[];path_fingerprints={};new_actor=None;spawned_actors=[];ego=None;original=None;mission=None;bag=None;bag_log=None;perception_paused_pid=None
 saved=Path('/workspace/local_data/kcity_routes/kcity_demo_route.yaml');saved_hash=hashlib.sha256(saved.read_bytes()).hexdigest()
 try:
  n.wait(n.fresh);assert n.stop() and n.count_publishers('/ctrl_cmd')==1
@@ -147,13 +198,22 @@ try:
   minimum_progress_m=a.minimum_progress_m,additional_obstacles=a.additional_obstacle,
   alternate_goal_node=a.alternate_goal_node,
   prepare_before_spawn=a.prepare_before_spawn)
+ summary['execution_argv']=list(sys.argv)
+ summary['trial_spec']['autonomous_goal']=a.autonomous_goal
+ summary['trial_spec'].update(expect_safe_stop=a.expect_safe_stop,interrupt_perception=a.interrupt_perception)
  summary['verification']='MORAI_TRACKING_ONLY' if a.tracking_only_seconds else 'MORAI_LIVE'
- names=['clipped_footprints','footprint_tile_size_m','publish_debug_clouds','time_aligned_obstacles','roi_max_x','ground_z_threshold','source_pair_wait_sec','source_pose_max_gap_sec']
+ names=['clipped_footprints','tiled_minimum_area_bounds','native_geometry','footprint_tile_size_m','publish_debug_clouds','time_aligned_obstacles','roi_max_x','ground_z_threshold','source_pair_wait_sec','source_pose_max_gap_sec']
  summary['perception_parameters']=dict(zip(names,map(parameter_value_to_python,n.call(
   n.create_client(GetParameters,'/lidar_obstacle_node/get_parameters'),GetParameters.Request(names=names)).values)))
  names=['avoidance_deceleration_mps2','avoidance_memory_merge_extent_m','avoidance_avoid_speed_kmh','s4_control_horizon_m','morai_unmarked_junction_experiment',
         'avoidance_continuous_lane_follow','avoidance_integrated_strategy','morai_surface_offset_experiment','morai_transient_sensor_recovery',
-        'avoidance_optimize_entry_onset','avoidance_tracking_limit_m','planning_period_sec','static_avoidance_method']
+        'avoidance_optimize_entry_onset','avoidance_tracking_limit_m','planning_period_sec','static_avoidance_method',
+        's4_atomic_sensor_frames','goal_approach_enabled','goal_deceleration_mps2',
+        'vehicle_geometry_profile','normal_merge_correction_enabled','avoidance_search_budget_sec',
+        'avoidance_normal_prediction_margin_m','normal_surveyed_center_correction_enabled',
+        'normal_occlusion_speed_enabled','normal_occlusion_sensor_forward_m','surveyed_road_file','surveyed_road_sha256']
+ names+=['avoidance_native_reference_rollout','avoidance_observed_union_memory','avoidance_native_obstacle_geometry']
+ names+=['traffic_tracking_diagnostics_enabled']
  summary['s4_parameters']=dict(zip(names,map(parameter_value_to_python,n.call(n.getter,GetParameters.Request(names=names)).values)))
  summary['code_sha']=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
  summary['working_diff_sha256']=hashlib.sha256(subprocess.check_output(['git','diff'])).hexdigest()
@@ -164,10 +224,23 @@ try:
  with tarfile.open(a.output/'source-snapshot.tar.gz','w:gz') as archive:
   for name in summary['working_files_sha256']:archive.add(name,arcname=name)
  import edgenode_planning
+ from edgenode_planning.planning_provenance import implementation_files as planning_implementation_files
  runtime_source=Path(edgenode_planning.__file__).parent
- summary['runtime_planning_files_sha256']={f.name:hashlib.sha256(f.read_bytes()).hexdigest() for f in sorted(runtime_source.glob('*.py'))}
+ summary['runtime_planning_files_sha256']={f.name:hashlib.sha256(f.read_bytes()).hexdigest() for f in planning_implementation_files()}
  with tarfile.open(a.output/'runtime-planning-source.tar.gz','w:gz') as archive:
-  for f in sorted(runtime_source.glob('*.py')):archive.add(f,arcname='edgenode_planning/'+f.name)
+  for f in planning_implementation_files():archive.add(f,arcname='edgenode_planning/'+f.name)
+ import edgenode_perception
+ perception_source=Path(edgenode_perception.__file__).parent
+ from edgenode_perception.provenance import implementation_files,implementation_manifest
+ perception_files=implementation_manifest()
+ summary['runtime_perception_files_sha256']=perception_files
+ summary['expected_perception_implementation_sha256']=hashlib.sha256(json.dumps(perception_files,sort_keys=True).encode()).hexdigest()
+ actual_perception=n.values.get('/perception/lidar_diagnostics',{}).get('implementation_sha256')
+ summary['runtime_perception_implementation_sha256']=actual_perception
+ if actual_perception!=summary['expected_perception_implementation_sha256']:
+  raise RuntimeError('runtime Perception source fingerprint differs; reload the single stopped producer and Planning session')
+ with tarfile.open(a.output/'runtime-perception-source.tar.gz','w:gz') as archive:
+  for f in implementation_files():archive.add(f,arcname='edgenode_perception/'+f.name)
  if a.record_bag:
   topics=['/ego_vehicle_status','/ctrl_cmd','/localization/odometry','/control/path_error',
    '/control/lookahead_distance','/collision_data','/lidar/points','/Imu','/gps',
@@ -178,7 +251,7 @@ try:
    '/planning/global_path','/planning/local_path','/planning/avoidance_debug',
    '/planning/s4_sensor_state','/planning/s4_distance_state','/planning/fsm_state',
    '/planning/drive_status','/planning/speed_mode','/localization/grid_convergence_deg',
-   '/planning/diagnostics','/planning/normal_speed_debug','/planning/traffic_tracks','/control/pure_pursuit_steering','/planning/lane_candidates']
+   '/planning/diagnostics','/planning/goal_state','/planning/normal_speed_debug','/planning/traffic_tracks','/control/pure_pursuit_steering','/planning/lane_candidates']
   bag_log=(a.output/'rosbag-console.log').open('w')
   bag=subprocess.Popen(['ros2','bag','record','-o',str(a.output/'bag'),*topics],stdout=bag_log,stderr=subprocess.STDOUT,start_new_session=True)
   n.spin(2.)
@@ -271,7 +344,19 @@ try:
  n.spin(.8);n.reset()
  n.wait(lambda:n.fresh() and n.values.get('/planning/current_link')==a.link and n.values.get('/planning/fsm_state')=='READY' and n.values.get('/planning/avoidance_debug',{}).get('state') in ('NORMAL','DETECT') and n.values.get('/planning/map_match_status')=='MATCHED' and n.values.get('/planning/local_path',{}).get('points',0)>2 and n.values.get('/planning/s4_sensor_state',{}).get('ready') and not n.values['/planning/s4_sensor_state'].get('latched_reason'),30.)
  assert n.count_publishers('/ctrl_cmd')==1 and n.values['/collision_data']==0 and n.stopped()
- assert n.paths['global_path']==route['points'],'runtime path must be exact saved mission suffix'
+ expected_route=route
+ if summary['s4_parameters'].get('normal_merge_correction_enabled'):
+  from edgenode_planning.route_clearance import correct_route
+  from edgenode_planning.lane_geometry import LaneNetwork
+  from edgenode_planning.hdmap_boundaries import HDMapBoundaries
+  from edgenode_planning.vehicle_geometry import morai_sonata_collision_envelope,sonata_geometry
+  network=LaneNetwork(planner);network.boundaries=HDMapBoundaries('/workspace/local_data/kcity_hdmap','/workspace/local_data/kcity_mgeo')
+  body=(morai_sonata_collision_envelope() if summary['s4_parameters']['vehicle_geometry_profile']=='morai_sonata_collision_envelope' else sonata_geometry())
+  expected_route=correct_route(route,network,body,
+      surveyed_centering=summary['s4_parameters'].get('normal_surveyed_center_correction_enabled',False))
+  summary['normal_merge_corrections']=expected_route['normal_merge_corrections']
+  summary['normal_center_corrections']=expected_route.get('normal_center_corrections',[])
+ assert n.paths['global_path']==expected_route['points'],'runtime path must match exact saved mission suffix or independently recomputed surveyed merge'
  summary['preflight']=n.snapshot();summary['parameters_trial']=n.parameters()
  if new_actor is not None:summary['obstacle_state']=call('actor.Actor','GetActorState',new_actor)
  (a.output/'preflight.json').write_text(json.dumps(summary,indent=2))
@@ -286,22 +371,52 @@ try:
   if limit.get('status')!='STATUS_CODE_SUCCESS':raise RuntimeError('NPC speed limit unavailable: '+str(limit))
   summary['npc_motion_setup']=[limit,call('actor.Actor','SetPause',dict(actor_info=new_actor,enable=False))]
  started=time.monotonic();summary['drive_started_ros_ns']=n.get_clock().now().nanoseconds
- phases=[];path_fingerprints={};seen_return=False;seen_avoid=False;sensor_wait_started=None;normal_since=None
+ phases=[];path_fingerprints={};seen_return=False;seen_avoid=False;sensor_wait_started=None;normal_since=None;goal_hold_since=None;safe_stop_since=None
  n.set_parameters_remote({'enable_drive':a.tracking_only_seconds is None})
  duration=a.tracking_only_seconds or a.seconds;moving_match_sources=set()
+ n._collision_seen=False
  while time.monotonic()-started<duration:
-  n.spin(.05);row=n.record(started);rows.append(row);v=n.values;debug=v.get('/planning/avoidance_debug',{});stage=debug.get('stage');state=debug.get('state')
+  n.spin(.05);n.admit_latest_supervision();row=n.record(started);rows.append(row);v=n.values;debug=v.get('/planning/avoidance_debug',{});stage=debug.get('stage');state=debug.get('state')
   if bag is not None and bag.poll() is not None:raise RuntimeError('rosbag recorder exited during trial')
-  with (a.output/'samples.jsonl').open('a') as stream:stream.write(json.dumps(row)+'\n')
+  writer.emit('samples',row)
   if not phases or phases[-1]!=stage:phases.append(stage)
   for key,points in n.paths.items():
    if key in ('global_path','control_local_path') or not points:continue
    payload=json.dumps(points);fingerprint=hashlib.sha256(payload.encode()).hexdigest()
    if fingerprint not in path_fingerprints:path_fingerprints[fingerprint]=dict(kind=key,t=row['t'],stage=stage,points=points)
-  if not n.fresh():raise RuntimeError('live topic freshness failed')
+  if not n.fresh():
+   before=dict(n.snapshot()['ages_s']);n.admit_latest_supervision()
+   row['observer_inbox_refresh']=dict(before_ages_s=before,after_ages_s=dict(n.snapshot()['ages_s']))
+   if not n.fresh():raise RuntimeError('live topic freshness failed after latest DDS admission')
+   v=n.values;debug=v.get('/planning/avoidance_debug',{});stage=debug.get('stage');state=debug.get('state')
   if n.count_publishers('/ctrl_cmd')!=1:raise RuntimeError('duplicate/missing control publisher')
-  if v['/collision_data']!=0:raise RuntimeError('MORAI collision')
+  if v['/collision_data']!=0 or n._collision_seen:raise RuntimeError('MORAI collision')
   sensor=v['/planning/s4_sensor_state']
+  if a.interrupt_perception and perception_paused_pid is None and row['t']>=3.:
+   producers=[]
+   for proc in Path('/proc').glob('[0-9]*'):
+    try:argv=proc.joinpath('cmdline').read_bytes().split(b'\0')
+    except (FileNotFoundError,PermissionError):continue
+    if any(Path(os.fsdecode(token)).name=='lidar_obstacle_node' for token in argv if token):producers.append((int(proc.name),argv))
+   if len(producers)!=1:raise RuntimeError('sensor interruption needs exactly one identified LiDAR producer')
+   perception_paused_pid=producers[0][0]
+   summary['sensor_interruption']=dict(pid=perception_paused_pid,command=[os.fsdecode(t) for t in producers[0][1] if t],
+       pause_ros_ns=n.get_clock().now().nanoseconds,pause_t_s=row['t'],before=dict(sensor))
+   os.kill(perception_paused_pid,signal.SIGSTOP)
+  if a.expect_safe_stop:
+   expected_state=(state in ('BLOCKED','SENSOR_HOLD') and v.get('/planning/fsm_state')=='EMERGENCY_STOP')
+   expected_source=(bool(perception_paused_pid) and not sensor.get('ready') and
+       ('TIMEOUT' in str(sensor.get('reason')) or 'STALE' in str(sensor.get('reason')))) if a.interrupt_perception else sensor.get('ready')
+   physical=(v['/ego_vehicle_status']['speed_kmh']<=.15 and v.get('/planning/target_speed')==0.
+       and v['/ctrl_cmd']['accel']==0. and v['/ctrl_cmd']['brake']>=.6)
+   safe_stop_since=(safe_stop_since or time.monotonic()) if expected_state and expected_source and physical else None
+   if safe_stop_since is not None and time.monotonic()-safe_stop_since>=2.:
+    summary['safe_stop_observed']=dict(hold_s=time.monotonic()-safe_stop_since,observed_before_supervisor_stop=True,
+        ros_ns=n.get_clock().now().nanoseconds,ego=dict(v['/ego_vehicle_status']),sensor=dict(sensor),
+        command=dict(v['/ctrl_cmd']),fsm=v.get('/planning/fsm_state'),reason=debug.get('reason'),
+        failure_context=debug.get('failure_context'),drive_enabled=n.parameters()['enable_drive'])
+    summary['success']=True;summary['verification']='MORAI_AUTONOMOUS_SAFE_STOP';break
+   if expected_state and expected_source:continue
   if sensor.get('latched_reason') and not a.tracking_only_seconds:raise RuntimeError('latched safety stop: '+sensor['latched_reason'])
   if not sensor.get('ready') and v.get('/planning/target_speed')!=0.:raise RuntimeError('sensor unavailable during motion command')
   if a.tracking_only_seconds:
@@ -320,7 +435,19 @@ try:
   if state=='BLOCKED':raise RuntimeError('planner rejected: '+debug.get('reason',''))
   if debug.get('boundary_check_mode')=='avoidance' and debug.get('boundary_contact_reason'):
    raise RuntimeError('measured boundary contact: '+debug['boundary_contact_reason'])
-  if a.follow_distance_m is not None:
+  if a.autonomous_goal:
+   goal=v.get('/planning/goal_state',{})
+   arrived=(v.get('/planning/fsm_state')=='GOAL_REACHED' and goal.get('reached') is True
+       and v.get('/ego_vehicle_status',{}).get('speed_kmh',float('inf'))<=.15
+       and goal.get('position_error_m',float('inf'))<=.8
+       and goal.get('heading_error_rad',float('inf'))<=math.radians(8.)
+       and v.get('/planning/target_speed')==0.)
+   goal_hold_since=(goal_hold_since or time.monotonic()) if arrived else None
+   if goal_hold_since is not None and time.monotonic()-goal_hold_since>=5.:
+    summary['autonomous_goal']=dict(goal,verified_hold_s=time.monotonic()-goal_hold_since,
+        observed_before_supervisor_stop=True)
+    summary['success']=True;break
+  if a.follow_distance_m is not None and not a.expect_safe_stop:
    if v.get('/planning/fsm_state')=='EMERGENCY_STOP':
     raise RuntimeError('normal mission emergency stop: '+debug.get('reason','FSM_EMERGENCY_STOP'))
    summary['followed_distance_m']=route_index.project(v['pose'][:2])-a.start
@@ -335,7 +462,7 @@ try:
   normal_since=(normal_since or time.monotonic()) if resumed else None
   progress=route_index.project(v['pose'][:2])-a.start
   summary['followed_distance_m']=progress
-  if normal_since is not None and time.monotonic()-normal_since>=1. and progress>=a.minimum_progress_m:
+  if not a.autonomous_goal and not a.expect_safe_stop and normal_since is not None and time.monotonic()-normal_since>=1. and progress>=a.minimum_progress_m:
    summary['normal_resumed_s']=time.monotonic()-normal_since;summary['success']=True;break
  else:
   if a.tracking_only_seconds:
@@ -351,8 +478,24 @@ except BaseException as error:
 finally:
  # A second interrupt must not abort the physical stop/scene restoration.
  for sig in (signal.SIGINT,signal.SIGTERM):signal.signal(sig,signal.SIG_IGN)
+ if summary.get('success') and not summary.get('error') and a.follow_distance_m is not None and not a.expect_safe_stop:
+  summary['distance_target_reached_ros_ns']=n.get_clock().now().nanoseconds
+  try:
+   summary['planned_follow_stop']=n.finish_follow_segment(started,rows)
+   summary['followed_through_planned_stop_m']=route_index.project(n.values['pose'][:2])-a.start
+  except Exception as error:
+   summary['planned_follow_stop']=getattr(n,'planned_follow_stop',None)
+   summary['success']=False;summary['error']='planned follow stop: '+str(error)
+ summary['supervisor_stop_requested_ros_ns']=n.get_clock().now().nanoseconds
  try:summary['stop_confirmed']=n.stop()
  except Exception as error:summary['stop_error']=str(error)
+ if perception_paused_pid is not None:
+  summary['before_perception_resume']=n.snapshot()
+  try:
+   os.kill(perception_paused_pid,signal.SIGCONT)
+   summary['sensor_interruption']['resume_ros_ns']=n.get_clock().now().nanoseconds
+   n.spin(3.)
+  except Exception as error:summary['perception_resume_error']=str(error)
  summary['before_restore']=n.snapshot();summary['candidate_and_selected_paths']=path_fingerprints
  if rows:
   summary['peak_speed_kmh']=max(r['values'].get('/ego_vehicle_status',{}).get('speed_kmh',0.) for r in rows)
@@ -406,7 +549,11 @@ finally:
   summary['rosbag_exit_code']=bag.returncode
   summary['rosbag_metadata_present']=(a.output/'bag'/'metadata.yaml').exists()
  if bag_log is not None:bag_log.close()
- (a.output/'summary.json').write_text(json.dumps(summary,indent=2));(a.output/'samples.jsonl').write_text(''.join(json.dumps(row)+'\n' for row in rows))
+ try:writer.close()
+ except Exception as error:summary['recorder_error']=str(error);summary['success']=False
+ summary['observer_inbox_refresh_events']=[dict(t_s=row['t'],**row['observer_inbox_refresh']) for row in rows if 'observer_inbox_refresh' in row]
+ (a.output/'summary.json').write_text(json.dumps(summary,indent=2))
+ (a.output/'samples-finalized.jsonl').write_text(''.join(json.dumps(row)+'\n' for row in rows))
  print(json.dumps({k:v for k,v in summary.items() if k not in ('actors_before','actors_after','preflight','candidate_and_selected_paths','before_restore','final','ego_before','obstacle_state')}),flush=True)
  n.destroy_node();rclpy.shutdown()
 raise SystemExit(0 if summary.get('success') and summary.get('restored') else 1)

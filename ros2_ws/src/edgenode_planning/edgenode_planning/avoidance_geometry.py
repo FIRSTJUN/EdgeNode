@@ -16,7 +16,12 @@ def arc(points):
     return lengths
 
 
-def convex_hull(points):
+def convex_hull(points,*,native=False):
+    if native:
+        import numpy as np
+        from . import _geometry_native
+        xy=np.ascontiguousarray([tuple(p[:2]) for p in points],dtype=np.float64)
+        return tuple(_geometry_native.convex_hull(xy))
     points = sorted(set(tuple(p[:2]) for p in points))
     def half(values):
         result = []
@@ -30,7 +35,12 @@ def convex_hull(points):
 
 
 def area(polygon):
-    return abs(sum(cross(a, b) for a, b in zip(polygon, polygon[1:]+polygon[:1])))/2
+    if len(polygon)<3:return 0.
+    # Translate before the shoelace sum. Tiny exact survey-cap fragments at
+    # large map coordinates otherwise acquire artificial area by cancellation.
+    x,y=polygon[0]
+    return abs(math.fsum((a[0]-x)*(b[1]-y)-(a[1]-y)*(b[0]-x)
+        for a,b in zip(polygon,polygon[1:]+polygon[:1])))/2
 
 
 def convex_covers(container, points):
@@ -38,12 +48,12 @@ def convex_covers(container, points):
                for a,b in zip(container,container[1:]+container[:1]) for p in points)
 
 
-def inflate(polygon, margin):
+def inflate(polygon, margin,*,native=False):
     if margin==0:
         return tuple(polygon)
     # An axis-aligned square contains the requested Euclidean margin disk.
     return convex_hull([(x+dx, y+dy) for x, y in polygon
-                        for dx, dy in ((-margin,-margin),(-margin,margin),(margin,-margin),(margin,margin))])
+                        for dx, dy in ((-margin,-margin),(-margin,margin),(margin,-margin),(margin,margin))],native=native)
 
 
 def intersects(a, b):
@@ -96,7 +106,7 @@ def obstacle_polygons(groups):
     return tuple(result)
 
 
-def swept_body(body, first, second, margin=0.):
+def swept_body(body, first, second, margin=0.,*,native=False):
     """Conservative continuous rigid-body enclosure between two poses.
 
     Interpolation is linear translation + shortest-angle yaw, or a constant-
@@ -109,15 +119,15 @@ def swept_body(body, first, second, margin=0.):
     half the translation again, this bound is continuous at zero rotation.
     """
     if first==second:
-        return inflate(body.polygon(*first),margin)
+        return inflate(body.polygon(*first),margin,native=native)
     angle = abs(math.atan2(math.sin(second[2]-first[2]), math.cos(second[2]-first[2])))
     if angle==0.:
         # Constant orientation + straight translation has an exact convex sweep.
         # Half the longitudinal step is not a lateral uncertainty: adding it
         # made harmless guardrails collide when path spacing increased.
-        return inflate(convex_hull(body.polygon(*first)+body.polygon(*second)),margin+EPS)
+        return inflate(convex_hull(body.polygon(*first)+body.polygon(*second),native=native),margin+EPS,native=native)
     radius = max(math.hypot(x,y) for x,y in body.polygon(0.,0.,0.))
     chord=math.dist(first[:2],second[:2])
     axle_error=chord*angle**2/(16*math.sin(angle/2)) if angle>1e-9 else chord*angle/8
     bound = axle_error+radius*angle**2/8
-    return inflate(body.polygon(*first)+body.polygon(*second), margin+bound)
+    return inflate(body.polygon(*first)+body.polygon(*second), margin+bound,native=native)

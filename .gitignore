@@ -28,3 +28,7 @@ debug_frames/
 # Local rosbag archives
 /edgenode_rosbags.tar.gz
 /rosbags/
+
+# Qualified native binaries are archived with SHA; rebuild from committed C++ sources.
+/ros2_ws/src/edgenode_planning/edgenode_planning/_geometry_native*.so
+/ros2_ws/src/edgenode_perception/edgenode_perception/_geometry_native*.so

@@ -17,6 +17,20 @@ def test_self_crossing_surface_is_rejected_instead_of_filled():
     with pytest.raises(ValueError):triangulate([(0.,0.),(4.,4.),(0.,4.),(4.,0.)])
 
 
+def test_original_collinear_survey_edges_are_not_false_self_intersections():
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    ring=[(0.,0.),(1.,0.),(2.,0.),(3.,0.),(3.,2.),(0.,2.)]
+    cells=triangulate(ring)
+    # Equality of the entire area, not only covered vertices or a few probes.
+    assert unary_union([Polygon(c) for c in cells]).equals(Polygon(ring))
+
+
+def test_nonadjacent_collinear_overlap_is_still_rejected():
+    with pytest.raises(ValueError):
+        triangulate([(0.,0.),(3.,0.),(3.,2.),(1.,2.),(1.,0.),(2.,0.),(2.,3.),(0.,3.)])
+
+
 def test_exact_union_keeps_interior_holes_and_submillimetre_gaps_after_worker_pickle():
     import pickle
     cells=[((0.,0.),(4.,0.),(4.,1.),(0.,1.)),

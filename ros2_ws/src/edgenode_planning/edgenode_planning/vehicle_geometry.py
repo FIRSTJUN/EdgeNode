@@ -63,3 +63,21 @@ def sonata_geometry():
         'width 1.860 m cross-checked against Hyundai SONATA catalogue p17 '
         'https://www.hyundai.com/contents/repn-car/catalog_en/sonata-catalog.pdf; '
         'MORAI 4.86 m width rejected as documented typo; nominal length 4.900 m')
+
+
+def morai_sonata_collision_envelope():
+    """Fixed calibration enclosing the recorded MORAI collider, not live truth.
+
+    Archived Ego box: width 2.103449, length 4.914530, axle-relative
+    front 3.80055, rear 1.11398 and lateral centre -0.0066 metres.
+    Round outward on every side, including that measured lateral offset.
+    The nominal catalogue geometry remains available for other deployments.
+    """
+    return VerifiedVehicleGeometry(width_m=2.12,length_m=4.93,wheelbase_m=2.84,
+        front_overhang_m=.97,rear_overhang_m=1.12,
+        rear_axle_from_pose_forward_m=0.,rear_axle_from_pose_left_m=0.,
+        pose_reference='MORAI rear wheel axle midpoint; fixed collider calibration',
+        source='MORAI Ego collider measured 2026-11-18; '
+        '/workspace/local_data/s4_followup_20261118/final-inbox-static/ '
+        'and /workspace/local_data/s4_final_completion_20261118/initial-actors.json; '
+        'fixed outward-rounded envelope; Actor API is not a planning input')

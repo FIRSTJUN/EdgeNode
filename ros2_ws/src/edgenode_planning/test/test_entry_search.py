@@ -2,10 +2,45 @@
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from threading import Event
 from unittest.mock import patch
+from dataclasses import replace
 
 from edgenode_planning.entry_search import EntrySearch
 from edgenode_planning.static_obstacle_planner import StaticObstaclePlanner
 from test_static_obstacle_planner import setup, plan
+
+
+def test_continuous_budget_exhaustion_latches_instead_of_restarting_same_search():
+    p,point,obstacle=setup()
+    p.config=replace(p.config,continuous_lane_follow=True,avoid_speed_kmh=10.)
+    assert plan(p,point,[obstacle()],speed=10.)['state']=='DETECT'
+    search=EntrySearch(ThreadPoolExecutor(max_workers=1),budget_s=1e-9)
+    try:
+        plan(p,point,[],speed=10.,now=.1,entry_search=search)
+        search._future.result(timeout=10.)
+        result=plan(p,point,[],speed=10.,now=.2,entry_search=search)
+        assert result['blocked'] and result['reason']=='ENTRY_SEARCH_BUDGET_EXHAUSTED'
+        assert p.state=='BLOCKED' and search._future is None
+        assert plan(p,point,[],speed=0.,now=.3,entry_search=search)['blocked']
+        assert search._future is None
+    finally:search.close()
+
+
+def test_rejected_attempts_share_one_entry_episode_deadline():
+    p,point,obstacle=setup();p.config=replace(p.config,continuous_lane_follow=True,avoid_speed_kmh=10.)
+    plan(p,point,[obstacle()],speed=10.)
+    search=EntrySearch(ThreadPoolExecutor(max_workers=1),budget_s=12.)
+    try:
+        with patch('edgenode_planning.entry_search.time.monotonic',return_value=100.) as clock:
+            with patch.object(StaticObstaclePlanner,'_search_entry',lambda s,*a:s._block('NO_VALID_LANE')):
+                plan(p,point,[],speed=10.,now=.1,entry_search=search)
+                search._future.result(timeout=10.)
+                assert plan(p,point,[],speed=10.,now=.2,entry_search=search)['reason']=='ENTRY_SEARCH_PENDING'
+                clock.return_value=112.1
+                result=plan(p,point,[],speed=10.,now=.3,entry_search=search)
+        assert result['blocked'] and result['reason']=='ENTRY_SEARCH_BUDGET_EXHAUSTED'
+        assert p._entry_context['search_budget']['classification']=='COMPUTATION_LIMIT_NOT_PHYSICAL_IMPOSSIBILITY'
+        assert search._future is None
+    finally:search.close()
 
 
 def test_coasting_vehicle_stays_stopped_without_starting_obsolete_search():
@@ -65,4 +100,42 @@ def test_production_worker_search_is_serializable_and_commits_only_after_live_va
         assert p.entry_commits==0 and snapshot.entry_commits==1
         assert plan(p,point,[],now=.2,speed=0.,entry_search=search)['state']=='AVOID_ENTRY'
         assert p.entry_commits==1
+    finally:search.close()
+
+
+class DeferredSearch:
+    def submit(self,*values):
+        from concurrent.futures import Future
+        self.values=values
+        return Future()
+    def shutdown(self,**kwargs):pass
+
+
+def test_pending_approach_speed_cap_survives_small_pid_overspeed():
+    p,point,obstacle=setup();p.config=replace(p.config,continuous_lane_follow=True,avoid_speed_kmh=10.)
+    plan(p,point,[obstacle()],speed=10.)
+    search=EntrySearch(DeferredSearch(),budget_s=12.)
+    try:
+        plan(p,point,[],speed=10.,now=.1,entry_search=search)
+        assert search.active
+        result=plan(p,point,[],speed=10.3,now=.2,entry_search=search)
+        assert result['reason']=='ENTRY_SEARCH_PENDING'
+        assert result['speed_cap_kmh']<10. and p._entry_context['search_approach_cap_kmh']==result['speed_cap_kmh']
+    finally:search.close()
+
+
+def test_turn_alignment_wait_uses_existing_guide_and_consumes_total_budget():
+    p,point,obstacle=setup();p.config=replace(p.config,continuous_lane_follow=True,avoid_speed_kmh=10.)
+    p.complete_offset_search=True
+    plan(p,point,[obstacle()],speed=10.)
+    search=EntrySearch(DeferredSearch(),budget_s=12.)
+    try:
+        with patch('edgenode_planning.entry_search.time.monotonic',return_value=100.) as clock:
+            result=plan(p,point,[],speed=10.,yaw=.1,now=.1,entry_search=search)
+            assert result['reason']=='ENTRY_ALIGNMENT_PENDING' and result['points'] and not result['blocked']
+            assert not search.active
+            clock.return_value=112.1
+            result=plan(p,point,[],speed=10.,yaw=0.,now=.2,entry_search=search)
+            assert result['reason']=='ENTRY_SEARCH_BUDGET_EXHAUSTED' and result['blocked']
+            assert not search.active
     finally:search.close()

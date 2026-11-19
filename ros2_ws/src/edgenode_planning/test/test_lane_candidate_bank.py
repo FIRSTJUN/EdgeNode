@@ -160,6 +160,22 @@ def test_verified_intersection_uses_the_existing_offset_solver_and_return_proof(
     finally:p.close()
 
 
+def test_complete_offset_prefers_rear_clear_return_when_the_opening_is_available():
+    from edgenode_planning.road_corridor import VerifiedRoadCorridor
+    p=planner()
+    try:
+        p.network.links['L0_0']['link_type']='1'
+        p.network.road_corridor=VerifiedRoadCorridor([((-20.,-8.),(150.,-8.),(150.,8.),(-20.,8.))],
+            source='synthetic surveyed intersection',link_ids=('L0_0','L0_1'),allowed_sides=('left',))
+        p._lane_bank.snapshot=build_lane_bank(p.network,'L0_0',('L0_0','L0_1'))
+        tick(p,[obstacle()]);result=tick(p,stamp=2)
+        assert not result['blocked'] and p.selected.complete_offset
+        rear=max(p.pair.original_index.project(point) for solid in p._hazards for point in solid)
+        assert p.selected.return_start_s>=rear+p.body.rear_overhang_m+p.config.return_margin_m
+        assert result['entry_context']['offset_return_proof']['whole_maneuver_pp_proven']
+    finally:p.close()
+
+
 @pytest.mark.parametrize('count',[1,2])
 def test_exhausted_native_lanes_try_verified_offset_and_prove_return(count):
     from edgenode_planning.road_corridor import VerifiedRoadCorridor
