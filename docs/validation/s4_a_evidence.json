@@ -1,0 +1,367 @@
+{
+  "status": "PHASE_A_COMPLETE_IN_QUALIFIED_MORAI_CONDITIONS",
+  "baseline_commit": "29eef7ed2eb04d592521367b9ca90aaa004763b0",
+  "branch": "s4-finish",
+  "workspace": "/workspace",
+  "base_planning_sha256": "c3ecbc84fd667e47e7ea125ac4f5c69b021a5f64ebd5ded0af2ca14c69d19e52",
+  "phase_a_implementation_sha256": "0f494fff2a6c0c78db257a55c56a5edf1d1cfcb4deb705427adc8923eebad735",
+  "mode": "NORMAL_SAFETY_ONLY",
+  "static_lateral_execution": false,
+  "qualification_driving_successes": 7,
+  "expected_real_obstacle_stops": 1,
+  "scurve_cases": [
+    {
+      "label": "30",
+      "directory": "/workspace/local_data/s4_a_scurve_20261119/normal_only_v3_scurve_30",
+      "summary_sha256": "6fac8046ea83916cdb733d7051b19d27cc62a1812c0a39fdf48be2e41bd9afbc",
+      "metrics": {
+        "scope": "POST_RUN_ALL_EGO_S073_AND_ORIGINAL_REFERENCE",
+        "success": true,
+        "thresholds": {
+          "approach_floor_kmh": 28.0,
+          "approach_hold_s": 2.0,
+          "maximum_lateral_error_m": 0.6,
+          "p95_lateral_error_m": 0.25,
+          "recovery_floor_kmh": 24.0
+        },
+        "actual_approach_max_kmh": 29.687706884566147,
+        "actual_approach_floor_hold_s": 6.678734465000023,
+        "braking_start": null,
+        "curve_speed_range_kmh": [
+          27.96457139089955,
+          29.99797799675579
+        ],
+        "curve_lateral_error_p50_p95_p99_max_m": [
+          0.014384149753025068,
+          0.055733804733233396,
+          0.07709379974235869,
+          0.07965596405127345
+        ],
+        "curve_heading_error_max_deg": 1.3880047565636546,
+        "minimum_actual_body_b2_gap_m": 0.7925966570649765,
+        "minimum_actual_body_c3_gap_m": 1.188493746168319,
+        "max_measured_lateral_acceleration_mps2": 1.6389251118005446,
+        "max_commanded_wheel_rate_radps": 0.18067848946255366,
+        "max_control_receipt_delay_s": 0.001504482,
+        "planning_p95_ms": 186.87635563765073,
+        "recovery_peak_kmh": 30.002859090721092,
+        "recovery_gain_kmh": 0.020333977587771557
+      },
+      "audit": {
+        "collision_messages": 0,
+        "unexpected_empty_path_messages": 0,
+        "forbidden_boundary_contact_samples": {},
+        "physical_c3_contact_samples": {},
+        "road_containment_unproven_frames": 0,
+        "armed_sensor_hold_events": []
+      },
+      "control_detail": "/workspace/local_data/s4_a_scurve_20261119/normal_only_v3_scurve_30/scurve-control-detail.json"
+    },
+    {
+      "label": "40",
+      "directory": "/workspace/local_data/s4_a_scurve_20261119/normal_only_v3_scurve_40_admitted_02",
+      "summary_sha256": "c0876480ef268bd732acc7bc65651bf3029d3f3ea7298bfce47cc229ef67aaf8",
+      "metrics": {
+        "scope": "POST_RUN_ALL_EGO_S073_AND_ORIGINAL_REFERENCE",
+        "success": true,
+        "thresholds": {
+          "approach_floor_kmh": 38.0,
+          "approach_hold_s": 2.0,
+          "maximum_lateral_error_m": 0.6,
+          "p95_lateral_error_m": 0.25,
+          "recovery_floor_kmh": 32.0
+        },
+        "actual_approach_max_kmh": 39.45763131061667,
+        "actual_approach_floor_hold_s": 5.041327664999994,
+        "braking_start": {
+          "t": 16.331514551,
+          "station_m": 705.525295527009,
+          "x": 138.603515625,
+          "y": 1612.23974609375,
+          "speed_kmh": 39.63865553006187,
+          "target_kmh": 38.7735481262207,
+          "signed_lateral_m": 0.003735298165805482,
+          "heading_error_rad": -0.000641010867775238,
+          "measured_wheel_rad": -0.0013669903146018274,
+          "lateral_acceleration_mps2": 0.058355285430441266,
+          "lookahead_m": 8.808349609375,
+          "b2_gap_m": 1.5910002910669887,
+          "c3_gap_m": 2.6069578397644873
+        },
+        "curve_speed_range_kmh": [
+          26.640586461077802,
+          39.88542711363749
+        ],
+        "curve_lateral_error_p50_p95_p99_max_m": [
+          0.029868393464532406,
+          0.12318273114629531,
+          0.14928844618154005,
+          0.15261153145156897
+        ],
+        "curve_heading_error_max_deg": 1.5192607755818797,
+        "minimum_actual_body_b2_gap_m": 0.7393795922303863,
+        "minimum_actual_body_c3_gap_m": 1.1940295548764674,
+        "max_measured_lateral_acceleration_mps2": 2.6428491186096728,
+        "max_commanded_wheel_rate_radps": 0.14749209343281894,
+        "max_control_receipt_delay_s": 0.001475273,
+        "planning_p95_ms": 185.4188895973493,
+        "recovery_peak_kmh": 39.89176311993051,
+        "recovery_gain_kmh": 0.026146000036419537
+      },
+      "audit": {
+        "collision_messages": 0,
+        "unexpected_empty_path_messages": 0,
+        "forbidden_boundary_contact_samples": {},
+        "physical_c3_contact_samples": {},
+        "road_containment_unproven_frames": 0,
+        "armed_sensor_hold_events": []
+      },
+      "control_detail": "/workspace/local_data/s4_a_scurve_20261119/normal_only_v3_scurve_40_admitted_02/scurve-control-detail.json"
+    },
+    {
+      "label": "60-1",
+      "directory": "/workspace/local_data/s4_a_scurve_20261119/normal_only_v3_scurve_60_repeat_01",
+      "summary_sha256": "3a549f318b053228aef82072e03f91ddaf2bba75640fe39676acb8f7afba0e23",
+      "metrics": {
+        "scope": "POST_RUN_ALL_EGO_S073_AND_ORIGINAL_REFERENCE",
+        "success": true,
+        "thresholds": {
+          "approach_floor_kmh": 58.0,
+          "approach_hold_s": 2.0,
+          "maximum_lateral_error_m": 0.6,
+          "p95_lateral_error_m": 0.25,
+          "recovery_floor_kmh": 45.0
+        },
+        "actual_approach_max_kmh": 59.01110542233443,
+        "actual_approach_floor_hold_s": 2.2366980310000013,
+        "braking_start": {
+          "t": 12.621661353,
+          "station_m": 695.85031075626,
+          "x": 138.86285400390625,
+          "y": 1602.5682373046875,
+          "speed_kmh": 55.46744922924479,
+          "target_kmh": 43.5133171081543,
+          "signed_lateral_m": 0.005656310060512122,
+          "heading_error_rad": 0.0009636504726282525,
+          "measured_wheel_rad": 0.0006189861266218051,
+          "lateral_acceleration_mps2": 0.05174090470171083,
+          "lookahead_m": 12.0,
+          "b2_gap_m": 1.0977723368982601,
+          "c3_gap_m": 2.161554386307816
+        },
+        "curve_speed_range_kmh": [
+          26.185029446458365,
+          45.61556030670294
+        ],
+        "curve_lateral_error_p50_p95_p99_max_m": [
+          0.038784577819291136,
+          0.15106097634820545,
+          0.18718061626931873,
+          0.19119026000765102
+        ],
+        "curve_heading_error_max_deg": 1.3245124378653328,
+        "minimum_actual_body_b2_gap_m": 0.7620170048957094,
+        "minimum_actual_body_c3_gap_m": 1.1720950349513821,
+        "max_measured_lateral_acceleration_mps2": 2.939271610706035,
+        "max_commanded_wheel_rate_radps": 0.21549364496647172,
+        "max_control_receipt_delay_s": 0.001370149,
+        "planning_p95_ms": 190.79796570076724,
+        "recovery_peak_kmh": 50.8641501941182,
+        "recovery_gain_kmh": 10.12251037438515
+      },
+      "audit": {
+        "collision_messages": 0,
+        "unexpected_empty_path_messages": 0,
+        "forbidden_boundary_contact_samples": {},
+        "physical_c3_contact_samples": {},
+        "road_containment_unproven_frames": 0,
+        "armed_sensor_hold_events": []
+      },
+      "control_detail": "/workspace/local_data/s4_a_scurve_20261119/normal_only_v3_scurve_60_repeat_01/scurve-control-detail.json"
+    },
+    {
+      "label": "60-2",
+      "directory": "/workspace/local_data/s4_a_scurve_20261119/normal_only_v3_scurve_60_repeat_02",
+      "summary_sha256": "3129a296e31e4de9d34e81f27122b8925db04ea84464357d9dc8da52b3f47336",
+      "metrics": {
+        "scope": "POST_RUN_ALL_EGO_S073_AND_ORIGINAL_REFERENCE",
+        "success": true,
+        "thresholds": {
+          "approach_floor_kmh": 58.0,
+          "approach_hold_s": 2.0,
+          "maximum_lateral_error_m": 0.6,
+          "p95_lateral_error_m": 0.25,
+          "recovery_floor_kmh": 45.0
+        },
+        "actual_approach_max_kmh": 59.019951805260185,
+        "actual_approach_floor_hold_s": 2.2387910690000012,
+        "braking_start": {
+          "t": 24.940875501,
+          "station_m": 692.9839193078169,
+          "x": 138.9443817138672,
+          "y": 1599.7030029296875,
+          "speed_kmh": 56.692267515892915,
+          "target_kmh": 46.49753952026367,
+          "signed_lateral_m": 0.0018020312484046362,
+          "heading_error_rad": 0.001635033383437401,
+          "measured_wheel_rad": 0.0007620781751069667,
+          "lateral_acceleration_mps2": 0.06654630133370473,
+          "lookahead_m": 12.0,
+          "b2_gap_m": 1.0153465884740205,
+          "c3_gap_m": 2.031556878142005
+        },
+        "curve_speed_range_kmh": [
+          27.33339874858071,
+          46.732047962220506
+        ],
+        "curve_lateral_error_p50_p95_p99_max_m": [
+          0.038311018577684555,
+          0.1823113100149348,
+          0.21130252219990578,
+          0.21399064046801744
+        ],
+        "curve_heading_error_max_deg": 1.3257257871031496,
+        "minimum_actual_body_b2_gap_m": 0.7382487009909938,
+        "minimum_actual_body_c3_gap_m": 1.1553278597749004,
+        "max_measured_lateral_acceleration_mps2": 2.8425247737205184,
+        "max_commanded_wheel_rate_radps": 0.1728029126665016,
+        "max_control_receipt_delay_s": 0.001174859,
+        "planning_p95_ms": 187.85442770094951,
+        "recovery_peak_kmh": 49.86501556943138,
+        "recovery_gain_kmh": 8.115976182845912
+      },
+      "audit": {
+        "collision_messages": 0,
+        "unexpected_empty_path_messages": 0,
+        "forbidden_boundary_contact_samples": {},
+        "physical_c3_contact_samples": {},
+        "road_containment_unproven_frames": 0,
+        "armed_sensor_hold_events": []
+      },
+      "control_detail": "/workspace/local_data/s4_a_scurve_20261119/normal_only_v3_scurve_60_repeat_02/scurve-control-detail.json"
+    },
+    {
+      "label": "60-3",
+      "directory": "/workspace/local_data/s4_a_scurve_20261119/normal_only_v3_scurve_60_repeat_03",
+      "summary_sha256": "f9a48a81c2419a3d20eaff73edf01435e043929b734eba64199204cb83766ee3",
+      "metrics": {
+        "scope": "POST_RUN_ALL_EGO_S073_AND_ORIGINAL_REFERENCE",
+        "success": true,
+        "thresholds": {
+          "approach_floor_kmh": 58.0,
+          "approach_hold_s": 2.0,
+          "maximum_lateral_error_m": 0.6,
+          "p95_lateral_error_m": 0.25,
+          "recovery_floor_kmh": 45.0
+        },
+        "actual_approach_max_kmh": 59.04136725685158,
+        "actual_approach_floor_hold_s": 2.2313696860000007,
+        "braking_start": {
+          "t": 12.480586034,
+          "station_m": 693.0227002564415,
+          "x": 138.9452362060547,
+          "y": 1599.7418212890625,
+          "speed_kmh": 56.67587958176175,
+          "target_kmh": 46.49753952026367,
+          "signed_lateral_m": -0.00010406561338085644,
+          "heading_error_rad": 0.0017644630124151741,
+          "measured_wheel_rad": 0.0008300346860223856,
+          "lateral_acceleration_mps2": 0.0724385147712204,
+          "lookahead_m": 12.0,
+          "b2_gap_m": 1.0132975154414037,
+          "c3_gap_m": 2.029538199687335
+        },
+        "curve_speed_range_kmh": [
+          26.36888846268127,
+          47.16939972487216
+        ],
+        "curve_lateral_error_p50_p95_p99_max_m": [
+          0.039740228128510045,
+          0.21075150276768845,
+          0.23297108065077743,
+          0.23477407575011017
+        ],
+        "curve_heading_error_max_deg": 1.419144001394419,
+        "minimum_actual_body_b2_gap_m": 0.7122272892937085,
+        "minimum_actual_body_c3_gap_m": 1.1437368462204431,
+        "max_measured_lateral_acceleration_mps2": 2.7976169913722035,
+        "max_commanded_wheel_rate_radps": 0.25260363477778347,
+        "max_control_receipt_delay_s": 0.002670345,
+        "planning_p95_ms": 211.86294125509448,
+        "recovery_peak_kmh": 53.091523719445064,
+        "recovery_gain_kmh": 10.34995274482565
+      },
+      "audit": {
+        "collision_messages": 0,
+        "unexpected_empty_path_messages": 0,
+        "forbidden_boundary_contact_samples": {},
+        "physical_c3_contact_samples": {},
+        "road_containment_unproven_frames": 0,
+        "armed_sensor_hold_events": []
+      },
+      "control_detail": "/workspace/local_data/s4_a_scurve_20261119/normal_only_v3_scurve_60_repeat_03/scurve-control-detail.json"
+    }
+  ],
+  "full_normal_mission": {
+    "directory": "/workspace/local_data/s4_a_scurve_20261119/normal_only_v3_full_normal_01",
+    "audit": "/workspace/local_data/s4_a_scurve_20261119/normal_only_v3_full_normal_01/final-mission-audit-normal-v3.json",
+    "independent_goal": {
+      "frames": 270,
+      "hold_s": 5.453949465,
+      "max_speed_kmh": 3.3459973884182126e-05,
+      "max_position_error_m": 0.40867806446667,
+      "max_heading_error_rad": 0.003338004554634289
+    },
+    "waypoints": 18
+  },
+  "regression": {
+    "tests": 568,
+    "failures": 0,
+    "errors": 0,
+    "xml": "/workspace/local_data/s4_a_scurve_20261119/a-final-regression.xml"
+  },
+  "build": {
+    "packages": 2,
+    "log": "/workspace/local_data/s4_a_scurve_20261119/a-final-build.log"
+  },
+  "normal_real_obstacle_stop": {
+    "directory": "/workspace/local_data/s4_a_scurve_20261119/normal_only_v3_real_obstacle_stop",
+    "proof": {
+      "passed": true,
+      "classification": "EXPECTED_REAL_OBSTACLE_NORMAL_STOP_ENVIRONMENT_CASE",
+      "driving_trial_success": false,
+      "observed_before_supervisor_stop": true,
+      "control_stop_threshold_kmh": 0.05,
+      "actual_speed_threshold_kmh": 0.15,
+      "checked_raw_ego_frames": 3738,
+      "proof": {
+        "first_ns": 1795089785134180787,
+        "last_ns": 1795089845056037870,
+        "max_speed_kmh": 0.097657407378732,
+        "max_target_kmh": 0.04958222433924675,
+        "min_brake": 0.65,
+        "first_conflict_distance_m": 2.0151738349886594,
+        "frames": 2944,
+        "hold_s": 59.921857083
+      },
+      "summary_error_preserved": "KeyboardInterrupt"
+    },
+    "minimum_actual_actor_clearance_m": 3.067858617521362
+  },
+  "runtime_receipt": "/workspace/local_data/s4_a_scurve_20261119/a-final-stopped-runtime-receipt.json",
+  "protected_v61_files": {
+    "config/s4_v61/planning_15.yaml": "77d60d694c6c2c5d868b2b7f5cdc49918aa34b214269c2fa86e306e928cc4564",
+    "config/s4_v61/README.md": "f4d72440d9d5e17ee11a9d9f81de09590a79189d8273af10893fa8f4dcb8cad4",
+    "config/s4_v61/planning_10.yaml": "d399d09332d09dbc791f30c30368cafb2c3b0d4fe1b10b357ea16952d6e55167",
+    "config/s4_v61/perception.yaml": "f41a15e822e2fe5ca5b9317bcdd4437bfcadb386a7f7272a0363bb992ed2100f",
+    "docs/s4_static_final_completion.md": "752d971c3bcf993584489996db2384b99c57cbe69e4e5b9e6bc0d3670e67ab08",
+    "docs/validation/s4_v61_evidence.json": "e910ddfe464e7dc9ba6aa0fa062a4253970850e38a6d143d2d6345f2417496ec",
+    "local_data/s4_final_completion_20261118/final-v61-package/evidence-index.json": "852c39dcbda0a91e77ec00d6b1016f1b472e661aa95e1d4f0c03a894b9b9b68f"
+  },
+  "map_file": "/workspace/local_data/s4_final_completion_20261118/surveyed-roads-v37.json",
+  "map_sha256": "7bead1955dc8adc6c343ed42b902234202c3fbac843e7caa6dda0b28ddfff0e0",
+  "profile": "/workspace/config/s4_a/planning-normal-only-v3.yaml",
+  "profile_sha256": "31594d69deb22861376881d281586faef5f73f000ca649b29d1e2d51b224952e",
+  "historical_baseline_results_not_counted_as_current": true,
+  "phase_b_started": false
+}

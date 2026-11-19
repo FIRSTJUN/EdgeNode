@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<package format="3"><name>edgenode_normal_experiment</name><version>0.1.0</version>
+<description>Explicit Phase A normal-route safety experiment, preserving S4 v61.</description>
+<maintainer email="poj285895@gmail.com">EdgeNode Team</maintainer><license>MIT</license>
+<buildtool_depend>ament_python</buildtool_depend><exec_depend>edgenode_planning</exec_depend>
+<exec_depend>edgenode_control</exec_depend><exec_depend>rclpy</exec_depend><exec_depend>std_msgs</exec_depend>
+<exec_depend>python3-shapely</exec_depend><exec_depend>python3-numpy</exec_depend>
+<test_depend>python3-pytest</test_depend><export><build_type>ament_python</build_type></export></package>

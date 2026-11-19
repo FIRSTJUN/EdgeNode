@@ -1,0 +1,2 @@
+# Additional A dependency contract; retain the v61 ROS/native environment.
+Shapely==1.8.5.post1
