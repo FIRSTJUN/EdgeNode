@@ -5,12 +5,13 @@ This wrapper sends no ground truth to Planning. The existing trial owns
 placement, arming, recording, stopping and restoration. Do not edit it or any
 pinned runtime file until this wrapper exits.
 """
-import argparse,hashlib,importlib,json,os,pathlib,subprocess,sys,tarfile,time,signal
+import argparse,hashlib,importlib,json,os,pathlib,subprocess,sys,tarfile,time,signal,math
 
 def capture():
     modules={}
     names=['edgenode_planning','edgenode_control','edgenode_perception','edgenode_localization']
     if importlib.util.find_spec('edgenode_normal_experiment') is not None:names.append('edgenode_normal_experiment')
+    if importlib.util.find_spec('edgenode_static20_experiment') is not None:names.append('edgenode_static20_experiment')
     for name in names:
         module=importlib.import_module(name);root=pathlib.Path(module.__file__).parent
         modules[name]=dict(module_path=str(module.__file__),files={str(p):hashlib.sha256(p.read_bytes()).hexdigest()
@@ -31,7 +32,7 @@ def main():
     args=a.trial_arguments
     if args and args[0]=='--':args=args[1:]
     output=pathlib.Path(args[args.index('--output')+1]);assert not output.exists()
-    if a.stage=='A':
+    if a.stage in ('A','B'):
         from morai_drive import Monitor,rclpy
         from edgenode_planning.planning_provenance import implementation_sha256
         rclpy.init();observer=Monitor(reliable_supervision=True);deadline=time.monotonic()+60.;stable=None
@@ -47,6 +48,19 @@ def main():
                 if stable is not None and time.monotonic()-stable>=1.:break
             else:raise RuntimeError('Phase A ready/source/disabled preflight did not settle')
             assert observer.count_publishers('/ctrl_cmd')==1
+            if a.stage=='B':
+                from rcl_interfaces.srv import GetParameters
+                from rclpy.parameter import parameter_value_to_python
+                names=['phase_b_normal_tracking_clearance_enabled','surveyed_road_file',
+                    'surveyed_road_sha256','avoidance_max_front_steer_normalized',
+                    'avoidance_max_wheel_angle_rad','avoidance_wheelbase_m',
+                    'route_start_link_id','route_node_ids']
+                actual=dict(zip(names,map(parameter_value_to_python,
+                    observer.call(observer.getter,GetParameters.Request(names=names)).values)))
+                os.environ['EDGENODE_B_REFERENCE_VERIFICATION']=json.dumps(dict(
+                    enabled=bool(actual[names[0]]),road_file=actual[names[1]],road_sha256=actual[names[2]],
+                    steering_curvature_limit=math.tan(actual[names[3]]*actual[names[4]])/actual[names[5]],
+                    warm_start_link_id=actual[names[6]],warm_node_ids=actual[names[7]]))
             (output.parent/(output.name+'-admitted-preflight.json')).write_text(json.dumps(observer.snapshot(),indent=2))
         finally:
             observer.destroy_node();rclpy.shutdown()
@@ -56,9 +70,9 @@ def main():
     with (extra/'rosbag-console.log').open('x') as stream:
         bag=subprocess.Popen(['ros2','bag','record','-o',str(extra/'bag'),
             '/control/target_left','/control/target_forward','/planning/speed_curvature',
-            '/planning/recommended_speed'],stdout=stream,stderr=subprocess.STDOUT,start_new_session=True)
+            '/planning/recommended_speed','/localization/source_time_diagnostics'],stdout=stream,stderr=subprocess.STDOUT,start_new_session=True)
         try:
-            runner='s4_a_trial_rpc.py' if a.stage=='A' else 's4_morai_generalized_trial.py'
+            runner='s4_a_trial_rpc.py' if a.stage=='A' else 's4_trial_rpc.py'
             code=subprocess.run([sys.executable,str(pathlib.Path(__file__).with_name(runner)),*args]).returncode
         finally:
             if bag.poll() is None:os.killpg(bag.pid,signal.SIGINT)

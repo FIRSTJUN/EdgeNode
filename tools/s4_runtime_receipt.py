@@ -20,6 +20,7 @@ def main():
         v['last_source_ns']=stamp;v['max_source_age_s']=max(v['max_source_age_s'],(n.get_clock().now().nanoseconds-stamp)/1e9)
     for topic,kind in [('/lidar/points',PointCloud2),('/Imu',Imu),('/gps',GPSMessage)]:n.create_subscription(kind,topic,lambda m,t=topic:receive(t,m),qos_profile_sensor_data)
     n.create_subscription(String,'/planning/phase_a_runtime',lambda m:n.receive('/planning/phase_a_runtime',m),1)
+    n.create_subscription(String,'/planning/phase_b_runtime',lambda m:n.receive('/planning/phase_b_runtime',m),1)
     n.spin(2.);end=time.monotonic()+a.seconds
     while time.monotonic()<end:
         n.spin(.1);samples.append(n.snapshot());assert n.stopped() and n.count_publishers('/ctrl_cmd')==1

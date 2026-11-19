@@ -1,0 +1,35 @@
+/control_node:
+  ros__parameters:
+    command_timeout_sec: 0.6
+    control_rate_hz: 30.0
+    ctrl_cmd_topic: /ctrl_cmd
+    ego_status_topic: /ego_vehicle_status
+    local_path_timeout_sec: 0.6
+    local_path_topic: /planning/local_path
+    localization_timeout_sec: 0.6
+    localization_topic: /localization/odometry
+    lookahead_distance_m: 2.5
+    lookahead_heading_budget_rad: 1.6
+    lookahead_max_m: 12.0
+    lookahead_min_m: 2.5
+    lookahead_preview_time_sec: 0.8
+    max_accel_cmd: 0.6
+    max_brake_cmd: 0.8
+    max_front_steer_normalized: 0.7
+    max_wheel_angle_rad: 0.610865
+    normal_lookahead_heading_budget_rad: 0.25
+    normal_lookahead_min_m: 4.0
+    normal_max_front_steer_normalized: 1.0
+    normal_prediction_time_sec: 0.1
+    speed_integral_limit: 12.0
+    speed_kd: 0.02
+    speed_ki: 0.015
+    speed_kp: 0.14
+    status_timeout_sec: 0.6
+    steering_sign: -1.0
+    steering_slew_limit_radps: 0.6
+    target_error_topic: /planning/target_error
+    target_speed_topic: /planning/target_speed
+    use_sim_time: false
+    wheelbase_m: 2.84
+

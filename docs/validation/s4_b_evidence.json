@@ -1,0 +1,2142 @@
+{
+  "status": "PHASE_B_COMPLETE_IN_QUALIFIED_MORAI_CONDITIONS",
+  "baseline_commit": "fc81ffbebbd10b088f0250c96bb410b0db73a96d",
+  "v61_commit": "29eef7ed2eb04d592521367b9ca90aaa004763b0",
+  "branch": "s4-finish",
+  "phase_b_implementation_sha256": "3ffe175553c2bc6bf1dbb60f10c19ec212b7c2d541d6dbefc8fb8c1caca2a4fe",
+  "phase_a_sha256": "0f494fff2a6c0c78db257a55c56a5edf1d1cfcb4deb705427adc8923eebad735",
+  "v61_planning_sha256": "c3ecbc84fd667e47e7ea125ac4f5c69b021a5f64ebd5ded0af2ca14c69d19e52",
+  "qualification_driving_successes": 7,
+  "normal_integration_successes": 2,
+  "cases": [
+    {
+      "name": "b_v12_lane_10",
+      "directory": "/workspace/local_data/s4_b_static20_20261119/b_v12_lane_10",
+      "summary_sha256": "e1357e218caddbde60b33b130f54ca8cf42d3d3e80236ca3f8d819eea3c80b32",
+      "execution_argv": [
+        "/workspace/tools/s4_morai_generalized_trial.py",
+        "--link",
+        "A219BS010301",
+        "--start",
+        "5",
+        "--obstacle",
+        "85",
+        "--approach-speed-kmh",
+        "60",
+        "--minimum-progress-m",
+        "200",
+        "--seconds",
+        "220",
+        "--prepare-before-spawn",
+        "--record-bag",
+        "--output",
+        "/workspace/local_data/s4_b_static20_20261119/b_v12_lane_10"
+      ],
+      "audit": {
+        "collision_messages": 0,
+        "unexpected_empty_path_messages": 0,
+        "forbidden_boundary_contact_samples": {},
+        "physical_c3_contact_samples": {},
+        "road_containment_unproven_frames": 0,
+        "armed_sensor_hold_events": []
+      },
+      "timelines": [
+        {
+          "stage": "UNKNOWN",
+          "first_t_s": 0.024941227,
+          "last_t_s": 0.042941227,
+          "duration_s": 0.018,
+          "samples": 2,
+          "minimum_kmh": 9.399503213655047e-06,
+          "p05_p50_p95_kmh": [
+            1.0101414322675588e-05,
+            1.6418614303860456e-05,
+            2.273581428504532e-05
+          ],
+          "maximum_kmh": 2.3437725394065862e-05,
+          "mean_kmh": 1.6418614303860456e-05,
+          "floor_kmh": 9.0,
+          "longest_at_or_above_floor_s": 0.0
+        },
+        {
+          "stage": "NORMAL",
+          "first_t_s": 0.059941227,
+          "last_t_s": 5.100941227,
+          "duration_s": 5.0409999999999995,
+          "samples": 236,
+          "minimum_kmh": 1.919110121205543e-06,
+          "p05_p50_p95_kmh": [
+            0.013989452866417906,
+            19.261895922281678,
+            34.04080835188047
+          ],
+          "maximum_kmh": 36.18827178968334,
+          "mean_kmh": 17.88680206510952,
+          "floor_kmh": 9.0,
+          "longest_at_or_above_floor_s": 3.602
+        },
+        {
+          "stage": "DETECT",
+          "first_t_s": 5.132941227,
+          "last_t_s": 9.360941227,
+          "duration_s": 4.228,
+          "samples": 193,
+          "minimum_kmh": 1.0185881297669068,
+          "p05_p50_p95_kmh": [
+            1.0384121019501775,
+            1.4276181070877605,
+            33.55168639354476
+          ],
+          "maximum_kmh": 36.95800381002391,
+          "mean_kmh": 8.319992914319634,
+          "floor_kmh": 9.0,
+          "longest_at_or_above_floor_s": 1.5069999999999997
+        },
+        {
+          "stage": "AVOID_ENTRY",
+          "first_t_s": 9.405941227,
+          "last_t_s": 18.730941227,
+          "duration_s": 9.325,
+          "samples": 438,
+          "minimum_kmh": 1.1622623476143457,
+          "p05_p50_p95_kmh": [
+            2.017124830926235,
+            9.840041628794438,
+            9.888359094495236
+          ],
+          "maximum_kmh": 9.916977866438957,
+          "mean_kmh": 9.039702736164436,
+          "floor_kmh": 9.0,
+          "longest_at_or_above_floor_s": 7.911999999999999
+        },
+        {
+          "stage": "AVOID_HOLD",
+          "first_t_s": 18.758941227,
+          "last_t_s": 28.288941227,
+          "duration_s": 9.529999999999998,
+          "samples": 431,
+          "minimum_kmh": 9.901378726702141,
+          "p05_p50_p95_kmh": [
+            9.902321187598542,
+            9.9266890216114,
+            9.950678950227193
+          ],
+          "maximum_kmh": 9.953535614199764,
+          "mean_kmh": 9.926545775440356,
+          "floor_kmh": 9.0,
+          "longest_at_or_above_floor_s": 9.529999999999998
+        },
+        {
+          "stage": "RETURN",
+          "first_t_s": 28.321941227,
+          "last_t_s": 33.759941227,
+          "duration_s": 5.437999999999999,
+          "samples": 250,
+          "minimum_kmh": 9.685361710193462,
+          "p05_p50_p95_kmh": [
+            9.70016108360141,
+            9.911712938434558,
+            10.047853513282165
+          ],
+          "maximum_kmh": 10.062545246233794,
+          "mean_kmh": 9.89369625807091,
+          "floor_kmh": 9.0,
+          "longest_at_or_above_floor_s": 5.437999999999999
+        },
+        {
+          "stage": "NORMAL",
+          "first_t_s": 33.787941227,
+          "last_t_s": 45.257941227,
+          "duration_s": 11.470000000000006,
+          "samples": 521,
+          "minimum_kmh": 9.943569358100522,
+          "p05_p50_p95_kmh": [
+            13.377560024808359,
+            31.952971427030285,
+            48.60004258549574
+          ],
+          "maximum_kmh": 49.638696119817645,
+          "mean_kmh": 32.20403932237388,
+          "floor_kmh": 9.0,
+          "longest_at_or_above_floor_s": 11.470000000000006
+        }
+      ],
+      "selected_speed_timeline": [
+        {
+          "t_receipt_s": 0.06035397,
+          "stage": "NORMAL",
+          "requested_avoidance_kmh": 10.0,
+          "effective_avoidance_kmh": 10.0,
+          "selected_strategy": "NORMAL",
+          "entry_commits": 0,
+          "return_commits": 0,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 5.120117908,
+          "stage": "DETECT",
+          "requested_avoidance_kmh": 10.0,
+          "effective_avoidance_kmh": 10.0,
+          "selected_strategy": "NORMAL",
+          "entry_commits": 0,
+          "return_commits": 0,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 9.370879839,
+          "stage": "AVOID_ENTRY",
+          "requested_avoidance_kmh": 10.0,
+          "effective_avoidance_kmh": 10.0,
+          "selected_strategy": "LANE_CANDIDATES",
+          "entry_commits": 1,
+          "return_commits": 0,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 18.747690436,
+          "stage": "AVOID_HOLD",
+          "requested_avoidance_kmh": 10.0,
+          "effective_avoidance_kmh": 10.0,
+          "selected_strategy": "LANE_CANDIDATES",
+          "entry_commits": 1,
+          "return_commits": 0,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 28.32144372,
+          "stage": "RETURN",
+          "requested_avoidance_kmh": 10.0,
+          "effective_avoidance_kmh": 10.0,
+          "selected_strategy": "LANE_CANDIDATES",
+          "entry_commits": 1,
+          "return_commits": 1,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 33.770775411,
+          "stage": "NORMAL",
+          "requested_avoidance_kmh": 10.0,
+          "effective_avoidance_kmh": 10.0,
+          "selected_strategy": "NORMAL",
+          "entry_commits": 1,
+          "return_commits": 1,
+          "natural_rejoins": 0
+        }
+      ],
+      "normal_after_avoidance": {
+        "first_t_s": 33.787941227,
+        "last_t_s": 45.257941227,
+        "duration_s": 11.470000000000006,
+        "samples": 521,
+        "minimum_kmh": 9.943569358100522,
+        "p05_p50_p95_kmh": [
+          13.377560024808359,
+          31.952971427030285,
+          48.60004258549574
+        ],
+        "maximum_kmh": 49.638696119817645,
+        "mean_kmh": 32.20403932237388,
+        "floor_kmh": 9.0,
+        "longest_at_or_above_floor_s": 11.470000000000006
+      },
+      "entry_commits": 1,
+      "return_commits": 1,
+      "natural_rejoins": 0,
+      "minimum_actual_actor_clearance_m": 1.6709225212655832,
+      "dynamics": "/workspace/local_data/s4_b_static20_20261119/b_v12_lane_10/avoidance-dynamics.json",
+      "runtime_manifest": "/workspace/local_data/s4_b_static20_20261119/b_v12_lane_10/runtime-stage-manifest.json"
+    },
+    {
+      "name": "b_v12_lane_15",
+      "directory": "/workspace/local_data/s4_b_static20_20261119/b_v12_lane_15",
+      "summary_sha256": "32faf4bccd9a4fa625e6576b99fda3c5a501bef32fa82ebea42b98449ccbea19",
+      "execution_argv": [
+        "/workspace/tools/s4_morai_generalized_trial.py",
+        "--link",
+        "A219BS010301",
+        "--start",
+        "5",
+        "--obstacle",
+        "85",
+        "--approach-speed-kmh",
+        "60",
+        "--minimum-progress-m",
+        "200",
+        "--seconds",
+        "220",
+        "--prepare-before-spawn",
+        "--record-bag",
+        "--output",
+        "/workspace/local_data/s4_b_static20_20261119/b_v12_lane_15"
+      ],
+      "audit": {
+        "collision_messages": 0,
+        "unexpected_empty_path_messages": 0,
+        "forbidden_boundary_contact_samples": {},
+        "physical_c3_contact_samples": {},
+        "road_containment_unproven_frames": 0,
+        "armed_sensor_hold_events": []
+      },
+      "timelines": [
+        {
+          "stage": "UNKNOWN",
+          "first_t_s": -0.000319392,
+          "last_t_s": 0.047680608,
+          "duration_s": 0.048,
+          "samples": 4,
+          "minimum_kmh": 5.752390366362678e-06,
+          "p05_p50_p95_kmh": [
+            5.824115740303587e-06,
+            6.243924702694054e-06,
+            6.257289879419367e-06
+          ],
+          "maximum_kmh": 6.257289879419367e-06,
+          "mean_kmh": 6.124382412792538e-06,
+          "floor_kmh": 14.0,
+          "longest_at_or_above_floor_s": 0.0
+        },
+        {
+          "stage": "NORMAL",
+          "first_t_s": 0.079680608,
+          "last_t_s": 4.745680608,
+          "duration_s": 4.6659999999999995,
+          "samples": 208,
+          "minimum_kmh": 4.182482657320469e-06,
+          "p05_p50_p95_kmh": [
+            0.01516558234653353,
+            17.877345873963804,
+            31.47879551943686
+          ],
+          "maximum_kmh": 33.15708997844707,
+          "mean_kmh": 16.70203209610111,
+          "floor_kmh": 14.0,
+          "longest_at_or_above_floor_s": 2.758
+        },
+        {
+          "stage": "DETECT",
+          "first_t_s": 4.772680608,
+          "last_t_s": 8.664680608,
+          "duration_s": 3.8919999999999995,
+          "samples": 171,
+          "minimum_kmh": 1.61850366343747,
+          "p05_p50_p95_kmh": [
+            1.6295807666356568,
+            1.866720200913825,
+            32.10510864301607
+          ],
+          "maximum_kmh": 34.154445815639136,
+          "mean_kmh": 8.885286853760904,
+          "floor_kmh": 14.0,
+          "longest_at_or_above_floor_s": 1.2229999999999999
+        },
+        {
+          "stage": "AVOID_ENTRY",
+          "first_t_s": 8.682680608,
+          "last_t_s": 15.969680608,
+          "duration_s": 7.287000000000001,
+          "samples": 337,
+          "minimum_kmh": 1.7424928015348253,
+          "p05_p50_p95_kmh": [
+            1.8363539726588822,
+            14.455761801624995,
+            14.627879421708116
+          ],
+          "maximum_kmh": 14.654360725374717,
+          "mean_kmh": 12.498492402372419,
+          "floor_kmh": 14.0,
+          "longest_at_or_above_floor_s": 5.267000000000001
+        },
+        {
+          "stage": "AVOID_HOLD",
+          "first_t_s": 15.986680608,
+          "last_t_s": 22.717680608,
+          "duration_s": 6.730999999999998,
+          "samples": 310,
+          "minimum_kmh": 14.655245860373492,
+          "p05_p50_p95_kmh": [
+            14.665393060090707,
+            14.734608320385593,
+            14.803556698172722
+          ],
+          "maximum_kmh": 14.810017586357404,
+          "mean_kmh": 14.732642162249649,
+          "floor_kmh": 14.0,
+          "longest_at_or_above_floor_s": 6.730999999999998
+        },
+        {
+          "stage": "RETURN",
+          "first_t_s": 22.734680608,
+          "last_t_s": 28.047680608,
+          "duration_s": 5.312999999999999,
+          "samples": 240,
+          "minimum_kmh": 14.809289729571852,
+          "p05_p50_p95_kmh": [
+            14.812453838667889,
+            14.854330693826153,
+            14.915523258209713
+          ],
+          "maximum_kmh": 14.91861379921161,
+          "mean_kmh": 14.858689086621348,
+          "floor_kmh": 14.0,
+          "longest_at_or_above_floor_s": 5.312999999999999
+        },
+        {
+          "stage": "NORMAL",
+          "first_t_s": 28.078680608,
+          "last_t_s": 38.541680608,
+          "duration_s": 10.463000000000001,
+          "samples": 483,
+          "minimum_kmh": 14.908119926170878,
+          "p05_p50_p95_kmh": [
+            18.009518560036675,
+            31.679306182754477,
+            48.049312487219666
+          ],
+          "maximum_kmh": 48.77392690532905,
+          "mean_kmh": 32.73045962356397,
+          "floor_kmh": 14.0,
+          "longest_at_or_above_floor_s": 10.463000000000001
+        }
+      ],
+      "selected_speed_timeline": [
+        {
+          "t_receipt_s": 0.048921678,
+          "stage": "NORMAL",
+          "requested_avoidance_kmh": 15.0,
+          "effective_avoidance_kmh": 15.0,
+          "selected_strategy": "NORMAL",
+          "entry_commits": 0,
+          "return_commits": 0,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 4.760416374,
+          "stage": "DETECT",
+          "requested_avoidance_kmh": 15.0,
+          "effective_avoidance_kmh": 15.0,
+          "selected_strategy": "NORMAL",
+          "entry_commits": 0,
+          "return_commits": 0,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 8.679290475,
+          "stage": "AVOID_ENTRY",
+          "requested_avoidance_kmh": 15.0,
+          "effective_avoidance_kmh": 15.0,
+          "selected_strategy": "LANE_CANDIDATES",
+          "entry_commits": 1,
+          "return_commits": 0,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 15.983733997,
+          "stage": "AVOID_HOLD",
+          "requested_avoidance_kmh": 15.0,
+          "effective_avoidance_kmh": 15.0,
+          "selected_strategy": "LANE_CANDIDATES",
+          "entry_commits": 1,
+          "return_commits": 0,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 22.71948949,
+          "stage": "RETURN",
+          "requested_avoidance_kmh": 15.0,
+          "effective_avoidance_kmh": 15.0,
+          "selected_strategy": "LANE_CANDIDATES",
+          "entry_commits": 1,
+          "return_commits": 1,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 28.060589838,
+          "stage": "NORMAL",
+          "requested_avoidance_kmh": 15.0,
+          "effective_avoidance_kmh": 15.0,
+          "selected_strategy": "NORMAL",
+          "entry_commits": 1,
+          "return_commits": 1,
+          "natural_rejoins": 0
+        }
+      ],
+      "normal_after_avoidance": {
+        "first_t_s": 28.078680608,
+        "last_t_s": 38.541680608,
+        "duration_s": 10.463000000000001,
+        "samples": 483,
+        "minimum_kmh": 14.908119926170878,
+        "p05_p50_p95_kmh": [
+          18.009518560036675,
+          31.679306182754477,
+          48.049312487219666
+        ],
+        "maximum_kmh": 48.77392690532905,
+        "mean_kmh": 32.73045962356397,
+        "floor_kmh": 14.0,
+        "longest_at_or_above_floor_s": 10.463000000000001
+      },
+      "entry_commits": 1,
+      "return_commits": 1,
+      "natural_rejoins": 0,
+      "minimum_actual_actor_clearance_m": 1.671674564846042,
+      "dynamics": "/workspace/local_data/s4_b_static20_20261119/b_v12_lane_15/avoidance-dynamics.json",
+      "runtime_manifest": "/workspace/local_data/s4_b_static20_20261119/b_v12_lane_15/runtime-stage-manifest.json"
+    },
+    {
+      "name": "b_v12_lane_20",
+      "directory": "/workspace/local_data/s4_b_static20_20261119/b_v12_lane_20",
+      "summary_sha256": "2a338393759cfd0e90b5e8229f983c54ea6b48776768f676f379a734eca036c3",
+      "execution_argv": [
+        "/workspace/tools/s4_morai_generalized_trial.py",
+        "--link",
+        "A219BS010301",
+        "--start",
+        "5",
+        "--obstacle",
+        "85",
+        "--approach-speed-kmh",
+        "60",
+        "--minimum-progress-m",
+        "200",
+        "--seconds",
+        "220",
+        "--prepare-before-spawn",
+        "--record-bag",
+        "--output",
+        "/workspace/local_data/s4_b_static20_20261119/b_v12_lane_20"
+      ],
+      "audit": {
+        "collision_messages": 0,
+        "unexpected_empty_path_messages": 0,
+        "forbidden_boundary_contact_samples": {},
+        "physical_c3_contact_samples": {},
+        "road_containment_unproven_frames": 0,
+        "armed_sensor_hold_events": []
+      },
+      "timelines": [
+        {
+          "stage": "NORMAL",
+          "first_t_s": 0.015292383,
+          "last_t_s": 4.294292383,
+          "duration_s": 4.279,
+          "samples": 197,
+          "minimum_kmh": 4.4470921182405e-06,
+          "p05_p50_p95_kmh": [
+            0.006168882507639809,
+            15.907331080652622,
+            30.041435146888595
+          ],
+          "maximum_kmh": 31.401534980101953,
+          "mean_kmh": 15.032269476347416,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 1.778
+        },
+        {
+          "stage": "DETECT",
+          "first_t_s": 4.310292383,
+          "last_t_s": 10.539292383,
+          "duration_s": 6.228999999999999,
+          "samples": 284,
+          "minimum_kmh": 5.101646506320997,
+          "p05_p50_p95_kmh": [
+            5.109768946075908,
+            5.22855102930861,
+            26.248142048364137
+          ],
+          "maximum_kmh": 31.070764162167322,
+          "mean_kmh": 9.04596736648683,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 1.1209999999999996
+        },
+        {
+          "stage": "AVOID_ENTRY",
+          "first_t_s": 10.555292383,
+          "last_t_s": 18.670292383,
+          "duration_s": 8.115,
+          "samples": 382,
+          "minimum_kmh": 5.316425980804761,
+          "p05_p50_p95_kmh": [
+            5.517903574623018,
+            19.262173291914458,
+            19.488845418574936
+          ],
+          "maximum_kmh": 19.51464012294666,
+          "mean_kmh": 17.289739317047722,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 5.4719999999999995
+        },
+        {
+          "stage": "AVOID_HOLD",
+          "first_t_s": 18.688292383,
+          "last_t_s": 20.852292383,
+          "duration_s": 2.1640000000000015,
+          "samples": 104,
+          "minimum_kmh": 19.51594084803205,
+          "p05_p50_p95_kmh": [
+            19.521006056225854,
+            19.562198850506718,
+            19.601642722953606
+          ],
+          "maximum_kmh": 19.606748790841056,
+          "mean_kmh": 19.561876991941084,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 2.1640000000000015
+        },
+        {
+          "stage": "RETURN",
+          "first_t_s": 20.884292383,
+          "last_t_s": 26.197292383,
+          "duration_s": 5.313000000000002,
+          "samples": 245,
+          "minimum_kmh": 19.608425731009202,
+          "p05_p50_p95_kmh": [
+            19.6201024307307,
+            19.735164352408944,
+            19.77272475606384
+          ],
+          "maximum_kmh": 19.775598167323377,
+          "mean_kmh": 19.70696700657557,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 5.313000000000002
+        },
+        {
+          "stage": "NORMAL",
+          "first_t_s": 26.215292383,
+          "last_t_s": 35.405292383,
+          "duration_s": 9.190000000000001,
+          "samples": 432,
+          "minimum_kmh": 19.775723566165826,
+          "p05_p50_p95_kmh": [
+            22.09668721347646,
+            32.657219862681316,
+            47.04325294243777
+          ],
+          "maximum_kmh": 47.848309586162124,
+          "mean_kmh": 33.9636646557581,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 9.190000000000001
+        }
+      ],
+      "selected_speed_timeline": [
+        {
+          "t_receipt_s": 0.015148721,
+          "stage": "NORMAL",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 20.0,
+          "selected_strategy": "NORMAL",
+          "entry_commits": 0,
+          "return_commits": 0,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 4.308518727,
+          "stage": "DETECT",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 20.0,
+          "selected_strategy": "NORMAL",
+          "entry_commits": 0,
+          "return_commits": 0,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 10.546265009,
+          "stage": "AVOID_ENTRY",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 20.0,
+          "selected_strategy": "LANE_CANDIDATES",
+          "entry_commits": 1,
+          "return_commits": 0,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 18.67646712,
+          "stage": "AVOID_HOLD",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 20.0,
+          "selected_strategy": "LANE_CANDIDATES",
+          "entry_commits": 1,
+          "return_commits": 0,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 20.880047745,
+          "stage": "RETURN",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 20.0,
+          "selected_strategy": "LANE_CANDIDATES",
+          "entry_commits": 1,
+          "return_commits": 1,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 26.209962192,
+          "stage": "NORMAL",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 20.0,
+          "selected_strategy": "NORMAL",
+          "entry_commits": 1,
+          "return_commits": 1,
+          "natural_rejoins": 0
+        }
+      ],
+      "normal_after_avoidance": {
+        "first_t_s": 26.215292383,
+        "last_t_s": 35.405292383,
+        "duration_s": 9.190000000000001,
+        "samples": 432,
+        "minimum_kmh": 19.775723566165826,
+        "p05_p50_p95_kmh": [
+          22.09668721347646,
+          32.657219862681316,
+          47.04325294243777
+        ],
+        "maximum_kmh": 47.848309586162124,
+        "mean_kmh": 33.9636646557581,
+        "floor_kmh": 19.0,
+        "longest_at_or_above_floor_s": 9.190000000000001
+      },
+      "entry_commits": 1,
+      "return_commits": 1,
+      "natural_rejoins": 0,
+      "minimum_actual_actor_clearance_m": 1.6643705212897257,
+      "dynamics": "/workspace/local_data/s4_b_static20_20261119/b_v12_lane_20/avoidance-dynamics.json",
+      "runtime_manifest": "/workspace/local_data/s4_b_static20_20261119/b_v12_lane_20/runtime-stage-manifest.json"
+    },
+    {
+      "name": "b_v12_natural_20_retry_02",
+      "directory": "/workspace/local_data/s4_b_static20_20261119/b_v12_natural_20_retry_02",
+      "summary_sha256": "ce34014d5b5b08e8159b734c393255037da77718ab08fd2bf5854af7ef94a92f",
+      "execution_argv": [
+        "/workspace/tools/s4_morai_generalized_trial.py",
+        "--link",
+        "A219BS010301",
+        "--start",
+        "5",
+        "--obstacle",
+        "85",
+        "--approach-speed-kmh",
+        "60",
+        "--minimum-progress-m",
+        "240",
+        "--seconds",
+        "220",
+        "--prepare-before-spawn",
+        "--alternate-goal-node",
+        "A119BS010184",
+        "--record-bag",
+        "--output",
+        "/workspace/local_data/s4_b_static20_20261119/b_v12_natural_20_retry_02"
+      ],
+      "audit": {
+        "collision_messages": 0,
+        "unexpected_empty_path_messages": 0,
+        "forbidden_boundary_contact_samples": {},
+        "physical_c3_contact_samples": {},
+        "road_containment_unproven_frames": 0,
+        "armed_sensor_hold_events": []
+      },
+      "timelines": [
+        {
+          "stage": "UNKNOWN",
+          "first_t_s": 0.013260381,
+          "last_t_s": 0.078260381,
+          "duration_s": 0.065,
+          "samples": 4,
+          "minimum_kmh": 4.427649817795398e-06,
+          "p05_p50_p95_kmh": [
+            4.663104238330215e-06,
+            5.997345954694172e-06,
+            9.908415862990448e-06
+          ],
+          "maximum_kmh": 1.0598604670336851e-05,
+          "mean_kmh": 6.755236599380149e-06,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 0.0
+        },
+        {
+          "stage": "NORMAL",
+          "first_t_s": 0.095260381,
+          "last_t_s": 4.300260381,
+          "duration_s": 4.205,
+          "samples": 196,
+          "minimum_kmh": 2.1044683536431676e-06,
+          "p05_p50_p95_kmh": [
+            0.03314648233840051,
+            16.499918588197254,
+            30.63542784487065
+          ],
+          "maximum_kmh": 31.402178156781172,
+          "mean_kmh": 15.61893918613373,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 1.8000000000000003
+        },
+        {
+          "stage": "DETECT",
+          "first_t_s": 4.314260381,
+          "last_t_s": 8.534260381,
+          "duration_s": 4.219999999999999,
+          "samples": 186,
+          "minimum_kmh": 2.1669351382064903,
+          "p05_p50_p95_kmh": [
+            2.1842149860554967,
+            2.3258202580269716,
+            27.211963885753693
+          ],
+          "maximum_kmh": 31.14261532935932,
+          "mean_kmh": 9.244393907362742,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 1.1719999999999997
+        },
+        {
+          "stage": "AVOID_ENTRY",
+          "first_t_s": 8.554260381,
+          "last_t_s": 16.236260381,
+          "duration_s": 7.682,
+          "samples": 347,
+          "minimum_kmh": 2.30565002398331,
+          "p05_p50_p95_kmh": [
+            2.439407430274268,
+            19.07420742884624,
+            19.361241207850995
+          ],
+          "maximum_kmh": 19.397323297196085,
+          "mean_kmh": 16.361596736572697,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 4.307
+        },
+        {
+          "stage": "AVOID_HOLD",
+          "first_t_s": 16.271260381,
+          "last_t_s": 37.625260381,
+          "duration_s": 21.353999999999996,
+          "samples": 988,
+          "minimum_kmh": 19.399787644108397,
+          "p05_p50_p95_kmh": [
+            19.456467921414237,
+            19.79720975473432,
+            19.928885027892502
+          ],
+          "maximum_kmh": 19.93275598072675,
+          "mean_kmh": 19.75787279746559,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 21.353999999999996
+        },
+        {
+          "stage": "NORMAL",
+          "first_t_s": 37.652260381,
+          "last_t_s": 45.781260381,
+          "duration_s": 8.129000000000005,
+          "samples": 376,
+          "minimum_kmh": 15.044178000561326,
+          "p05_p50_p95_kmh": [
+            16.687896197938226,
+            25.216483014543215,
+            40.20982336738207
+          ],
+          "maximum_kmh": 42.87854107027781,
+          "mean_kmh": 25.94671708361523,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 3.557000000000002
+        }
+      ],
+      "selected_speed_timeline": [
+        {
+          "t_receipt_s": 0.093338101,
+          "stage": "NORMAL",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 20.0,
+          "selected_strategy": "NORMAL",
+          "entry_commits": 0,
+          "return_commits": 0,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 4.302234484,
+          "stage": "DETECT",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 20.0,
+          "selected_strategy": "NORMAL",
+          "entry_commits": 0,
+          "return_commits": 0,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 8.545927802,
+          "stage": "AVOID_ENTRY",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 20.0,
+          "selected_strategy": "LANE_CANDIDATES",
+          "entry_commits": 1,
+          "return_commits": 0,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 16.270814389,
+          "stage": "AVOID_HOLD",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 20.0,
+          "selected_strategy": "LANE_CANDIDATES",
+          "entry_commits": 1,
+          "return_commits": 0,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 37.631269255,
+          "stage": "NORMAL",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 20.0,
+          "selected_strategy": "NORMAL",
+          "entry_commits": 1,
+          "return_commits": 0,
+          "natural_rejoins": 1
+        }
+      ],
+      "normal_after_avoidance": {
+        "first_t_s": 37.652260381,
+        "last_t_s": 45.781260381,
+        "duration_s": 8.129000000000005,
+        "samples": 376,
+        "minimum_kmh": 15.044178000561326,
+        "p05_p50_p95_kmh": [
+          16.687896197938226,
+          25.216483014543215,
+          40.20982336738207
+        ],
+        "maximum_kmh": 42.87854107027781,
+        "mean_kmh": 25.94671708361523,
+        "floor_kmh": 19.0,
+        "longest_at_or_above_floor_s": 3.557000000000002
+      },
+      "entry_commits": 1,
+      "return_commits": 0,
+      "natural_rejoins": 1,
+      "minimum_actual_actor_clearance_m": 1.6717093164639205,
+      "dynamics": "/workspace/local_data/s4_b_static20_20261119/b_v12_natural_20_retry_02/avoidance-dynamics.json",
+      "runtime_manifest": "/workspace/local_data/s4_b_static20_20261119/b_v12_natural_20_retry_02/runtime-stage-manifest.json"
+    },
+    {
+      "name": "b_v12_offset_20",
+      "directory": "/workspace/local_data/s4_b_static20_20261119/b_v12_offset_20",
+      "summary_sha256": "ebee65d434da3fb56070663c7618865d68025dbecd72279a5fca65fe3f81adfd",
+      "execution_argv": [
+        "/workspace/tools/s4_morai_generalized_trial.py",
+        "--link",
+        "A219BS010395",
+        "--start",
+        "10",
+        "--obstacle-link",
+        "A219BS010656",
+        "--obstacle",
+        "16",
+        "--obstacle-yaw-deg",
+        "9",
+        "--obstacle-scale",
+        ".55",
+        "--approach-speed-kmh",
+        "30",
+        "--seconds",
+        "180",
+        "--prepare-before-spawn",
+        "--record-bag",
+        "--output",
+        "/workspace/local_data/s4_b_static20_20261119/b_v12_offset_20"
+      ],
+      "audit": {
+        "collision_messages": 0,
+        "unexpected_empty_path_messages": 0,
+        "forbidden_boundary_contact_samples": {},
+        "physical_c3_contact_samples": {},
+        "road_containment_unproven_frames": 0,
+        "armed_sensor_hold_events": []
+      },
+      "timelines": [
+        {
+          "stage": "UNKNOWN",
+          "first_t_s": 0.00676083,
+          "last_t_s": 0.14876083,
+          "duration_s": 0.14200000000000002,
+          "samples": 8,
+          "minimum_kmh": 7.96383666120868e-06,
+          "p05_p50_p95_kmh": [
+            9.699706252149582e-06,
+            1.6811056312317953e-05,
+            2.6816342602163597e-05
+          ],
+          "maximum_kmh": 2.6816342602163597e-05,
+          "mean_kmh": 1.873806986656281e-05,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 0.0
+        },
+        {
+          "stage": "DETECT",
+          "first_t_s": 0.16676083,
+          "last_t_s": 8.76276083,
+          "duration_s": 8.596,
+          "samples": 385,
+          "minimum_kmh": 1.0485865812830072e-05,
+          "p05_p50_p95_kmh": [
+            0.13941331381896743,
+            3.2552908152470206,
+            3.481516472997627
+          ],
+          "maximum_kmh": 3.4993108764803296,
+          "mean_kmh": 2.9440823858426963,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 0.0
+        },
+        {
+          "stage": "AVOID_ENTRY",
+          "first_t_s": 8.77976083,
+          "last_t_s": 17.69576083,
+          "duration_s": 8.916,
+          "samples": 404,
+          "minimum_kmh": 3.2898516893438052,
+          "p05_p50_p95_kmh": [
+            3.4630811789194196,
+            10.079746779391213,
+            10.297305341705854
+          ],
+          "maximum_kmh": 10.324378247666717,
+          "mean_kmh": 9.428530930686573,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 0.0
+        },
+        {
+          "stage": "AVOID_HOLD",
+          "first_t_s": 17.71376083,
+          "last_t_s": 19.29876083,
+          "duration_s": 1.5850000000000009,
+          "samples": 69,
+          "minimum_kmh": 10.086376002324776,
+          "p05_p50_p95_kmh": [
+            10.087198664162093,
+            10.14594103468716,
+            10.204296681760095
+          ],
+          "maximum_kmh": 10.206184130970763,
+          "mean_kmh": 10.143754858397656,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 0.0
+        },
+        {
+          "stage": "RETURN",
+          "first_t_s": 19.31476083,
+          "last_t_s": 23.91276083,
+          "duration_s": 4.597999999999999,
+          "samples": 212,
+          "minimum_kmh": 9.614033228078851,
+          "p05_p50_p95_kmh": [
+            9.623978105068138,
+            10.062130958300116,
+            10.196040929806257
+          ],
+          "maximum_kmh": 10.206509229768473,
+          "mean_kmh": 9.98436206327524,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 0.0
+        },
+        {
+          "stage": "NORMAL",
+          "first_t_s": 23.94176083,
+          "last_t_s": 25.10476083,
+          "duration_s": 1.1630000000000003,
+          "samples": 54,
+          "minimum_kmh": 9.70552652064287,
+          "p05_p50_p95_kmh": [
+            9.729781025849054,
+            13.644977600076675,
+            17.83405088658623
+          ],
+          "maximum_kmh": 18.38685372558159,
+          "mean_kmh": 13.473944720610248,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 0.0
+        }
+      ],
+      "selected_speed_timeline": [
+        {
+          "t_receipt_s": 0.164157308,
+          "stage": "DETECT",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 20.0,
+          "selected_strategy": "NORMAL",
+          "entry_commits": 0,
+          "return_commits": 0,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 8.775381461,
+          "stage": "AVOID_ENTRY",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 10.0,
+          "selected_strategy": "OFFSET_STATIC",
+          "entry_commits": 1,
+          "return_commits": 0,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 17.70183627,
+          "stage": "AVOID_HOLD",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 10.0,
+          "selected_strategy": "OFFSET_STATIC",
+          "entry_commits": 1,
+          "return_commits": 0,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 19.311562484,
+          "stage": "RETURN",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 10.0,
+          "selected_strategy": "OFFSET_STATIC",
+          "entry_commits": 1,
+          "return_commits": 1,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 23.922885932,
+          "stage": "NORMAL",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 20.0,
+          "selected_strategy": "NORMAL",
+          "entry_commits": 1,
+          "return_commits": 1,
+          "natural_rejoins": 0
+        }
+      ],
+      "normal_after_avoidance": {
+        "first_t_s": 23.94176083,
+        "last_t_s": 25.10476083,
+        "duration_s": 1.1630000000000003,
+        "samples": 54,
+        "minimum_kmh": 9.70552652064287,
+        "p05_p50_p95_kmh": [
+          9.729781025849054,
+          13.644977600076675,
+          17.83405088658623
+        ],
+        "maximum_kmh": 18.38685372558159,
+        "mean_kmh": 13.473944720610248,
+        "floor_kmh": 19.0,
+        "longest_at_or_above_floor_s": 0.0
+      },
+      "entry_commits": 1,
+      "return_commits": 1,
+      "natural_rejoins": 0,
+      "minimum_actual_actor_clearance_m": 0.951400102746922,
+      "dynamics": "/workspace/local_data/s4_b_static20_20261119/b_v12_offset_20/avoidance-dynamics.json",
+      "runtime_manifest": "/workspace/local_data/s4_b_static20_20261119/b_v12_offset_20/runtime-stage-manifest.json"
+    },
+    {
+      "name": "b_v12_next_adjacent_20",
+      "directory": "/workspace/local_data/s4_b_static20_20261119/b_v12_next_adjacent_20",
+      "summary_sha256": "e2444bc3d6aeb57c7d1625e880d17f4ae9f1a828bb31ae5a2b4abc76eb3cddc4",
+      "execution_argv": [
+        "/workspace/tools/s4_morai_generalized_trial.py",
+        "--link",
+        "A219BS010301",
+        "--start",
+        "5",
+        "--obstacle",
+        "60",
+        "--additional-obstacle",
+        "A219BS010302:110:0",
+        "--approach-speed-kmh",
+        "60",
+        "--minimum-progress-m",
+        "165",
+        "--seconds",
+        "220",
+        "--prepare-before-spawn",
+        "--record-bag",
+        "--output",
+        "/workspace/local_data/s4_b_static20_20261119/b_v12_next_adjacent_20"
+      ],
+      "audit": {
+        "collision_messages": 0,
+        "unexpected_empty_path_messages": 0,
+        "forbidden_boundary_contact_samples": {},
+        "physical_c3_contact_samples": {},
+        "road_containment_unproven_frames": 0,
+        "armed_sensor_hold_events": []
+      },
+      "timelines": [
+        {
+          "stage": "UNKNOWN",
+          "first_t_s": 0.014180865,
+          "last_t_s": 0.107180865,
+          "duration_s": 0.093,
+          "samples": 6,
+          "minimum_kmh": 2.3328009238596046e-06,
+          "p05_p50_p95_kmh": [
+            2.6232051344183237e-06,
+            4.711852309329588e-06,
+            1.721146644940717e-05
+          ],
+          "maximum_kmh": 2.098777415964127e-05,
+          "mean_kmh": 7.020206797826567e-06,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 0.0
+        },
+        {
+          "stage": "NORMAL",
+          "first_t_s": 0.127180865,
+          "last_t_s": 2.178180865,
+          "duration_s": 2.0509999999999997,
+          "samples": 100,
+          "minimum_kmh": 1.6781369107538152e-06,
+          "p05_p50_p95_kmh": [
+            0.006502119921231046,
+            5.437372547506805,
+            15.29061931813161
+          ],
+          "maximum_kmh": 16.05483483940759,
+          "mean_kmh": 6.311519355319121,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 0.0
+        },
+        {
+          "stage": "DETECT",
+          "first_t_s": 2.196180865,
+          "last_t_s": 9.293180865,
+          "duration_s": 7.0969999999999995,
+          "samples": 313,
+          "minimum_kmh": 3.433820234262378,
+          "p05_p50_p95_kmh": [
+            3.490040755238573,
+            4.835240749962054,
+            11.771147712030674
+          ],
+          "maximum_kmh": 16.64963374974083,
+          "mean_kmh": 5.240305955089112,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 0.0
+        },
+        {
+          "stage": "AVOID_ENTRY",
+          "first_t_s": 9.312180865,
+          "last_t_s": 18.803180865,
+          "duration_s": 9.491000000000001,
+          "samples": 442,
+          "minimum_kmh": 3.410946279454414,
+          "p05_p50_p95_kmh": [
+            3.776296946705053,
+            19.712784690826997,
+            19.807691103592322
+          ],
+          "maximum_kmh": 19.82321807435902,
+          "mean_kmh": 17.459007706049142,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 7.048000000000002
+        },
+        {
+          "stage": "RETURN",
+          "first_t_s": 18.835180865,
+          "last_t_s": 23.416180865,
+          "duration_s": 4.5809999999999995,
+          "samples": 204,
+          "minimum_kmh": 19.817395546807564,
+          "p05_p50_p95_kmh": [
+            19.818332514663695,
+            19.84546209815,
+            19.884239388610773
+          ],
+          "maximum_kmh": 19.8875145893533,
+          "mean_kmh": 19.84866039253156,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 4.5809999999999995
+        },
+        {
+          "stage": "NORMAL",
+          "first_t_s": 23.432180865,
+          "last_t_s": 31.937180865,
+          "duration_s": 8.504999999999999,
+          "samples": 393,
+          "minimum_kmh": 19.885145878605694,
+          "p05_p50_p95_kmh": [
+            21.781515070298703,
+            34.674104852361474,
+            47.35123098771343
+          ],
+          "maximum_kmh": 49.048170282387446,
+          "mean_kmh": 34.63947423964551,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 8.504999999999999
+        }
+      ],
+      "selected_speed_timeline": [
+        {
+          "t_receipt_s": 0.127242073,
+          "stage": "NORMAL",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 20.0,
+          "selected_strategy": "NORMAL",
+          "entry_commits": 0,
+          "return_commits": 0,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 2.180272263,
+          "stage": "DETECT",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 20.0,
+          "selected_strategy": "NORMAL",
+          "entry_commits": 0,
+          "return_commits": 0,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 9.304935934,
+          "stage": "AVOID_ENTRY",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 20.0,
+          "selected_strategy": "OFFSET_STATIC",
+          "entry_commits": 1,
+          "return_commits": 0,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 18.834690503,
+          "stage": "RETURN",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 20.0,
+          "selected_strategy": "OFFSET_STATIC",
+          "entry_commits": 1,
+          "return_commits": 1,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 23.424758791,
+          "stage": "NORMAL",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 20.0,
+          "selected_strategy": "NORMAL",
+          "entry_commits": 1,
+          "return_commits": 1,
+          "natural_rejoins": 0
+        }
+      ],
+      "normal_after_avoidance": {
+        "first_t_s": 23.432180865,
+        "last_t_s": 31.937180865,
+        "duration_s": 8.504999999999999,
+        "samples": 393,
+        "minimum_kmh": 19.885145878605694,
+        "p05_p50_p95_kmh": [
+          21.781515070298703,
+          34.674104852361474,
+          47.35123098771343
+        ],
+        "maximum_kmh": 49.048170282387446,
+        "mean_kmh": 34.63947423964551,
+        "floor_kmh": 19.0,
+        "longest_at_or_above_floor_s": 8.504999999999999
+      },
+      "entry_commits": 1,
+      "return_commits": 1,
+      "natural_rejoins": 0,
+      "minimum_actual_actor_clearance_m": 0.6734413751808808,
+      "dynamics": "/workspace/local_data/s4_b_static20_20261119/b_v12_next_adjacent_20/avoidance-dynamics.json",
+      "runtime_manifest": "/workspace/local_data/s4_b_static20_20261119/b_v12_next_adjacent_20/runtime-stage-manifest.json"
+    },
+    {
+      "name": "b_v12_full_static_20",
+      "directory": "/workspace/local_data/s4_b_static20_20261119/b_v12_full_static_20",
+      "summary_sha256": "c1ffa063bc38f2cec74d2e06054299b42db1415f6c3f76078f655f036af58ae0",
+      "execution_argv": [
+        "/workspace/tools/s4_morai_generalized_trial.py",
+        "--link",
+        "A219BS010380",
+        "--start",
+        ".5",
+        "--autonomous-goal",
+        "--approach-speed-kmh",
+        "60",
+        "--seconds",
+        "900",
+        "--obstacle-link",
+        "A219BS010656",
+        "--obstacle",
+        "16",
+        "--obstacle-yaw-deg",
+        "9",
+        "--obstacle-scale",
+        ".55",
+        "--additional-obstacle",
+        "A219BS010404:53.666:19.154:-0.288:1.069",
+        "--additional-obstacle",
+        "A219BS010632:42:0",
+        "--additional-obstacle",
+        "A219BS010301:50:0",
+        "--record-bag",
+        "--output",
+        "/workspace/local_data/s4_b_static20_20261119/b_v12_full_static_20"
+      ],
+      "audit": {
+        "collision_messages": 0,
+        "unexpected_empty_path_messages": 0,
+        "forbidden_boundary_contact_samples": {},
+        "physical_c3_contact_samples": {},
+        "road_containment_unproven_frames": 0,
+        "armed_sensor_hold_events": []
+      },
+      "timelines": [
+        {
+          "stage": "UNKNOWN",
+          "first_t_s": 0.013426785,
+          "last_t_s": 0.013426785,
+          "duration_s": 0.0,
+          "samples": 1,
+          "minimum_kmh": 8.127147854129104e-06,
+          "p05_p50_p95_kmh": [
+            8.127147854129104e-06,
+            8.127147854129104e-06,
+            8.127147854129104e-06
+          ],
+          "maximum_kmh": 8.127147854129104e-06,
+          "mean_kmh": 8.127147854129104e-06,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 0.0
+        },
+        {
+          "stage": "NORMAL",
+          "first_t_s": 0.042426785,
+          "last_t_s": 24.862426785,
+          "duration_s": 24.82,
+          "samples": 1084,
+          "minimum_kmh": 6.711189776774201e-06,
+          "p05_p50_p95_kmh": [
+            5.964417192473182,
+            23.758253009080427,
+            54.25564321133581
+          ],
+          "maximum_kmh": 57.31888822919115,
+          "mean_kmh": 27.232048810625578,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 12.313
+        },
+        {
+          "stage": "DETECT",
+          "first_t_s": 24.895426785,
+          "last_t_s": 36.323426785,
+          "duration_s": 11.428,
+          "samples": 509,
+          "minimum_kmh": 1.7179361072430508,
+          "p05_p50_p95_kmh": [
+            2.2472708322572554,
+            3.809167864272076,
+            19.396087406127048
+          ],
+          "maximum_kmh": 19.708796519407468,
+          "mean_kmh": 8.261577085251652,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 0.6730000000000018
+        },
+        {
+          "stage": "AVOID_ENTRY",
+          "first_t_s": 36.348426785,
+          "last_t_s": 45.124426785,
+          "duration_s": 8.775999999999996,
+          "samples": 390,
+          "minimum_kmh": 1.727933287247704,
+          "p05_p50_p95_kmh": [
+            1.8446529298658823,
+            10.100463870086887,
+            10.364771482766225
+          ],
+          "maximum_kmh": 10.415371345119297,
+          "mean_kmh": 9.229653607849308,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 0.0
+        },
+        {
+          "stage": "AVOID_HOLD",
+          "first_t_s": 45.158426785,
+          "last_t_s": 45.459426785,
+          "duration_s": 0.3009999999999948,
+          "samples": 14,
+          "minimum_kmh": 10.149136793637561,
+          "p05_p50_p95_kmh": [
+            10.149136793637561,
+            10.178494746908411,
+            10.20895563552049
+          ],
+          "maximum_kmh": 10.214346459005911,
+          "mean_kmh": 10.179558577994536,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 0.0
+        },
+        {
+          "stage": "RETURN",
+          "first_t_s": 45.491426785,
+          "last_t_s": 50.657426785,
+          "duration_s": 5.165999999999997,
+          "samples": 227,
+          "minimum_kmh": 9.935920046844508,
+          "p05_p50_p95_kmh": [
+            9.94705384480784,
+            10.144736517049331,
+            10.258872904884788
+          ],
+          "maximum_kmh": 10.262250102762229,
+          "mean_kmh": 10.131500837072654,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 0.0
+        },
+        {
+          "stage": "NORMAL",
+          "first_t_s": 50.677426785,
+          "last_t_s": 68.350426785,
+          "duration_s": 17.672999999999995,
+          "samples": 796,
+          "minimum_kmh": 9.169443284915733,
+          "p05_p50_p95_kmh": [
+            10.179315436437554,
+            22.074210637282643,
+            30.427971877137697
+          ],
+          "maximum_kmh": 31.972600898982012,
+          "mean_kmh": 20.994794134192734,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 8.747
+        },
+        {
+          "stage": "DETECT",
+          "first_t_s": 68.369426785,
+          "last_t_s": 77.449426785,
+          "duration_s": 9.079999999999998,
+          "samples": 413,
+          "minimum_kmh": 3.6201610804780775,
+          "p05_p50_p95_kmh": [
+            3.7811152861690616,
+            6.11921644493295,
+            23.898171727886073
+          ],
+          "maximum_kmh": 31.392706282104275,
+          "mean_kmh": 8.746056458640924,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 1.5330000000000013
+        },
+        {
+          "stage": "AVOID_ENTRY",
+          "first_t_s": 77.468426785,
+          "last_t_s": 85.086426785,
+          "duration_s": 7.617999999999995,
+          "samples": 339,
+          "minimum_kmh": 3.6091400768074755,
+          "p05_p50_p95_kmh": [
+            3.6987571451574324,
+            14.786809782682049,
+            14.885791105418923
+          ],
+          "maximum_kmh": 14.908963674899843,
+          "mean_kmh": 13.32978056290326,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 0.0
+        },
+        {
+          "stage": "AVOID_HOLD",
+          "first_t_s": 85.105426785,
+          "last_t_s": 90.015426785,
+          "duration_s": 4.909999999999997,
+          "samples": 221,
+          "minimum_kmh": 14.874360940853181,
+          "p05_p50_p95_kmh": [
+            14.877368458202968,
+            14.91902418412047,
+            14.952572060976921
+          ],
+          "maximum_kmh": 14.953423100960357,
+          "mean_kmh": 14.919990405964693,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 0.0
+        },
+        {
+          "stage": "RETURN",
+          "first_t_s": 90.043426785,
+          "last_t_s": 95.047426785,
+          "duration_s": 5.004000000000005,
+          "samples": 228,
+          "minimum_kmh": 14.867652361004208,
+          "p05_p50_p95_kmh": [
+            14.8693090200863,
+            14.909689662014067,
+            14.978107954609756
+          ],
+          "maximum_kmh": 14.991840243541851,
+          "mean_kmh": 14.911864032869317,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 0.0
+        },
+        {
+          "stage": "NORMAL",
+          "first_t_s": 95.080426785,
+          "last_t_s": 105.858426785,
+          "duration_s": 10.778000000000006,
+          "samples": 483,
+          "minimum_kmh": 14.992779618962334,
+          "p05_p50_p95_kmh": [
+            18.08232404587924,
+            31.926060281052916,
+            56.700779678075044
+          ],
+          "maximum_kmh": 58.50007760816527,
+          "mean_kmh": 34.072969584628275,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 10.097000000000008
+        },
+        {
+          "stage": "DETECT",
+          "first_t_s": 105.883426785,
+          "last_t_s": 114.632426785,
+          "duration_s": 8.74900000000001,
+          "samples": 391,
+          "minimum_kmh": 1.3508966288827873,
+          "p05_p50_p95_kmh": [
+            1.3988698485356403,
+            1.9257298770548295,
+            41.85491518169204
+          ],
+          "maximum_kmh": 54.52877189005609,
+          "mean_kmh": 9.266962381245444,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 2.076999999999998
+        },
+        {
+          "stage": "AVOID_ENTRY",
+          "first_t_s": 114.661426785,
+          "last_t_s": 122.029426785,
+          "duration_s": 7.367999999999995,
+          "samples": 322,
+          "minimum_kmh": 1.3492455794556166,
+          "p05_p50_p95_kmh": [
+            1.4878602662623808,
+            14.760374615902855,
+            14.860166258368855
+          ],
+          "maximum_kmh": 14.891893860698959,
+          "mean_kmh": 12.740437763399557,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 0.0
+        },
+        {
+          "stage": "AVOID_HOLD",
+          "first_t_s": 122.059426785,
+          "last_t_s": 122.322426785,
+          "duration_s": 0.26300000000000523,
+          "samples": 12,
+          "minimum_kmh": 14.88812781017028,
+          "p05_p50_p95_kmh": [
+            14.888486379763107,
+            14.89095081506807,
+            14.891911239334624
+          ],
+          "maximum_kmh": 14.892060665731721,
+          "mean_kmh": 14.890512259449379,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 0.0
+        },
+        {
+          "stage": "RETURN",
+          "first_t_s": 122.356426785,
+          "last_t_s": 127.066426785,
+          "duration_s": 4.710000000000008,
+          "samples": 209,
+          "minimum_kmh": 14.859676339996474,
+          "p05_p50_p95_kmh": [
+            14.86079009371099,
+            14.889824751222184,
+            14.938230526683896
+          ],
+          "maximum_kmh": 14.943543078583655,
+          "mean_kmh": 14.894377184954253,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 0.0
+        },
+        {
+          "stage": "NORMAL",
+          "first_t_s": 127.084426785,
+          "last_t_s": 247.736426785,
+          "duration_s": 120.65199999999999,
+          "samples": 5511,
+          "minimum_kmh": 10.763183869020304,
+          "p05_p50_p95_kmh": [
+            14.732483258547518,
+            28.985895629050617,
+            59.74178764002469
+          ],
+          "maximum_kmh": 59.769796130985746,
+          "mean_kmh": 32.5462145377683,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 32.907
+        },
+        {
+          "stage": "DETECT",
+          "first_t_s": 247.762426785,
+          "last_t_s": 253.074426785,
+          "duration_s": 5.312000000000012,
+          "samples": 240,
+          "minimum_kmh": 1.975319614020666,
+          "p05_p50_p95_kmh": [
+            1.9850279859904407,
+            3.3081388550452946,
+            42.83304335165952
+          ],
+          "maximum_kmh": 52.26708444483496,
+          "mean_kmh": 12.832313912545436,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 2.0360000000000014
+        },
+        {
+          "stage": "AVOID_ENTRY",
+          "first_t_s": 253.093426785,
+          "last_t_s": 260.035426785,
+          "duration_s": 6.942000000000036,
+          "samples": 312,
+          "minimum_kmh": 1.9745954296820987,
+          "p05_p50_p95_kmh": [
+            2.0959774550271923,
+            19.551381448882378,
+            19.737467295035774
+          ],
+          "maximum_kmh": 19.75362217302996,
+          "mean_kmh": 16.223492672856633,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 4.406000000000034
+        },
+        {
+          "stage": "RETURN",
+          "first_t_s": 260.060426785,
+          "last_t_s": 264.963426785,
+          "duration_s": 4.90300000000002,
+          "samples": 222,
+          "minimum_kmh": 19.754103503673186,
+          "p05_p50_p95_kmh": [
+            19.760453738299873,
+            19.80556845431976,
+            19.834939125080254
+          ],
+          "maximum_kmh": 19.838100489249847,
+          "mean_kmh": 19.796902975194577,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 4.90300000000002
+        },
+        {
+          "stage": "NORMAL",
+          "first_t_s": 264.980426785,
+          "last_t_s": 335.251426785,
+          "duration_s": 70.27099999999996,
+          "samples": 3246,
+          "minimum_kmh": 5.48964543868943e-07,
+          "p05_p50_p95_kmh": [
+            1.4371806345083425e-05,
+            35.16859457278095,
+            59.60622001971975
+          ],
+          "maximum_kmh": 59.791402711965596,
+          "mean_kmh": 33.59310572201621,
+          "floor_kmh": 19.0,
+          "longest_at_or_above_floor_s": 57.75
+        }
+      ],
+      "selected_speed_timeline": [
+        {
+          "t_receipt_s": 0.035372081,
+          "stage": "NORMAL",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 20.0,
+          "selected_strategy": "NORMAL",
+          "entry_commits": 0,
+          "return_commits": 0,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 24.871072975,
+          "stage": "DETECT",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 20.0,
+          "selected_strategy": "NORMAL",
+          "entry_commits": 0,
+          "return_commits": 0,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 36.32430029,
+          "stage": "AVOID_ENTRY",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 10.0,
+          "selected_strategy": "OFFSET_STATIC",
+          "entry_commits": 1,
+          "return_commits": 0,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 45.141152877,
+          "stage": "AVOID_HOLD",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 10.0,
+          "selected_strategy": "OFFSET_STATIC",
+          "entry_commits": 1,
+          "return_commits": 0,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 45.475813678,
+          "stage": "RETURN",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 10.0,
+          "selected_strategy": "OFFSET_STATIC",
+          "entry_commits": 1,
+          "return_commits": 1,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 50.667048407,
+          "stage": "NORMAL",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 20.0,
+          "selected_strategy": "NORMAL",
+          "entry_commits": 1,
+          "return_commits": 1,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 68.356675659,
+          "stage": "DETECT",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 20.0,
+          "selected_strategy": "OFFSET_STATIC",
+          "entry_commits": 1,
+          "return_commits": 1,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 77.458211354,
+          "stage": "AVOID_ENTRY",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 15.0,
+          "selected_strategy": "LANE_CANDIDATES",
+          "entry_commits": 2,
+          "return_commits": 1,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 85.103711257,
+          "stage": "AVOID_HOLD",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 15.0,
+          "selected_strategy": "LANE_CANDIDATES",
+          "entry_commits": 2,
+          "return_commits": 1,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 90.035113264,
+          "stage": "RETURN",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 15.0,
+          "selected_strategy": "LANE_CANDIDATES",
+          "entry_commits": 2,
+          "return_commits": 2,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 95.060040937,
+          "stage": "NORMAL",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 20.0,
+          "selected_strategy": "NORMAL",
+          "entry_commits": 2,
+          "return_commits": 2,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 105.863433523,
+          "stage": "DETECT",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 20.0,
+          "selected_strategy": "LANE_STATIC",
+          "entry_commits": 2,
+          "return_commits": 2,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 114.638898173,
+          "stage": "AVOID_ENTRY",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 15.0,
+          "selected_strategy": "OFFSET_STATIC",
+          "entry_commits": 3,
+          "return_commits": 2,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 122.034614936,
+          "stage": "AVOID_HOLD",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 15.0,
+          "selected_strategy": "OFFSET_STATIC",
+          "entry_commits": 3,
+          "return_commits": 2,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 122.335635582,
+          "stage": "RETURN",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 15.0,
+          "selected_strategy": "OFFSET_STATIC",
+          "entry_commits": 3,
+          "return_commits": 3,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 127.070145395,
+          "stage": "NORMAL",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 20.0,
+          "selected_strategy": "NORMAL",
+          "entry_commits": 3,
+          "return_commits": 3,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 247.759365193,
+          "stage": "DETECT",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 20.0,
+          "selected_strategy": "OFFSET_STATIC",
+          "entry_commits": 3,
+          "return_commits": 3,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 253.089440394,
+          "stage": "AVOID_ENTRY",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 20.0,
+          "selected_strategy": "LANE_CANDIDATES",
+          "entry_commits": 4,
+          "return_commits": 3,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 260.043098992,
+          "stage": "RETURN",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 20.0,
+          "selected_strategy": "LANE_CANDIDATES",
+          "entry_commits": 4,
+          "return_commits": 4,
+          "natural_rejoins": 0
+        },
+        {
+          "t_receipt_s": 264.975684789,
+          "stage": "NORMAL",
+          "requested_avoidance_kmh": 20.0,
+          "effective_avoidance_kmh": 20.0,
+          "selected_strategy": "NORMAL",
+          "entry_commits": 4,
+          "return_commits": 4,
+          "natural_rejoins": 0
+        }
+      ],
+      "normal_after_avoidance": {
+        "first_t_s": 50.677426785,
+        "last_t_s": 335.251426785,
+        "duration_s": 284.57399999999996,
+        "samples": 10036,
+        "minimum_kmh": 5.48964543868943e-07,
+        "p05_p50_p95_kmh": [
+          9.825715638298886,
+          30.463604149339737,
+          59.731076090060675
+        ],
+        "maximum_kmh": 59.791402711965596,
+        "mean_kmh": 32.0420994351832,
+        "floor_kmh": 19.0,
+        "longest_at_or_above_floor_s": 57.75
+      },
+      "entry_commits": 4,
+      "return_commits": 4,
+      "natural_rejoins": 0,
+      "minimum_actual_actor_clearance_m": 0.3669292384536989,
+      "dynamics": "/workspace/local_data/s4_b_static20_20261119/b_v12_full_static_20/avoidance-dynamics.json",
+      "runtime_manifest": "/workspace/local_data/s4_b_static20_20261119/b_v12_full_static_20/runtime-stage-manifest.json"
+    }
+  ],
+  "normal_integrations": [
+    {
+      "aggregate_version": "v11",
+      "unchanged_normal_modules_compared_to_final": true,
+      "name": "b_v11_normal_a439_reproduction_02",
+      "directory": "/workspace/local_data/s4_b_static20_20261119/b_v11_normal_a439_reproduction_02",
+      "summary_sha256": "fa7039871d4b8f05d107baf71152762ac3b371b91ffa9a576373217267331e26",
+      "execution_argv": [
+        "/workspace/tools/s4_morai_generalized_trial.py",
+        "--link",
+        "A219BS010439",
+        "--start",
+        "0",
+        "--follow-distance-m",
+        "105",
+        "--approach-speed-kmh",
+        "30",
+        "--seconds",
+        "180",
+        "--record-bag",
+        "--output",
+        "/workspace/local_data/s4_b_static20_20261119/b_v11_normal_a439_reproduction_02"
+      ],
+      "audit": {
+        "collision_messages": 0,
+        "unexpected_empty_path_messages": 0,
+        "forbidden_boundary_contact_samples": {},
+        "physical_c3_contact_samples": {},
+        "road_containment_unproven_frames": 0,
+        "armed_sensor_hold_events": []
+      }
+    },
+    {
+      "aggregate_version": "v11",
+      "unchanged_normal_modules_compared_to_final": true,
+      "name": "b_v11_normal_scurve_60",
+      "directory": "/workspace/local_data/s4_b_static20_20261119/b_v11_normal_scurve_60",
+      "summary_sha256": "4e76ed5b6a3aff5af0d43dcc40711084686096cc19179801b2f525a1c235d44b",
+      "execution_argv": [
+        "/workspace/tools/s4_morai_generalized_trial.py",
+        "--link",
+        "A219BS010632",
+        "--start",
+        "5",
+        "--follow-distance-m",
+        "360",
+        "--approach-speed-kmh",
+        "60",
+        "--seconds",
+        "180",
+        "--record-bag",
+        "--output",
+        "/workspace/local_data/s4_b_static20_20261119/b_v11_normal_scurve_60"
+      ],
+      "audit": {
+        "collision_messages": 0,
+        "unexpected_empty_path_messages": 0,
+        "forbidden_boundary_contact_samples": {},
+        "physical_c3_contact_samples": {},
+        "road_containment_unproven_frames": 0,
+        "armed_sensor_hold_events": []
+      }
+    }
+  ],
+  "scurve_metrics": {
+    "scope": "POST_RUN_ALL_EGO_S073_AND_ORIGINAL_REFERENCE",
+    "success": true,
+    "thresholds": {
+      "approach_floor_kmh": 58.0,
+      "approach_hold_s": 2.0,
+      "maximum_lateral_error_m": 0.6,
+      "p95_lateral_error_m": 0.25,
+      "recovery_floor_kmh": 45.0
+    },
+    "actual_approach_max_kmh": 59.01657807295409,
+    "actual_approach_floor_hold_s": 2.244983777,
+    "braking_start": {
+      "t": 12.497728414,
+      "station_m": 694.0975756572433,
+      "x": 138.91094970703125,
+      "y": 1600.816162109375,
+      "speed_kmh": 56.20677682704351,
+      "target_kmh": 46.49753952026367,
+      "signed_lateral_m": 0.00505684089635722,
+      "heading_error_rad": 0.0014374268305534785,
+      "measured_wheel_rad": 0.0007868702803055979,
+      "lateral_acceleration_mps2": 0.06753940859473778,
+      "lookahead_m": 12.0,
+      "b2_gap_m": 1.0197419517697202,
+      "c3_gap_m": 2.039609390440445
+    },
+    "curve_speed_range_kmh": [
+      25.96813674514051,
+      46.217101357060656
+    ],
+    "curve_lateral_error_p50_p95_p99_max_m": [
+      0.05572743574688673,
+      0.17609103287626793,
+      0.20089984596397195,
+      0.20459773238226336
+    ],
+    "curve_heading_error_max_deg": 1.4708522625104852,
+    "minimum_actual_body_b2_gap_m": 0.7431774930592341,
+    "minimum_actual_body_c3_gap_m": 1.1113563993117752,
+    "max_measured_lateral_acceleration_mps2": 2.8552717850498253,
+    "max_commanded_wheel_rate_radps": 0.19962525885113996,
+    "max_control_receipt_delay_s": 0.001335812,
+    "planning_p95_ms": 182.50996799906716,
+    "recovery_peak_kmh": 52.56733937851727,
+    "recovery_gain_kmh": 11.798899370687977
+  },
+  "full_mission": {
+    "waypoints": 18,
+    "independent_goal": {
+      "frames": 278,
+      "hold_s": 5.596499847,
+      "max_speed_kmh": 3.0586731423395e-05,
+      "max_position_error_m": 0.34174988062186196,
+      "max_heading_error_rad": 0.03026682942501635
+    }
+  },
+  "regression": {
+    "tests": 607,
+    "failures": 0,
+    "errors": 0,
+    "xml": "/workspace/local_data/s4_b_static20_20261119/b-final-regression.xml"
+  },
+  "build": {
+    "packages": 2,
+    "log": "/workspace/local_data/s4_b_static20_20261119/b-v12-build.log"
+  },
+  "runtime_receipt": "/workspace/local_data/s4_b_static20_20261119/b-final-stopped-runtime-receipt.json",
+  "profiles_sha256": {
+    "/workspace/config/s4_b/control_node.yaml": "6192a94a7afe887fb66bf1986509cfd0a9c5de526b763779768a316da51feac2",
+    "/workspace/config/s4_b/localization_node.yaml": "30d0f20a654b3397797a029bcf1df49434a11734cb030aaf86a754a3d57dc20b",
+    "/workspace/config/s4_b/localization_source_time.yaml": "1d152e254c7debc41324c3acebb602375ae07f2d932caf866b4819162c254c74",
+    "/workspace/config/s4_b/perception.yaml": "f41a15e822e2fe5ca5b9317bcdd4437bfcadb386a7f7272a0363bb992ed2100f",
+    "/workspace/config/s4_b/planning_10.yaml": "0fe7d5616de62c5a9437d98b1439cc19e1057232c507c963a5659e0da1d869ae",
+    "/workspace/config/s4_b/planning_15.yaml": "9b2decd47a3828a374908e41dd9e554b080d9a83f9cb013bd31037331dcbc2c7",
+    "/workspace/config/s4_b/planning_20.yaml": "08319ac14547a612285f28cc0c60111244ea4b5f875649f54f3fe4c60b989a3b"
+  },
+  "normal_reference_proof": "/workspace/local_data/s4_b_static20_20261119/v11-normal-reference-proof.json",
+  "preservation_index": "/workspace/local_data/s4_b_static20_20261119/final-b-package/evidence-index.json",
+  "protected_v61_files": {
+    "config/s4_v61/planning_15.yaml": "77d60d694c6c2c5d868b2b7f5cdc49918aa34b214269c2fa86e306e928cc4564",
+    "config/s4_v61/README.md": "f4d72440d9d5e17ee11a9d9f81de09590a79189d8273af10893fa8f4dcb8cad4",
+    "config/s4_v61/planning_10.yaml": "d399d09332d09dbc791f30c30368cafb2c3b0d4fe1b10b357ea16952d6e55167",
+    "config/s4_v61/perception.yaml": "f41a15e822e2fe5ca5b9317bcdd4437bfcadb386a7f7272a0363bb992ed2100f",
+    "docs/s4_static_final_completion.md": "752d971c3bcf993584489996db2384b99c57cbe69e4e5b9e6bc0d3670e67ab08",
+    "docs/validation/s4_v61_evidence.json": "e910ddfe464e7dc9ba6aa0fa062a4253970850e38a6d143d2d6345f2417496ec",
+    "local_data/s4_final_completion_20261118/final-v61-package/evidence-index.json": "852c39dcbda0a91e77ec00d6b1016f1b472e661aa95e1d4f0c03a894b9b9b68f"
+  },
+  "earlier_version_static_results_counted_as_current": false,
+  "normal_integration_reuse": "v11 normal source files equal final v12; aggregate fingerprints are distinct",
+  "actor_truth_to_algorithm": false,
+  "source_time_localization": {
+    "profile": "/workspace/config/s4_b/localization_source_time.yaml",
+    "history_s": 0.8,
+    "max_source_age_s": 0.6,
+    "future_tolerance_s": 0.05,
+    "position_sources": [
+      "GPS",
+      "IMU"
+    ],
+    "velocity_source": "ROS EgoVehicleStatus speed only"
+  },
+  "limits": [
+    "Finite measured MORAI cases, not arbitrary roads/placements",
+    "Lower-speed complete paths are distinct from20 performance",
+    "Bounded search failure is not physical impossibility",
+    "Independent measured collider2D yaw sweep, not full3D proof"
+  ]
+}
