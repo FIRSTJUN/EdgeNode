@@ -1,0 +1,9 @@
+/dynamic_tracking_node:
+  ros__parameters:
+    mgeo_dir: /workspace/local_data/kcity_mgeo
+    hdmap_dir: /workspace/local_data/kcity_hdmap
+    measurement_std_m: 0.3
+    acceleration_std_mps2: 1.5
+    max_missed_sec: 1.2
+    vehicle_length_prior_m: 4.93
+    vehicle_width_prior_m: 2.12

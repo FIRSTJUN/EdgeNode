@@ -1,0 +1,1444 @@
+{
+  "terminal_truth_position_coverage": {
+    "scope": "POST_RUN_ONLY_POSITION_INTERPOLATION_WITHOUT_FUTURE_VELOCITY_STENCIL",
+    "cases": [
+      {
+        "name": "c_v4_parked_adjacent_pass",
+        "moving_track_source_samples": 0,
+        "truth_position_coverage_missing": 0,
+        "unmatched_moving_with_truth_coverage": []
+      },
+      {
+        "name": "c_v4_moving_npc10",
+        "moving_track_source_samples": 93,
+        "truth_position_coverage_missing": 0,
+        "unmatched_moving_with_truth_coverage": []
+      },
+      {
+        "name": "c_v4_stopped_npc10",
+        "moving_track_source_samples": 74,
+        "truth_position_coverage_missing": 0,
+        "unmatched_moving_with_truth_coverage": []
+      },
+      {
+        "name": "c_v4_other_speed15",
+        "moving_track_source_samples": 55,
+        "truth_position_coverage_missing": 0,
+        "unmatched_moving_with_truth_coverage": []
+      },
+      {
+        "name": "c_v4_two_ids",
+        "moving_track_source_samples": 108,
+        "truth_position_coverage_missing": 0,
+        "unmatched_moving_with_truth_coverage": []
+      },
+      {
+        "name": "c_v4_actual_occlusion",
+        "moving_track_source_samples": 70,
+        "truth_position_coverage_missing": 1,
+        "unmatched_moving_with_truth_coverage": []
+      },
+      {
+        "name": "c_v4_lane_follow",
+        "moving_track_source_samples": 62,
+        "truth_position_coverage_missing": 0,
+        "unmatched_moving_with_truth_coverage": []
+      }
+    ]
+  },
+  "status": "PHASE_C_COMPLETE_IN_QUALIFIED_MORAI_CONDITIONS",
+  "baseline_commit": "000045f489f5c7045fcd9ce0247e0dde52a45dc6",
+  "phase_c_implementation_sha256": "6aa36ba2836584ea398c7fa056bca06c8785d94c9d179af6ea35be654957718d",
+  "source": "ros2_ws/src/edgenode_dynamic_tracking",
+  "profiles": {
+    "localization_source_time.yaml": {
+      "path": "/workspace/config/s4_c/localization_source_time.yaml",
+      "sha256": "1d152e254c7debc41324c3acebb602375ae07f2d932caf866b4819162c254c74"
+    },
+    "planning_normal.yaml": {
+      "path": "/workspace/config/s4_c/planning_normal.yaml",
+      "sha256": "31594d69deb22861376881d281586faef5f73f000ca649b29d1e2d51b224952e"
+    },
+    "tracking.yaml": {
+      "path": "/workspace/config/s4_c/tracking.yaml",
+      "sha256": "f289d32b702348084d5502e76fe4b844fe6ba8ee814da1e119ccf68c27c7f366"
+    },
+    "control_node.yaml": {
+      "path": "/workspace/config/s4_c/control_node.yaml",
+      "sha256": "6192a94a7afe887fb66bf1986509cfd0a9c5de526b763779768a316da51feac2"
+    },
+    "perception.yaml": {
+      "path": "/workspace/config/s4_c/perception.yaml",
+      "sha256": "f41a15e822e2fe5ca5b9317bcdd4437bfcadb386a7f7272a0363bb992ed2100f"
+    }
+  },
+  "final_ready": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c-final-qualified-ready.json",
+  "final_stopped_raw_receipt": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c-final-stopped-runtime-receipt.json",
+  "original_scene_restoration": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c-completion-scene-restoration.json",
+  "original_code_and_profiles_unchanged_since_b": [
+    "ros2_ws/src/edgenode_planning",
+    "ros2_ws/src/edgenode_normal_experiment",
+    "ros2_ws/src/edgenode_static20_experiment",
+    "ros2_ws/src/edgenode_control",
+    "ros2_ws/src/edgenode_perception",
+    "ros2_ws/src/edgenode_localization",
+    "config/s4_v61",
+    "config/s4_a",
+    "config/s4_b",
+    "ros2_ws/src/edgenode_bringup/launch/s4_morai.launch.py",
+    "ros2_ws/src/edgenode_bringup/launch/s4_a_scurve.launch.py",
+    "ros2_ws/src/edgenode_bringup/launch/s4_b_static20.launch.py"
+  ],
+  "cases": [
+    {
+      "name": "c_v4_parked_adjacent_pass",
+      "trial_argv": [
+        "--link",
+        "A219BS010301",
+        "--start",
+        "5",
+        "--obstacle",
+        "23",
+        "--tracking-only-seconds",
+        "27",
+        "--actor-motion-kmh",
+        "0",
+        "--approach-speed-kmh",
+        "5",
+        "--record-bag",
+        "--prepare-before-spawn",
+        "--tracking-ego-drive",
+        "--stationary-npc",
+        "--obstacle-link",
+        "A219BS010302"
+      ],
+      "summary": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_parked_adjacent_pass/summary.json",
+      "analysis": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_parked_adjacent_pass/tracking-analysis-c-v4.json",
+      "analysis_sha256": "58ba1978c1de6097325954dd584eceece05df7379bc4ca7c01d9fda6b1ab46d7",
+      "bag": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_parked_adjacent_pass/bag",
+      "raw_samples": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_parked_adjacent_pass/samples-finalized.jsonl",
+      "runtime_manifest": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_parked_adjacent_pass/runtime-stage-manifest.json",
+      "safety_audit": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_parked_adjacent_pass/final-mission-audit-c-v4.json",
+      "safety": {
+        "collision_messages": 0,
+        "unexpected_empty_path_messages": 0,
+        "forbidden_boundary_contact_samples": {},
+        "physical_c3_contact_samples": {},
+        "road_containment_unproven_frames": 0,
+        "armed_sensor_hold_events": []
+      },
+      "tracking": {
+        "scope": "POST_RUN_SOURCE_EPOCH_SCORING_ONLY_NO_TRUTH_TO_ALGORITHM",
+        "maximum_qualified_range_m": 50.0,
+        "warmup_s": 2.0,
+        "truth_clock_rpc_offset_p50_p95_max_s": [
+          0.010426368,
+          0.02737216,
+          0.033182464
+        ],
+        "actors": [
+          {
+            "actor_audit_id": "s4_generalized_1795114958376721961",
+            "expected_source_frames": 153,
+            "matched_fresh_frames": 153,
+            "match_fraction": 1.0,
+            "moving_fraction": 0.0,
+            "false_static_frames": 0,
+            "dominant_id_fraction": 1.0,
+            "ids": {
+              "bb20a1c924204b6dbda4c18e0ae4995e:1": 153
+            },
+            "position_error_p50_p95_max_m": [
+              0.09103972103810343,
+              0.09104056289502961,
+              0.09104056389694756
+            ],
+            "speed_error_p50_p95_max_mps": [
+              3.207071643695855e-05,
+              0.010065338405128358,
+              0.017124418386123143
+            ],
+            "velocity_vector_error_p50_p95_max_mps": [
+              3.207071643695855e-05,
+              0.010065338405128358,
+              0.017124418386123143
+            ],
+            "truth_speed_p50_p95_max_kmh": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "lane_match_fraction": 1.0,
+            "range_bins": {
+              "10-20": {
+                "expected": 108,
+                "matched": 67
+              },
+              "0-10": {
+                "expected": 118,
+                "matched": 118
+              }
+            },
+            "static_classified_frames": 153,
+            "expected_motion": "STATIC",
+            "correct_motion_fraction": 1.0,
+            "false_motion_all_matched_frames": 0,
+            "relative_velocity_error_p50_p95_max_mps": [
+              0.023015067051378926,
+              0.05918767835551832,
+              0.16057908823568876
+            ],
+            "future_position_error_by_seconds": {
+              "1.0": [
+                0.09103202900483606,
+                0.0910405470795215,
+                0.09104055628044161
+              ],
+              "2.0": [
+                0.09102434762104133,
+                0.0910405312654367,
+                0.09104054866383181
+              ],
+              "3.0": [
+                0.0910235156676811,
+                0.09104052927297182,
+                0.09380128376103865
+              ]
+            },
+            "success": true
+          }
+        ],
+        "unique_source_frames": 244,
+        "source_ready_fraction": 1.0,
+        "background_moving_count_p50_p95_max": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "success": true
+      },
+      "restored": true,
+      "final_stop_confirmed": true
+    },
+    {
+      "name": "c_v4_moving_npc10",
+      "trial_argv": [
+        "--link",
+        "A219BS010301",
+        "--start",
+        "5",
+        "--obstacle",
+        "35",
+        "--tracking-only-seconds",
+        "12",
+        "--actor-motion-kmh",
+        "10",
+        "--approach-speed-kmh",
+        "5",
+        "--record-bag",
+        "--prepare-before-spawn",
+        "--tracking-ego-drive"
+      ],
+      "summary": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_moving_npc10/summary.json",
+      "analysis": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_moving_npc10/tracking-analysis-c-v4.json",
+      "analysis_sha256": "87f37876923188e2039f940328eec14a83ee10f6c97ad237462c9e1a0aac55d3",
+      "bag": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_moving_npc10/bag",
+      "raw_samples": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_moving_npc10/samples-finalized.jsonl",
+      "runtime_manifest": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_moving_npc10/runtime-stage-manifest.json",
+      "safety_audit": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_moving_npc10/final-mission-audit-c-v4.json",
+      "safety": {
+        "collision_messages": 0,
+        "unexpected_empty_path_messages": 0,
+        "forbidden_boundary_contact_samples": {},
+        "physical_c3_contact_samples": {},
+        "road_containment_unproven_frames": 0,
+        "armed_sensor_hold_events": []
+      },
+      "tracking": {
+        "scope": "POST_RUN_SOURCE_EPOCH_SCORING_ONLY_NO_TRUTH_TO_ALGORITHM",
+        "maximum_qualified_range_m": 50.0,
+        "warmup_s": 2.0,
+        "truth_clock_rpc_offset_p50_p95_max_s": [
+          0.010088448,
+          0.0293253888,
+          0.032969728
+        ],
+        "actors": [
+          {
+            "actor_audit_id": "s4_generalized_1795115034659126745",
+            "expected_source_frames": 92,
+            "matched_fresh_frames": 92,
+            "match_fraction": 1.0,
+            "moving_fraction": 1.0,
+            "false_static_frames": 0,
+            "dominant_id_fraction": 1.0,
+            "ids": {
+              "bd3f9c2b04aa4d05ac12e5a3c5bd4a78:1": 92
+            },
+            "position_error_p50_p95_max_m": [
+              0.1293228640527812,
+              0.37847742900304754,
+              0.3993348355957811
+            ],
+            "speed_error_p50_p95_max_mps": [
+              0.05261145729130057,
+              0.18337309467488372,
+              0.24260205001943103
+            ],
+            "velocity_vector_error_p50_p95_max_mps": [
+              0.11386948687837067,
+              0.26490749602845004,
+              0.2952801818494626
+            ],
+            "truth_speed_p50_p95_max_kmh": [
+              9.925209271423828,
+              10.231908358462691,
+              10.585195110543546
+            ],
+            "lane_match_fraction": 1.0,
+            "range_bins": {
+              "30-40": {
+                "expected": 49,
+                "matched": 49
+              },
+              "40-50": {
+                "expected": 43,
+                "matched": 43
+              }
+            },
+            "static_classified_frames": 0,
+            "expected_motion": "MOVING",
+            "correct_motion_fraction": 1.0,
+            "false_motion_all_matched_frames": 0,
+            "relative_velocity_error_p50_p95_max_mps": [
+              0.11312131899234444,
+              0.2640755168296089,
+              0.27799142809879035
+            ],
+            "future_position_error_by_seconds": {
+              "1.0": [
+                0.2059017036475842,
+                0.5890435448956644,
+                0.6448153136429766
+              ],
+              "2.0": [
+                0.3474721599485149,
+                0.8418891302121365,
+                0.9258432923875414
+              ],
+              "3.0": [
+                0.4218026753881948,
+                1.1027923816372351,
+                1.204839352443482
+              ]
+            },
+            "success": true
+          }
+        ],
+        "unique_source_frames": 111,
+        "source_ready_fraction": 1.0,
+        "background_moving_count_p50_p95_max": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "success": true
+      },
+      "restored": true,
+      "final_stop_confirmed": true
+    },
+    {
+      "name": "c_v4_stopped_npc10",
+      "trial_argv": [
+        "--link",
+        "A219BS010301",
+        "--start",
+        "5",
+        "--obstacle",
+        "20",
+        "--tracking-only-seconds",
+        "10",
+        "--actor-motion-kmh",
+        "10",
+        "--approach-speed-kmh",
+        "5",
+        "--record-bag",
+        "--prepare-before-spawn"
+      ],
+      "summary": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_stopped_npc10/summary.json",
+      "analysis": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_stopped_npc10/tracking-analysis-c-v4.json",
+      "analysis_sha256": "3929146c51ab1999c67c4433d0a408cd72a91d86da973da38180eedda0aff4b3",
+      "bag": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_stopped_npc10/bag",
+      "raw_samples": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_stopped_npc10/samples-finalized.jsonl",
+      "runtime_manifest": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_stopped_npc10/runtime-stage-manifest.json",
+      "safety_audit": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_stopped_npc10/final-mission-audit-c-v4.json",
+      "safety": {
+        "collision_messages": 0,
+        "unexpected_empty_path_messages": 0,
+        "forbidden_boundary_contact_samples": {},
+        "physical_c3_contact_samples": {},
+        "road_containment_unproven_frames": 0,
+        "armed_sensor_hold_events": []
+      },
+      "tracking": {
+        "scope": "POST_RUN_SOURCE_EPOCH_SCORING_ONLY_NO_TRUTH_TO_ALGORITHM",
+        "maximum_qualified_range_m": 50.0,
+        "warmup_s": 2.0,
+        "truth_clock_rpc_offset_p50_p95_max_s": [
+          0.01119488,
+          0.030703001599999998,
+          0.037547776
+        ],
+        "actors": [
+          {
+            "actor_audit_id": "s4_generalized_1795115096901685733",
+            "expected_source_frames": 74,
+            "matched_fresh_frames": 74,
+            "match_fraction": 1.0,
+            "moving_fraction": 1.0,
+            "false_static_frames": 0,
+            "dominant_id_fraction": 1.0,
+            "ids": {
+              "c0a455baeb3b40549164188109f016f6:1": 74
+            },
+            "position_error_p50_p95_max_m": [
+              0.05961343851792977,
+              0.16353095652799401,
+              0.19258435922824993
+            ],
+            "speed_error_p50_p95_max_mps": [
+              0.0795567371742465,
+              0.2295541419479165,
+              0.2856751108594411
+            ],
+            "velocity_vector_error_p50_p95_max_mps": [
+              0.10124727844361661,
+              0.2356431522353237,
+              0.2878435983671724
+            ],
+            "truth_speed_p50_p95_max_kmh": [
+              9.8843377533486,
+              10.334602902697592,
+              10.629150118178906
+            ],
+            "lane_match_fraction": 1.0,
+            "range_bins": {
+              "10-20": {
+                "expected": 3,
+                "matched": 3
+              },
+              "20-30": {
+                "expected": 34,
+                "matched": 34
+              },
+              "30-40": {
+                "expected": 33,
+                "matched": 33
+              },
+              "40-50": {
+                "expected": 4,
+                "matched": 4
+              }
+            },
+            "static_classified_frames": 0,
+            "expected_motion": "MOVING",
+            "correct_motion_fraction": 1.0,
+            "false_motion_all_matched_frames": 0,
+            "relative_velocity_error_p50_p95_max_mps": [
+              0.10124808889144256,
+              0.23564234717900862,
+              0.287842759898574
+            ],
+            "future_position_error_by_seconds": {
+              "1.0": [
+                0.11570330468427778,
+                0.26238276191502513,
+                0.31745692864345365
+              ],
+              "2.0": [
+                0.18938490041435338,
+                0.40895223520799817,
+                0.519683351448486
+              ],
+              "3.0": [
+                0.19884723083994144,
+                0.5928268946227755,
+                0.7173834180495143
+              ]
+            },
+            "success": true
+          }
+        ],
+        "unique_source_frames": 93,
+        "source_ready_fraction": 1.0,
+        "background_moving_count_p50_p95_max": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "success": true
+      },
+      "restored": true,
+      "final_stop_confirmed": true
+    },
+    {
+      "name": "c_v4_other_speed15",
+      "trial_argv": [
+        "--link",
+        "A219BS010301",
+        "--start",
+        "5",
+        "--obstacle",
+        "18",
+        "--tracking-only-seconds",
+        "8",
+        "--actor-motion-kmh",
+        "15",
+        "--approach-speed-kmh",
+        "5",
+        "--record-bag",
+        "--prepare-before-spawn"
+      ],
+      "summary": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_other_speed15/summary.json",
+      "analysis": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_other_speed15/tracking-analysis-c-v4.json",
+      "analysis_sha256": "e0ef6e89badcfb8bd05310fa2beb7701c80c92e3261da8b24916ff6ff692bad6",
+      "bag": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_other_speed15/bag",
+      "raw_samples": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_other_speed15/samples-finalized.jsonl",
+      "runtime_manifest": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_other_speed15/runtime-stage-manifest.json",
+      "safety_audit": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_other_speed15/final-mission-audit-c-v4.json",
+      "safety": {
+        "collision_messages": 0,
+        "unexpected_empty_path_messages": 0,
+        "forbidden_boundary_contact_samples": {},
+        "physical_c3_contact_samples": {},
+        "road_containment_unproven_frames": 0,
+        "armed_sensor_hold_events": []
+      },
+      "tracking": {
+        "scope": "POST_RUN_SOURCE_EPOCH_SCORING_ONLY_NO_TRUTH_TO_ALGORITHM",
+        "maximum_qualified_range_m": 50.0,
+        "warmup_s": 2.0,
+        "truth_clock_rpc_offset_p50_p95_max_s": [
+          0.010277376,
+          0.030412672,
+          0.033379072
+        ],
+        "actors": [
+          {
+            "actor_audit_id": "s4_generalized_1795115154102246337",
+            "expected_source_frames": 54,
+            "matched_fresh_frames": 54,
+            "match_fraction": 1.0,
+            "moving_fraction": 1.0,
+            "false_static_frames": 0,
+            "dominant_id_fraction": 1.0,
+            "ids": {
+              "ebf523276d664daca0a49d6714f1430b:1": 54
+            },
+            "position_error_p50_p95_max_m": [
+              0.07626851608657792,
+              0.34722464788456014,
+              0.39276179342027456
+            ],
+            "speed_error_p50_p95_max_mps": [
+              0.11941789075382037,
+              0.5199732940510458,
+              0.8929866739210177
+            ],
+            "velocity_vector_error_p50_p95_max_mps": [
+              0.1213606441936196,
+              0.5200321544939192,
+              0.8930217094447127
+            ],
+            "truth_speed_p50_p95_max_kmh": [
+              14.895510956796706,
+              15.357656223139971,
+              15.78254618031301
+            ],
+            "lane_match_fraction": 1.0,
+            "range_bins": {
+              "10-20": {
+                "expected": 5,
+                "matched": 5
+              },
+              "20-30": {
+                "expected": 22,
+                "matched": 22
+              },
+              "30-40": {
+                "expected": 21,
+                "matched": 21
+              },
+              "40-50": {
+                "expected": 6,
+                "matched": 6
+              }
+            },
+            "static_classified_frames": 0,
+            "expected_motion": "MOVING",
+            "correct_motion_fraction": 1.0,
+            "false_motion_all_matched_frames": 0,
+            "relative_velocity_error_p50_p95_max_mps": [
+              0.1213615778340995,
+              0.5200333468984951,
+              0.8930227017742307
+            ],
+            "future_position_error_by_seconds": {
+              "1.0": [
+                0.1470957795597128,
+                0.8611477353909344,
+                1.3155059607006672
+              ],
+              "2.0": [
+                0.24928312038316072,
+                1.524790527698408,
+                2.2201847178231984
+              ],
+              "3.0": [
+                0.6207822205598256,
+                2.337987739517474,
+                3.1050802507608966
+              ]
+            },
+            "success": true
+          }
+        ],
+        "unique_source_frames": 73,
+        "source_ready_fraction": 1.0,
+        "background_moving_count_p50_p95_max": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "success": true
+      },
+      "restored": true,
+      "final_stop_confirmed": true
+    },
+    {
+      "name": "c_v4_two_ids",
+      "trial_argv": [
+        "--link",
+        "A219BS010301",
+        "--start",
+        "5",
+        "--obstacle",
+        "20",
+        "--tracking-only-seconds",
+        "8",
+        "--actor-motion-kmh",
+        "10",
+        "--approach-speed-kmh",
+        "5",
+        "--record-bag",
+        "--prepare-before-spawn",
+        "--additional-obstacle",
+        "A219BS010302:30:0",
+        "--additional-motion-kmh",
+        "10"
+      ],
+      "summary": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_two_ids/summary.json",
+      "analysis": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_two_ids/tracking-analysis-c-v4.json",
+      "analysis_sha256": "83b6218da9c1cd27ac8d6ba4a0885d2d090722319c7c824366e6d34346552550",
+      "bag": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_two_ids/bag",
+      "raw_samples": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_two_ids/samples-finalized.jsonl",
+      "runtime_manifest": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_two_ids/runtime-stage-manifest.json",
+      "safety_audit": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_two_ids/final-mission-audit-c-v4.json",
+      "safety": {
+        "collision_messages": 0,
+        "unexpected_empty_path_messages": 0,
+        "forbidden_boundary_contact_samples": {},
+        "physical_c3_contact_samples": {},
+        "road_containment_unproven_frames": 0,
+        "armed_sensor_hold_events": []
+      },
+      "tracking": {
+        "scope": "POST_RUN_SOURCE_EPOCH_SCORING_ONLY_NO_TRUTH_TO_ALGORITHM",
+        "maximum_qualified_range_m": 50.0,
+        "warmup_s": 2.0,
+        "truth_clock_rpc_offset_p50_p95_max_s": [
+          0.009005568,
+          0.027344768,
+          0.04096256
+        ],
+        "actors": [
+          {
+            "actor_audit_id": "s4_generalized_1795115208726143139",
+            "expected_source_frames": 53,
+            "matched_fresh_frames": 53,
+            "match_fraction": 1.0,
+            "moving_fraction": 1.0,
+            "false_static_frames": 0,
+            "dominant_id_fraction": 1.0,
+            "ids": {
+              "d5958d6956684c939a68e522dfa76668:1": 53
+            },
+            "position_error_p50_p95_max_m": [
+              0.056224264296937124,
+              0.17568839656361232,
+              0.2002427473572076
+            ],
+            "speed_error_p50_p95_max_mps": [
+              0.076530186675146,
+              0.30090159181000997,
+              0.43687434397503644
+            ],
+            "velocity_vector_error_p50_p95_max_mps": [
+              0.08819785563239102,
+              0.30132045331543206,
+              0.44062953394819054
+            ],
+            "truth_speed_p50_p95_max_kmh": [
+              9.845310461199736,
+              10.318553174967045,
+              10.568532424166087
+            ],
+            "lane_match_fraction": 1.0,
+            "range_bins": {
+              "10-20": {
+                "expected": 2,
+                "matched": 2
+              },
+              "20-30": {
+                "expected": 31,
+                "matched": 31
+              },
+              "30-40": {
+                "expected": 20,
+                "matched": 20
+              }
+            },
+            "static_classified_frames": 0,
+            "expected_motion": "MOVING",
+            "correct_motion_fraction": 1.0,
+            "false_motion_all_matched_frames": 0,
+            "relative_velocity_error_p50_p95_max_mps": [
+              0.08820425476006093,
+              0.30131908642008526,
+              0.4406282144371634
+            ],
+            "future_position_error_by_seconds": {
+              "1.0": [
+                0.11702626125942162,
+                0.3381779984170352,
+                0.3672608923224217
+              ],
+              "2.0": [
+                0.17060074483074394,
+                0.519216332665799,
+                0.5778998583588725
+              ],
+              "3.0": [
+                0.2884719830309606,
+                0.7358569478817237,
+                0.7673202617508346
+              ]
+            },
+            "success": true
+          },
+          {
+            "actor_audit_id": "s4_additional_1795115209025314802",
+            "expected_source_frames": 53,
+            "matched_fresh_frames": 53,
+            "match_fraction": 1.0,
+            "moving_fraction": 1.0,
+            "false_static_frames": 0,
+            "dominant_id_fraction": 1.0,
+            "ids": {
+              "d5958d6956684c939a68e522dfa76668:2": 53
+            },
+            "position_error_p50_p95_max_m": [
+              0.1441982506818914,
+              0.189576383470046,
+              0.19513096419364478
+            ],
+            "speed_error_p50_p95_max_mps": [
+              0.07107779055269736,
+              0.23751874133862272,
+              0.3163702865567304
+            ],
+            "velocity_vector_error_p50_p95_max_mps": [
+              0.07183608673616011,
+              0.23986561282600632,
+              0.3164233088265747
+            ],
+            "truth_speed_p50_p95_max_kmh": [
+              9.849105437616391,
+              10.334058938477314,
+              10.565576985478339
+            ],
+            "lane_match_fraction": 1.0,
+            "range_bins": {
+              "20-30": {
+                "expected": 2,
+                "matched": 2
+              },
+              "30-40": {
+                "expected": 31,
+                "matched": 31
+              },
+              "40-50": {
+                "expected": 20,
+                "matched": 20
+              }
+            },
+            "static_classified_frames": 0,
+            "expected_motion": "MOVING",
+            "correct_motion_fraction": 1.0,
+            "false_motion_all_matched_frames": 0,
+            "relative_velocity_error_p50_p95_max_mps": [
+              0.07183386610328668,
+              0.23986619168989828,
+              0.3164219765231222
+            ],
+            "future_position_error_by_seconds": {
+              "1.0": [
+                0.18601661895275773,
+                0.3575079951712968,
+                0.3767961910596426
+              ],
+              "2.0": [
+                0.2154694151597227,
+                0.5062543505014611,
+                0.5217443694099194
+              ],
+              "3.0": [
+                0.34068292755591745,
+                0.6990659281394678,
+                0.7128359481385432
+              ]
+            },
+            "success": true
+          }
+        ],
+        "unique_source_frames": 72,
+        "source_ready_fraction": 1.0,
+        "background_moving_count_p50_p95_max": [
+          0.0,
+          0.0,
+          2.0
+        ],
+        "success": true
+      },
+      "restored": true,
+      "final_stop_confirmed": true
+    },
+    {
+      "name": "c_v4_actual_occlusion",
+      "trial_argv": [
+        "--link",
+        "A219BS010301",
+        "--start",
+        "5",
+        "--obstacle",
+        "20",
+        "--tracking-only-seconds",
+        "10",
+        "--actor-motion-kmh",
+        "10",
+        "--approach-speed-kmh",
+        "5",
+        "--record-bag",
+        "--prepare-before-spawn",
+        "--occlusion-at-s",
+        "4",
+        "--occlusion-duration-s",
+        ".7"
+      ],
+      "summary": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_actual_occlusion/summary.json",
+      "analysis": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_actual_occlusion/tracking-analysis-c-v4.json",
+      "analysis_sha256": "d7c6880bcf3220ccaac4c773f67eeee0943d7c3bf1c5c8a2d501f4ad0021b407",
+      "bag": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_actual_occlusion/bag",
+      "raw_samples": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_actual_occlusion/samples-finalized.jsonl",
+      "runtime_manifest": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_actual_occlusion/runtime-stage-manifest.json",
+      "safety_audit": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_actual_occlusion/final-mission-audit-c-v4.json",
+      "safety": {
+        "collision_messages": 0,
+        "unexpected_empty_path_messages": 0,
+        "forbidden_boundary_contact_samples": {},
+        "physical_c3_contact_samples": {},
+        "road_containment_unproven_frames": 0,
+        "armed_sensor_hold_events": []
+      },
+      "tracking": {
+        "scope": "POST_RUN_SOURCE_EPOCH_SCORING_ONLY_NO_TRUTH_TO_ALGORITHM",
+        "maximum_qualified_range_m": 50.0,
+        "warmup_s": 2.0,
+        "truth_clock_rpc_offset_p50_p95_max_s": [
+          0.009326847999999999,
+          0.0287541632,
+          0.03306368
+        ],
+        "actors": [
+          {
+            "actor_audit_id": "s4_generalized_1795115265305503328",
+            "expected_source_frames": 67,
+            "matched_fresh_frames": 65,
+            "match_fraction": 0.9701492537313433,
+            "moving_fraction": 1.0,
+            "false_static_frames": 0,
+            "dominant_id_fraction": 1.0,
+            "ids": {
+              "f8c9f8e83ba644ec8a3d6476669c4cd4:1": 65
+            },
+            "position_error_p50_p95_max_m": [
+              0.0974039266681234,
+              0.3347495243965316,
+              0.3459172024583976
+            ],
+            "speed_error_p50_p95_max_mps": [
+              0.0554064267121519,
+              0.240795624565606,
+              0.3139106015943076
+            ],
+            "velocity_vector_error_p50_p95_max_mps": [
+              0.11500725736360934,
+              0.2421411849767601,
+              0.3139505094957318
+            ],
+            "truth_speed_p50_p95_max_kmh": [
+              9.883665160370334,
+              10.240939246222993,
+              10.395658498655388
+            ],
+            "lane_match_fraction": 1.0,
+            "range_bins": {
+              "10-20": {
+                "expected": 2,
+                "matched": 2
+              },
+              "20-30": {
+                "expected": 28,
+                "matched": 28
+              },
+              "30-40": {
+                "expected": 34,
+                "matched": 34
+              },
+              "40-50": {
+                "expected": 3,
+                "matched": 3
+              }
+            },
+            "static_classified_frames": 0,
+            "expected_motion": "MOVING",
+            "correct_motion_fraction": 1.0,
+            "false_motion_all_matched_frames": 0,
+            "relative_velocity_error_p50_p95_max_mps": [
+              0.11500673485017882,
+              0.24213943207466734,
+              0.3139495216001374
+            ],
+            "future_position_error_by_seconds": {
+              "1.0": [
+                0.16318450710273885,
+                0.45411654954112685,
+                0.512756986363048
+              ],
+              "2.0": [
+                0.2626983852433454,
+                0.4951483625095065,
+                0.6113090401971925
+              ],
+              "3.0": [
+                0.38522012285407226,
+                0.6068317458017032,
+                0.6795384785982455
+              ]
+            },
+            "success": true
+          }
+        ],
+        "unique_source_frames": 89,
+        "source_ready_fraction": 1.0,
+        "background_moving_count_p50_p95_max": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "success": true
+      },
+      "restored": true,
+      "final_stop_confirmed": true
+    },
+    {
+      "name": "c_v4_lane_follow",
+      "trial_argv": [
+        "--link",
+        "A219BS010632",
+        "--start",
+        "5",
+        "--obstacle",
+        "20",
+        "--tracking-only-seconds",
+        "9",
+        "--actor-motion-kmh",
+        "10",
+        "--approach-speed-kmh",
+        "5",
+        "--record-bag",
+        "--prepare-before-spawn"
+      ],
+      "summary": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_lane_follow/summary.json",
+      "analysis": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_lane_follow/tracking-analysis-c-v4.json",
+      "analysis_sha256": "59423759cce0f6b190f93fc4077e7adbfabc0d30ca040c95e8e535a49b2782f0",
+      "bag": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_lane_follow/bag",
+      "raw_samples": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_lane_follow/samples-finalized.jsonl",
+      "runtime_manifest": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_lane_follow/runtime-stage-manifest.json",
+      "safety_audit": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c_v4_lane_follow/final-mission-audit-c-v4.json",
+      "safety": {
+        "collision_messages": 0,
+        "unexpected_empty_path_messages": 0,
+        "forbidden_boundary_contact_samples": {},
+        "physical_c3_contact_samples": {},
+        "road_containment_unproven_frames": 0,
+        "armed_sensor_hold_events": []
+      },
+      "tracking": {
+        "scope": "POST_RUN_SOURCE_EPOCH_SCORING_ONLY_NO_TRUTH_TO_ALGORITHM",
+        "maximum_qualified_range_m": 50.0,
+        "warmup_s": 2.0,
+        "truth_clock_rpc_offset_p50_p95_max_s": [
+          0.010501888,
+          0.027581644799999992,
+          0.033779968
+        ],
+        "actors": [
+          {
+            "actor_audit_id": "s4_generalized_1795115323114034745",
+            "expected_source_frames": 62,
+            "matched_fresh_frames": 62,
+            "match_fraction": 1.0,
+            "moving_fraction": 1.0,
+            "false_static_frames": 0,
+            "dominant_id_fraction": 1.0,
+            "ids": {
+              "d3e2d66ad4c2436fa67c93dee338c932:1": 62
+            },
+            "position_error_p50_p95_max_m": [
+              0.06282031407165153,
+              0.18501819339129616,
+              0.26188297455632253
+            ],
+            "speed_error_p50_p95_max_mps": [
+              0.0890189704287132,
+              0.2799302719778364,
+              0.40359105746087787
+            ],
+            "velocity_vector_error_p50_p95_max_mps": [
+              0.09258373845152845,
+              0.28147000982048265,
+              0.4048033612960343
+            ],
+            "truth_speed_p50_p95_max_kmh": [
+              9.914046707663854,
+              10.215553550572464,
+              10.270903700760613
+            ],
+            "lane_match_fraction": 1.0,
+            "range_bins": {
+              "10-20": {
+                "expected": 1,
+                "matched": 1
+              },
+              "20-30": {
+                "expected": 33,
+                "matched": 33
+              },
+              "30-40": {
+                "expected": 28,
+                "matched": 28
+              }
+            },
+            "static_classified_frames": 0,
+            "expected_motion": "MOVING",
+            "correct_motion_fraction": 1.0,
+            "false_motion_all_matched_frames": 0,
+            "relative_velocity_error_p50_p95_max_mps": [
+              0.09258321390052575,
+              0.2814684075174559,
+              0.404802572333554
+            ],
+            "future_position_error_by_seconds": {
+              "1.0": [
+                0.08396525042983338,
+                0.31153628746925066,
+                0.3619443702993166
+              ],
+              "2.0": [
+                0.1277510325779592,
+                0.49032014117233047,
+                0.5923829503265432
+              ],
+              "3.0": [
+                0.1986183594424775,
+                0.7482997983730648,
+                0.8259349371674368
+              ]
+            },
+            "success": true
+          }
+        ],
+        "unique_source_frames": 78,
+        "source_ready_fraction": 1.0,
+        "background_moving_count_p50_p95_max": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "success": true
+      },
+      "restored": true,
+      "final_stop_confirmed": true
+    }
+  ],
+  "actual_occlusion": {
+    "scope": "POST_RUN_REAL_SPAWNED_OCCLUDER_AND_RAW_C_SOURCE_STAMPS",
+    "before_id": "f8c9f8e83ba644ec8a3d6476669c4cd4:1",
+    "after_id": "f8c9f8e83ba644ec8a3d6476669c4cd4:1",
+    "same_id": true,
+    "physical_occlusion_event": {
+      "actor": {
+        "id": {
+          "value": "c_occluder_1795115282004501100"
+        },
+        "object_type": "OBJECT_TYPE_VEHICLE"
+      },
+      "spawn_t_s": 4.058006998995552,
+      "reply": {
+        "status": "STATUS_CODE_SUCCESS",
+        "description": "SUCCESS",
+        "custom_message": "c_occluder_1795115282004501100"
+      },
+      "destroy": {
+        "status": "STATUS_CODE_SUCCESS",
+        "description": "Success"
+      },
+      "destroy_t_s": 4.784356343996478
+    },
+    "missed_new_source_frames": 5,
+    "observation_timestamp_not_refreshed": true,
+    "missed_duration_s": 0.40660300200397614,
+    "confidence_reduces": true,
+    "trace": [
+      {
+        "t_s": 3.1111454920028336,
+        "source_ns": 1795115280989000000,
+        "observed_ns": 1795115280989000000,
+        "missed": false,
+        "visibility": "OBSERVED",
+        "confidence": 0.8201859404339346,
+        "position_variance": 0.026077615230027204
+      },
+      {
+        "t_s": 3.2772346139972797,
+        "source_ns": 1795115281098000000,
+        "observed_ns": 1795115281098000000,
+        "missed": false,
+        "visibility": "OBSERVED",
+        "confidence": 0.7903563362602655,
+        "position_variance": 0.026131604797814786
+      },
+      {
+        "t_s": 3.3332827260019258,
+        "source_ns": 1795115281199000000,
+        "observed_ns": 1795115281199000000,
+        "missed": false,
+        "visibility": "OBSERVED",
+        "confidence": 0.8137727424502686,
+        "position_variance": 0.02570067284152551
+      },
+      {
+        "t_s": 3.4966201659990475,
+        "source_ns": 1795115281324000000,
+        "observed_ns": 1795115281324000000,
+        "missed": false,
+        "visibility": "OBSERVED",
+        "confidence": 0.806251082470677,
+        "position_variance": 0.026796950547838982
+      },
+      {
+        "t_s": 3.5550540010008262,
+        "source_ns": 1795115281410000000,
+        "observed_ns": 1795115281410000000,
+        "missed": false,
+        "visibility": "OBSERVED",
+        "confidence": 0.8114200760120274,
+        "position_variance": 0.025294352262123412
+      },
+      {
+        "t_s": 3.7175736280041747,
+        "source_ns": 1795115281524000000,
+        "observed_ns": 1795115281524000000,
+        "missed": false,
+        "visibility": "OBSERVED",
+        "confidence": 0.8082760279336234,
+        "position_variance": 0.025866702211544204
+      },
+      {
+        "t_s": 3.780324018007377,
+        "source_ns": 1795115281625000000,
+        "observed_ns": 1795115281625000000,
+        "missed": false,
+        "visibility": "OBSERVED",
+        "confidence": 0.8097152123462623,
+        "position_variance": 0.025526158552667964
+      },
+      {
+        "t_s": 3.8871081410034094,
+        "source_ns": 1795115281725000000,
+        "observed_ns": 1795115281725000000,
+        "missed": false,
+        "visibility": "OBSERVED",
+        "confidence": 0.8103672167182824,
+        "position_variance": 0.02522576536087467
+      },
+      {
+        "t_s": 3.9981647670065286,
+        "source_ns": 1795115281825000000,
+        "observed_ns": 1795115281825000000,
+        "missed": false,
+        "visibility": "OBSERVED",
+        "confidence": 0.8108076477441012,
+        "position_variance": 0.02500815660800211
+      },
+      {
+        "t_s": 4.4355201099970145,
+        "source_ns": 1795115282272000000,
+        "observed_ns": 1795115281951000000,
+        "missed": true,
+        "visibility": "LIKELY_OCCLUDED",
+        "confidence": 0.5754360795384028,
+        "position_variance": 0.07059507931917341
+      },
+      {
+        "t_s": 4.555692360998364,
+        "source_ns": 1795115282399000000,
+        "observed_ns": 1795115281951000000,
+        "missed": true,
+        "visibility": "LIKELY_OCCLUDED",
+        "confidence": 0.4932188084355336,
+        "position_variance": 0.09986445804163145
+      },
+      {
+        "t_s": 4.664214229007484,
+        "source_ns": 1795115282509000000,
+        "observed_ns": 1795115281951000000,
+        "missed": true,
+        "visibility": "LIKELY_OCCLUDED",
+        "confidence": 0.4270034034089381,
+        "position_variance": 0.13189291966931513
+      },
+      {
+        "t_s": 4.784356343996478,
+        "source_ns": 1795115282612000000,
+        "observed_ns": 1795115281951000000,
+        "missed": true,
+        "visibility": "LIKELY_OCCLUDED",
+        "confidence": 0.37975333619191703,
+        "position_variance": 0.16812304746472959
+      },
+      {
+        "t_s": 4.842123112000991,
+        "source_ns": 1795115282713000000,
+        "observed_ns": 1795115281951000000,
+        "missed": true,
+        "visibility": "LIKELY_OCCLUDED",
+        "confidence": 0.3447596703741847,
+        "position_variance": 0.21001106189415697
+      },
+      {
+        "t_s": 4.957315018007648,
+        "source_ns": 1795115282829000000,
+        "observed_ns": 1795115282829000000,
+        "missed": false,
+        "visibility": "OBSERVED",
+        "confidence": 0.7557839743901624,
+        "position_variance": 0.06727964465974293
+      },
+      {
+        "t_s": 5.134280027006753,
+        "source_ns": 1795115282940000000,
+        "observed_ns": 1795115282940000000,
+        "missed": false,
+        "visibility": "OBSERVED",
+        "confidence": 0.7801296132125338,
+        "position_variance": 0.04350630741112551
+      },
+      {
+        "t_s": 5.188576433996786,
+        "source_ns": 1795115283040000000,
+        "observed_ns": 1795115283040000000,
+        "missed": false,
+        "visibility": "OBSERVED",
+        "confidence": 0.7972272359316738,
+        "position_variance": 0.03376188176729448
+      },
+      {
+        "t_s": 5.311089492999599,
+        "source_ns": 1795115283158000000,
+        "observed_ns": 1795115283158000000,
+        "missed": false,
+        "visibility": "OBSERVED",
+        "confidence": 0.8054948789531375,
+        "position_variance": 0.029967401249595717
+      },
+      {
+        "t_s": 5.431052376006846,
+        "source_ns": 1795115283258000000,
+        "observed_ns": 1795115283258000000,
+        "missed": false,
+        "visibility": "OBSERVED",
+        "confidence": 0.8117915759812018,
+        "position_variance": 0.02732070231061274
+      },
+      {
+        "t_s": 5.542729085005703,
+        "source_ns": 1795115283384000000,
+        "observed_ns": 1795115283384000000,
+        "missed": false,
+        "visibility": "OBSERVED",
+        "confidence": 0.8137140009815492,
+        "position_variance": 0.027469790310488424
+      },
+      {
+        "t_s": 5.657634125003824,
+        "source_ns": 1795115283485000000,
+        "observed_ns": 1795115283485000000,
+        "missed": false,
+        "visibility": "OBSERVED",
+        "confidence": 0.8165689197452679,
+        "position_variance": 0.026510808486056886
+      },
+      {
+        "t_s": 5.792699697005446,
+        "source_ns": 1795115283602000000,
+        "observed_ns": 1795115283602000000,
+        "missed": false,
+        "visibility": "OBSERVED",
+        "confidence": 0.7911560173243911,
+        "position_variance": 0.02697851526818311
+      },
+      {
+        "t_s": 5.848449366996647,
+        "source_ns": 1795115283710000000,
+        "observed_ns": 1795115283710000000,
+        "missed": false,
+        "visibility": "OBSERVED",
+        "confidence": 0.8060261315859849,
+        "position_variance": 0.02685111489441715
+      },
+      {
+        "t_s": 5.962260989996139,
+        "source_ns": 1795115283812000000,
+        "observed_ns": 1795115283812000000,
+        "missed": false,
+        "visibility": "OBSERVED",
+        "confidence": 0.7990649240744916,
+        "position_variance": 0.026411324503871687
+      },
+      {
+        "t_s": 6.074040603009053,
+        "source_ns": 1795115283913000000,
+        "observed_ns": 1795115283913000000,
+        "missed": false,
+        "visibility": "OBSERVED",
+        "confidence": 0.8005551063290217,
+        "position_variance": 0.026027860019166935
+      },
+      {
+        "t_s": 6.185601076998864,
+        "source_ns": 1795115284028000000,
+        "observed_ns": 1795115284028000000,
+        "missed": false,
+        "visibility": "OBSERVED",
+        "confidence": 0.8046505573516815,
+        "position_variance": 0.02656143271076865
+      },
+      {
+        "t_s": 6.295366571008344,
+        "source_ns": 1795115284139000000,
+        "observed_ns": 1795115284139000000,
+        "missed": false,
+        "visibility": "OBSERVED",
+        "confidence": 0.8124572433086713,
+        "position_variance": 0.02666238044491103
+      },
+      {
+        "t_s": 6.412312938002287,
+        "source_ns": 1795115284240000000,
+        "observed_ns": 1795115284240000000,
+        "missed": false,
+        "visibility": "OBSERVED",
+        "confidence": 0.8065000522086554,
+        "position_variance": 0.02610861731477164
+      },
+      {
+        "t_s": 6.465191770999809,
+        "source_ns": 1795115284340000000,
+        "observed_ns": 1795115284340000000,
+        "missed": false,
+        "visibility": "OBSERVED",
+        "confidence": 0.8142844425762891,
+        "position_variance": 0.025643181369356338
+      },
+      {
+        "t_s": 6.63596494399826,
+        "source_ns": 1795115284467000000,
+        "observed_ns": 1795115284467000000,
+        "missed": false,
+        "visibility": "OBSERVED",
+        "confidence": 0.8060531942788939,
+        "position_variance": 0.026879250507892007
+      }
+    ],
+    "success": true
+  },
+  "actual_expiry": {
+    "scope": "POST_RUN_SENSOR_ROI_EXIT_EXPIRY_NO_ACTOR_FEEDBACK",
+    "identity": "bb20a1c924204b6dbda4c18e0ae4995e:1",
+    "last_observed_ns": 1795114992389000000,
+    "missed_samples": 17,
+    "retained_age_max_s": 1.162300256,
+    "stale_samples": 9,
+    "stale_usable_count": 0,
+    "after_expiry_samples": 74,
+    "remaining_after_1_3_s": 0,
+    "source_observation_unchanged": true,
+    "success": true
+  },
+  "selected_regressions": {
+    "passed": 621,
+    "failures": 0,
+    "errors": 0,
+    "xml": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c-final-regression.xml"
+  },
+  "build": {
+    "packages": [
+      "edgenode_dynamic_tracking",
+      "edgenode_bringup"
+    ],
+    "log": "/workspace/local_data/s4_c_dynamic_tracking_20261119/c-v6-build.log"
+  },
+  "scope": {
+    "qualified_range_m": 50,
+    "qualification_ego_drive_kmh": 5,
+    "qualification_npc_kmh": [
+      0,
+      10,
+      15
+    ],
+    "passenger_length_prior_m": 4.93,
+    "passenger_width_prior_m": 2.12,
+    "source_limit_s": 0.6,
+    "track_retention_limit_s": 1.2,
+    "truth_input_to_tracking": false,
+    "static_search_enabled": false
+  },
+  "unqualified_initial_runs": [
+    "c_v1_stopped_npc10",
+    "c_v1_moving_npc10",
+    "c_v3_parked_adjacent_pass"
+  ],
+  "completion_commit_receipt": "/workspace/local_data/s4_c_dynamic_tracking_20261119/final-c-package/commit-receipt.json"
+}
